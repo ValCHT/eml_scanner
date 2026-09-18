@@ -1,0 +1,53 @@
+# configs/tools.yaml — tool adapter configuration (docs/contracts.md §2.7).
+# Exactly these seven sections; unrecognized values are forbidden.
+virustotal:
+  enabled: true
+  max_targets: 4
+  phase_timeout_s: 20
+  requests_per_minute: 4
+  requests_per_day: 500
+opencti:
+  enabled: true
+  max_targets: 4
+  first: 10
+  phase_timeout_s: 20
+urlscan:
+  enabled: true
+  max_urls: 1
+  visibility_real: private
+  visibility_fixture: private
+  first_poll_s: 10
+  poll_interval_s: 5
+  phase_timeout_s: 45
+rag:
+  # Globally piloted by RAG_ENABLED (default false); inactive before G7-A.
+  enabled: false
+  max_cases: 150
+  k: 3
+  max_distance: 0.40
+  max_case_chars: 1200
+  embedding_model: all-MiniLM-L6-v2
+vision:
+  # Globally piloted by MODEL_SUPPORTS_VISION (default false); QR decode obeys
+  # QR_DECODE_ENABLED separately.
+  enabled: false
+  max_images: 4
+  max_image_bytes: 4194304
+  max_total_bytes: 8388608
+  max_pixels: 16000000
+egress:
+  # Authorizations are operator configuration decisions; no LLM inference can add them.
+  allow_real_urls: false
+  approved_services: []
+  approved_exact_url_hosts: []
+  trusted_authserv_ids: []
+  shared_hosts: []
+  trusted_cti_sources: []
+parse_limits:
+  # Exact figures of docs/architecture.md §1.5.
+  max_eml_bytes: 26214400        # 25 MiB
+  max_mime_parts: 200
+  max_mime_depth: 20
+  max_attachments: 20
+  max_decoded_bytes_per_part: 20971520   # 20 MiB
+  max_decoded_bytes_total: 41943040      # 40 MiB

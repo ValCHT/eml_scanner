@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soc-email-triage"
+version = "0.1.0"
+description = "SOC Email Triage POC (V1.2) - squelette G0: configuration et contrats"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.2,<3",
+    "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+]
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "g0: gate G0 non-live tests",
+    "g1: gate G1 non-live tests",
+    "g2: gate G2 tests (live when combined with --live)",
+    "g3: gate G3 non-live tests",
+    "g4: gate G4 tests (live when combined with --live)",
+    "g5: gate G5 tests (live when combined with --live)",
+    "g6: gate G6 non-live tests",
+    "g7a: gate G7-A tests",
+    "g7b: gate G7-B tests",
+    "live: tests calling real external services; run explicitly with --live",
+]
+addopts = "-m 'not live'"
