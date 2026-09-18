@@ -4,12 +4,13 @@
 All secrets are ``SecretStr | None`` and are excluded from the public dump
 (``Settings.public_dump``). No secret value is ever printed or logged.
 
-Authorized derogation (user request, TICKET-01): the runtime LLM default is
-``claude-haiku-4-5`` on the OpenAI-compatible endpoint injected in the
-sandbox instead of the Orange Luna proxy. Credentials are never hardcoded:
-``load_settings`` maps the injected ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``
-environment variables onto the canonical ``LITELLM_*`` fields when the
-latter are absent.
+Sandbox-only derogation (TICKET-01, user request): inside the Genspark
+sandbox the injected OpenAI-compatible credentials (``OPENAI_API_KEY`` /
+``OPENAI_BASE_URL`` pointing at the Genspark LLM proxy) are mapped onto the
+canonical ``LITELLM_*`` fields when the latter are absent, and the model is
+``claude-haiku-4-5`` there. This is strictly an environment-scoped mapping:
+the universal project defaults remain the V1.2 Luna values so behavior on
+macOS/Linux/Windows and the G2/G6 experiments are never silently altered.
 """
 
 from __future__ import annotations
@@ -46,6 +47,12 @@ SourceProfile = Literal["fixture", "public_corpus", "private_authorized"]
 #: Secret-bearing fields; never exposed in the public dump.
 _SECRET_FIELDS = ("LITELLM_API_KEY", "VT_API_KEY", "OPENCTI_API_KEY", "URLSCAN_API_KEY")
 
+#: Hosts identifying the Genspark LLM proxy injected in the sandbox. The
+#: ``OPENAI_*`` -> ``LITELLM_*`` mapping only applies for these hosts, so the
+#: derogation is scoped to the Genspark environment and never becomes a
+#: universal default.
+_GENSPARK_LLM_HOSTS = ("www.genspark.ai", "genspark.ai")
+
 
 class Settings(BaseSettings):
     """Canonical settings; secrets are ``SecretStr | None`` (§2.7)."""
@@ -56,9 +63,9 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
-    # --- Runtime LLM (derogation: claude-haiku-4-5 instead of Luna) ---------
-    LITELLM_CHAT_URL: str = "https://www.genspark.ai/api/llm_proxy/v1/chat/completions"
-    LITELLM_MODEL: str = "claude-haiku-4-5"
+    # --- Luna / LLM proxy (canonical V1.2 defaults) --------------------------
+    LITELLM_CHAT_URL: str = "https://management.llmproxy.ai.orange/chat/completions"
+    LITELLM_MODEL: str = "openai/gpt-5.6-luna"
     LITELLM_API_KEY: SecretStr | None = None
 
     # --- Tools credentials / switches ---------------------------------------
@@ -144,21 +151,34 @@ def load_settings(env_file: Path | None = None) -> Settings:
     ``env_file`` may be ``None`` (environment only) or a path to a dotenv
     file. Secrets stay ``None`` when absent; no fallback value is invented.
 
-    Sandbox credential mapping: when the canonical ``LITELLM_*`` variables
-    are not set, the OpenAI-compatible credentials injected in the sandbox
-    (``OPENAI_API_KEY``, ``OPENAI_BASE_URL``) are used. The key value is
-    only carried inside ``SecretStr`` and never logged.
+    Sandbox credential mapping (environment-scoped derogation): only when the
+    injected ``OPENAI_BASE_URL`` is the Genspark LLM proxy and the canonical
+    ``LITELLM_*`` variables are absent, the sandbox credentials are used and
+    the model is ``claude-haiku-4-5``. The key value is only carried inside
+    ``SecretStr`` and never logged. Outside that environment, the canonical
+    V1.2 Luna defaults always apply.
     """
 
     import os
+    from urllib.parse import urlparse
 
     overrides: dict[str, str] = {}
-    if not os.environ.get("LITELLM_CHAT_URL") and os.environ.get("OPENAI_BASE_URL"):
-        base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+    injected_base = os.environ.get("OPENAI_BASE_URL", "")
+    injected_host = urlparse(injected_base).hostname if injected_base else None
+    if not injected_base or injected_host not in _GENSPARK_LLM_HOSTS:
+        # Not the sanctioned Genspark sandbox environment (no injected
+        # OpenAI-compatible base, or it points elsewhere): the canonical
+        # V1.2 Luna defaults apply and nothing is mapped.
+        return Settings(_env_file=env_file, _env_file_encoding="utf-8")
+
+    if not os.environ.get("LITELLM_CHAT_URL") and injected_base:
+        base = injected_base.rstrip("/")
         if base.endswith("/chat/completions"):
             overrides["LITELLM_CHAT_URL"] = base
         else:
             overrides["LITELLM_CHAT_URL"] = base + "/chat/completions"
+    if not os.environ.get("LITELLM_MODEL"):
+        overrides["LITELLM_MODEL"] = "claude-haiku-4-5"
     if not os.environ.get("LITELLM_API_KEY") and os.environ.get("OPENAI_API_KEY"):
         overrides["LITELLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
 
