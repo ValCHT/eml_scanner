@@ -1,0 +1,16 @@
+# configs/policy.yaml — policy configuration (docs/decisions.md §4.3).
+# Thresholds are only changed on dev, with a config diff and recorded reevaluation.
+version: 1
+auto_min_confidence: 0.97
+auto_min_margin: 0.50
+escalate_malicious_min_confidence: 0.85
+auto_labels:
+  - legitime
+  - spam
+# Table of blocking reason codes (deterministic verifier codes, docs/decisions.md §4.2)
+# and the minimum action they force. No AUTO on their sole absence-of-detection inverse.
+blocked_reason_codes:
+  fabricated_ioc: ESCALATE
+  recipient_as_ioc: ESCALATE
+  verdict_evidence_conflict: ESCALATE
+  confidence_rise_without_new_evidence: REVIEW

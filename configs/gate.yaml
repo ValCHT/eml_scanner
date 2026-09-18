@@ -1,0 +1,8 @@
+# configs/gate.yaml — complexity gate configuration (docs/decisions.md §4.1).
+# BASELINE V0 thresholds: do not optimize before their G6 measurement.
+version: 1
+min_confidence: 0.90
+min_margin: 0.20
+enrich_http_urls: true
+enrich_non_inline_attachments: true
+enrich_on_material_coverage_gap: true
