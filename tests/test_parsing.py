@@ -594,3 +594,135 @@ def test_cid_reference_absent_is_data_only():
     assert link.normalized_value is None  # never resolved, never fetched
     assert link.hostname is None
     assert result.images == []  # no invention of the referenced part
+
+
+# ---------------------------------------------------------------------------
+# SECOND REVIEW — Authentication-Results comments are never observations
+# ---------------------------------------------------------------------------
+
+
+def test_ar_comment_fake_value_never_wins():
+    """A fake identity inside a comment never shadows the real clause value."""
+
+    data = _simple_email(
+        "Authentication-Results: mx.example.org; dkim=pass (header.d=comment.example) "
+        "header.d=signer.example\r\n",
+        "body",
+    )
+    result = parse_bytes(data, "rfc822")
+    dkim = [a for a in result.authentication if a.mechanism == "dkim"]
+    assert len(dkim) == 1
+    assert dkim[0].domain == "signer.example"  # never comment.example
+    assert dkim[0].result == "pass"
+
+
+def test_ar_mechanism_only_in_comment_creates_no_observation():
+    """A mechanism written only inside a comment creates no observation."""
+
+    data = _simple_email(
+        "Authentication-Results: mx.example.org; "
+        "(spf=fail smtp.mailfrom=fake.example) dkim=pass header.d=signer.example\r\n",
+        "body",
+    )
+    result = parse_bytes(data, "rfc822")
+    mechs = {a.mechanism for a in result.authentication}
+    assert "spf" not in mechs  # comment-only mechanism: no observation
+    assert mechs == {"dkim"}
+    dkim = result.authentication[0]
+    assert dkim.domain == "signer.example"
+    assert dkim.domain != "fake.example"
+
+
+def test_ar_multidomain_still_correct_after_comment_strip():
+    """The existing multi-domain behavior survives the comment stripping."""
+
+    data = _simple_email(
+        "Authentication-Results: mx.example.org; spf=pass smtp.mailfrom=envelope.notice.test; "
+        "dkim=pass header.d=signer.notice.test; dmarc=pass header.from=brand.example\r\n",
+        "body",
+    )
+    result = parse_bytes(data, "rfc822")
+    by_mech = {a.mechanism: a for a in result.authentication}
+    assert by_mech["spf"].domain == "envelope.notice.test"
+    assert by_mech["dkim"].domain == "signer.notice.test"
+    assert by_mech["dmarc"].domain == "brand.example"
+    assert all(a.trust == "reported_unverified" for a in result.authentication)
+
+
+# ---------------------------------------------------------------------------
+# SECOND REVIEW — manifest completeness (G2-ready, harness-only metadata)
+# ---------------------------------------------------------------------------
+
+_TAXONOMY = {"spear_phishing", "phishing", "fraude", "menace", "spam", "legitime"}
+
+
+def test_manifest_entries_carry_g2_metadata():
+    """Each of the 14 entries carries scenario, design_label (fixed taxonomy),
+    content anchors, part expectations and constraints; harness-only, never
+    sent to the LLM."""
+
+    assert len(MANIFEST["fixtures"]) == 14
+    for entry in MANIFEST["fixtures"]:
+        assert entry["design_label"] in _TAXONOMY, entry["file"]
+        assert entry["scenario"].strip(), entry["file"]
+        anchors = entry["content_anchors"]
+        assert anchors["subject"], entry["file"]
+        # Useful-content expectations for G2 anti-wiring checks: a textual
+        # excerpt or a declared alternative expected content.
+        assert (
+            anchors.get("text_plain_excerpt") or anchors.get("html_excerpt") or anchors.get("expected_urls")
+        ), entry["file"]
+        assert entry["part_expectations"], entry["file"]
+        assert entry["constraints"], entry["file"]
+        assert "NEVER sent to the LLM" in entry["harness_only"]
+
+
+def test_manifest_content_anchors_match_parsed_fixtures(limits):
+    """Declared anchors are consistent with the real fixture bytes."""
+
+    for entry in MANIFEST["fixtures"]:
+        result = parse_email(FIXTURES / entry["file"], limits)
+        assert isinstance(result, ParsedEmail)
+        anchors = entry["content_anchors"]
+        if anchors.get("text_plain_excerpt"):
+            all_text = "".join(p.text for p in result.text_parts)
+            assert anchors["text_plain_excerpt"] in all_text, entry["file"]
+        if anchors.get("html_excerpt"):
+            all_html = "".join(p.text for p in result.html_parts)
+            assert anchors["html_excerpt"] in all_html, entry["file"]
+        if anchors.get("subject"):
+            assert result.subject == anchors["subject"] or result.subject in anchors["subject"], entry["file"]
+
+
+def test_manifest_technical_expectations_unchanged():
+    """The pre-existing technical expectations (links, attachments, hashes,
+    auth) keep their meaning: anchors are additive metadata only."""
+
+    for entry in MANIFEST["fixtures"]:
+        expect = entry["expect"]
+        # Original keys untouched by the enrichment (parsable is entry-level).
+        assert "parsable" in entry and "has_full_headers" in expect, entry["file"]
+        # Part expectations stay consistent with the original expect block.
+        if expect.get("images"):
+            cids = {i["content_id"] for i in expect["images"]}
+            declared = {p["content_id"] for p in entry["part_expectations"] if "content_id" in p}
+            assert declared == cids, entry["file"]
+        if expect.get("attachments"):
+            names = {a["filename"] for a in expect["attachments"] if a.get("filename")}
+            declared = {p["filename"] for p in entry["part_expectations"] if "filename" in p}
+            assert declared == names, entry["file"]
+
+
+def test_transport_ipv6_from_received():
+    """Bracketed IPv6 in Received becomes a transport_ip observable (IPv6)."""
+
+    data = (
+        b"From: a@b.test\r\nTo: c@d.test\r\nSubject: t\r\nDate: Tue, 16 Sep 2025 09:15:00 +0000\r\n"
+        b"Message-ID: <mv6@fixture.test>\r\nMIME-Version: 1.0\r\n"
+        b"Received: from mailer (2001:db8::10) by mx with IPv6; Tue, 16 Sep 2025 09:15:00 +0000\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n\r\nb'
+    )
+    result = parse_bytes(data, "rfc822")
+    v6 = [o for o in result.observables if o.type == "ipv6"]
+    assert [o.normalized_value for o in v6] == ["2001:db8::10"]  # documentation range
+    assert v6[0].roles == ["transport_ip"]

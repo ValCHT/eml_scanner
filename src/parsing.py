@@ -609,8 +609,8 @@ _MECH_RE = re.compile(r"\b(spf|dkim|dmarc)\s*[=:]\s*([A-Za-z0-9._-]+)", re.IGNOR
 #: against the envelope (smtp.mailfrom, else smtp.helo), DKIM against the
 #: signing domain (header.d), DMARC against the visible From domain
 #: (header.from). Each mechanism is matched ONLY within its own clause
-#: (up to the next ";"), never on the whole header. Parenthesized content is
-#: an RFC 8601 comment and is never taken as an identity.
+#: (up to the next ";"), never on the whole header, and NEVER inside a
+#: parenthesized comment (stripped before any search).
 _MECH_IDENTITY_RES: dict[str, tuple[re.Pattern[str], ...]] = {
     "spf": (
         re.compile(r"\bsmtp\.mailfrom\s*[=:]\s*([^\s;]+)", re.IGNORECASE),
@@ -619,6 +619,28 @@ _MECH_IDENTITY_RES: dict[str, tuple[re.Pattern[str], ...]] = {
     "dkim": (re.compile(r"\bheader\.d\s*[=:]\s*([^\s;]+)", re.IGNORECASE),),
     "dmarc": (re.compile(r"\bheader\.from\s*[=:]\s*([^\s;]+)", re.IGNORECASE),),
 }
+
+
+def _strip_ar_comments(value: str) -> str:
+    """Remove RFC 8601 parenthesized comments from an Authentication-Results
+    value (bounded: one nesting level, adequate for POC headers).
+
+    Deterministic; no dependency. Comment content (e.g. a fake
+    ``(spf=fail smtp.mailfrom=fake.example)``) can never create or alter an
+    observation. Unterminated comments drop the rest of the value, which the
+    clause scoping treats as absent data rather than invented identity.
+    """
+
+    out: list[str] = []
+    depth = 0
+    for ch in value:
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth > 0:
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
 
 
 def _mech_identity(mech: str, value: str, mech_start: int) -> str | None:
@@ -650,15 +672,18 @@ def _parse_authentication(headers: list[tuple[str, str]]) -> list[AuthObservatio
     for index, (name, value) in enumerate(headers):
         if name.lower() != "authentication-results" or not isinstance(value, str):
             continue
-        authserv = value.split(";", 1)[0].strip() or None
+        # Comments first: nothing inside parentheses may create or alter an
+        # observation (e.g. a fake "(spf=fail smtp.mailfrom=fake.example)").
+        clean = _strip_ar_comments(value)
+        authserv = clean.split(";", 1)[0].strip() or None
         seen: set[str] = set()
-        for mech_m in _MECH_RE.finditer(value):
+        for mech_m in _MECH_RE.finditer(clean):
             mech = mech_m.group(1).lower()
             if mech in seen:
                 continue
             seen.add(mech)
             result = mech_m.group(2).lower()
-            domain = _mech_identity(mech, value, mech_m.start())
+            domain = _mech_identity(mech, clean, mech_m.start())
             out.append(
                 AuthObservation(
                     mechanism=mech,  # type: ignore[arg-type]
@@ -690,7 +715,12 @@ def _domain_of_address(addr: str) -> str | None:
 #: and other non-global ranges (architecture §1.5: private/non-discriminating
 #: transport IPs are excluded from lookups). Documentation ranges (RFC 5737
 #: TEST-NET) ARE kept: fixtures and examples use them deliberately.
-_TRANSPORT_DOC_NETS = ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+_TRANSPORT_DOC_NETS = (
+    "192.0.2.0/24",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "2001:db8::/32",  # RFC 3849 IPv6 documentation
+)
 
 
 def _is_transport_ip(candidate: str) -> bool:
@@ -707,16 +737,19 @@ def _is_transport_ip(candidate: str) -> bool:
 
 #: An IPv4 embedded in a Received header (leading "from" host may carry one).
 _IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+#: A bracketed IPv6 in a Received header (RFC 5321 form, e.g. [2001:db8::1]).
+_IPV6_RE = re.compile(r"\b([Ii][Pp][Vv]6:)?\[?([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})\]?")
 
 
-def _transport_ips(parsed: ParsedEmail) -> list[tuple[str, int]]:
+def _transport_ips(parsed: ParsedEmail) -> list[tuple[str, str, int]]:
     """Documentation/public IPs carried by Received headers, in header order.
 
-    Private, loopback and link-local IPs are never recorded. No DNS, no
-    discrimination: the ``transport_ip`` role is data, not an accusation.
+    IPv4 and bracketed IPv6 (RFC 5321 form). Private, loopback and link-local
+    addresses are never recorded. No DNS, no discrimination: the
+    ``transport_ip`` role is data, not an accusation.
     """
 
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, str, int]] = []
     seen: set[str] = set()
     for header in parsed.headers:
         if header.name.lower() != "received":
@@ -726,7 +759,13 @@ def _transport_ips(parsed: ParsedEmail) -> list[tuple[str, int]]:
             if ip in seen or not _is_transport_ip(ip):
                 continue
             seen.add(ip)
-            out.append((ip, header.index))
+            out.append((ip, "ipv4", header.index))
+        for m in _IPV6_RE.finditer(header.raw_value):
+            candidate = m.group(2)
+            if candidate in seen or not _is_transport_ip(candidate):
+                continue
+            seen.add(candidate)
+            out.append((candidate, "ipv6", header.index))
     return out
 
 
@@ -781,8 +820,8 @@ def _build_observables(parsed: ParsedEmail) -> list[Observable]:
             _add(domain, domain, "domain", [role], ref)
 
     # --- transport IPs from Received (public/documentation only).
-    for ip, header_index in _transport_ips(parsed):
-        _add(ip, ip, "ipv4", ["transport_ip"], f"header:{header_index}:received")
+    for ip, obs_type, header_index in _transport_ips(parsed):
+        _add(ip, ip, obs_type, ["transport_ip"], f"header:{header_index}:received")
 
     if parsed.message_id:
         _add(parsed.message_id, parsed.message_id.strip(), "message_id", [], "headers:message-id")
