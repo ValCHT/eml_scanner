@@ -346,3 +346,251 @@ def test_recipients_are_not_attack_iocs(limits):
     assert sender is not None
     assert "sender" in sender.roles
     assert "recipient" not in sender.roles
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 1 — decoding limits are real limits
+# ---------------------------------------------------------------------------
+
+
+def _simple_email(body_headers: str, body: str) -> bytes:
+    return (
+        b"From: a@b.test\r\nTo: c@d.test\r\nSubject: t\r\nDate: Tue, 16 Sep 2025 09:15:00 +0000\r\n"
+        b"Message-ID: <mx@fixture.test>\r\nMIME-Version: 1.0\r\n" + body_headers.encode("utf-8") + b"\r\n" + body.encode("utf-8")
+    )
+
+
+def test_text_plain_over_per_part_limit_not_kept():
+    body = "x" * 500 + " visitez https://evil.example.test/now"
+    data = _simple_email('Content-Type: text/plain; charset="utf-8"\r\n', body)
+    limits = ParseLimits(max_decoded_bytes_per_part=100)
+    result = parse_bytes(data, "rfc822", limits)
+    assert result.text_parts == []  # content NOT kept as a normal full part
+    assert "max_decoded_bytes_per_part" in result.content_limits
+    assert result.links == []  # no URL extraction from dropped content
+    assert any("not kept" in d for d in result.defects)
+
+
+def test_text_html_over_per_part_limit_not_kept():
+    body = "<p>" + "y" * 500 + '</p><a href="https://evil.example.test/x">l</a>'
+    data = _simple_email('Content-Type: text/html; charset="utf-8"\r\n', body)
+    limits = ParseLimits(max_decoded_bytes_per_part=100)
+    result = parse_bytes(data, "rfc822", limits)
+    assert result.html_parts == []
+    assert "max_decoded_bytes_per_part" in result.content_limits
+    assert result.links == []  # no link extraction on dropped content
+
+
+def test_image_over_per_part_limit_is_over_limit_without_full_hash():
+    import base64
+
+    payload = bytes(200)  # 200 decoded bytes > 64-byte limit
+    data = _simple_email(
+        'Content-Type: multipart/related; boundary="Q"\r\n\r\n--Q\r\n'
+        'Content-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n'
+        'Content-Disposition: inline\r\nContent-ID: <big1>\r\n\r\n'
+        + base64.encodebytes(payload).replace(b"\n", b"\r\n").decode("ascii")
+        + "\r\n--Q--\r\n",
+        "",
+    )
+    limits = ParseLimits(max_decoded_bytes_per_part=64)
+    result = parse_bytes(data, "rfc822", limits)
+    assert len(result.images) == 1
+    img = result.images[0]
+    assert img.status == "over_limit"  # never presented as accepted metadata_only
+    assert img.sha256 == ""  # no full-content hash as if accepted
+
+
+def test_total_decoded_budget_stops_decoding():
+    head = (
+        b"From: a@b.test\r\nTo: c@d.test\r\nSubject: t\r\nDate: Tue, 16 Sep 2025 09:15:00 +0000\r\n"
+        b"Message-ID: <mt@fixture.test>\r\nMIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/mixed; boundary="TT"\r\n\r\n'
+    )
+    part = b"--TT\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\n" + b"z" * 80 + b"\r\n"
+    raw = head + part + part + b"--TT--\r\n"
+    limits = ParseLimits(max_decoded_bytes_per_part=100, max_decoded_bytes_total=150)
+    result = parse_bytes(raw, "rfc822", limits)
+    # First part fits (80 <= 150); second pushes the total over: decoding stops.
+    assert "max_decoded_bytes_total" in result.content_limits
+    assert len(result.text_parts) == 1
+    assert any("over limit" in d for d in result.defects)
+
+
+def test_content_limits_deterministic():
+    body = "x" * 500
+    data = _simple_email('Content-Type: text/plain; charset="utf-8"\r\n', body)
+    limits = ParseLimits(max_decoded_bytes_per_part=100)
+    a = parse_bytes(data, "rfc822", limits)
+    b = parse_bytes(data, "rfc822", limits)
+    assert a.content_limits == b.content_limits
+    assert a.model_dump_json() == b.model_dump_json()
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 2 — Authentication-Results identities
+# ---------------------------------------------------------------------------
+
+
+def test_auth_mechanisms_match_their_own_identity():
+    data = _simple_email(
+        "Authentication-Results: mx.example.org; spf=pass smtp.mailfrom=envelope.notice.test; "
+        "dkim=pass header.d=signer.notice.test; dmarc=pass header.from=brand.example\r\n",
+        "body",
+    )
+    result = parse_bytes(data, "rfc822")
+    by_mech = {a.mechanism: a for a in result.authentication}
+    assert by_mech["spf"].domain == "envelope.notice.test"
+    assert by_mech["dkim"].domain == "signer.notice.test"
+    assert by_mech["dmarc"].domain == "brand.example"
+    assert all(a.trust == "reported_unverified" for a in result.authentication)
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 3 — observables of architecture §1.5
+# ---------------------------------------------------------------------------
+
+
+def test_sender_reply_to_return_path_domains(limits):
+    result = parse_email(FIXTURES / "bec_fraud.eml", limits)
+    domains = {o.normalized_value: o for o in result.observables if o.type == "domain"}
+    assert "entreprise.example" in domains  # From (and Return-Path here)
+    assert "sender" in domains["entreprise.example"].roles
+    assert "consultant.example.net" in domains  # Reply-To domain
+    assert domains["consultant.example.net"].roles == ["reply_to"]
+
+
+def test_displayed_brand_on_phishing_simple(limits):
+    result = parse_email(FIXTURES / "phishing_simple.eml", limits)
+    brands = [o for o in result.observables if "displayed_brand" in o.roles]
+    assert len(brands) == 1
+    assert brands[0].normalized_value == "mail.example.com"
+    # displayed_brand is a displayed fact, never a maliciousness verdict
+    assert brands[0].category is None
+    assert brands[0].source_ref.endswith(":display")
+
+
+def test_transport_ip_from_received(limits):
+    result = parse_email(FIXTURES / "phishing_simple.eml", limits)
+    ips = [o for o in result.observables if o.type == "ipv4"]
+    assert [ip.value for ip in ips] == ["198.51.100.10"]  # documentation IP
+    assert ips[0].roles == ["transport_ip"]
+    assert ":received" in ips[0].source_ref
+
+
+def test_recipient_keeps_recipient_role_and_cc_source_ref():
+    data = _simple_email('Content-Type: text/plain; charset="utf-8"\r\nCc: copie@example.org\r\n', "b")
+    result = parse_bytes(data, "rfc822")
+    emails = {o.normalized_value: o for o in result.observables if o.type == "email"}
+    assert emails["copie@example.org"].source_ref == "headers:cc"  # never headers:to
+    assert emails["copie@example.org"].roles == ["recipient"]
+
+
+def test_no_invented_observable_when_source_absent():
+    # Built without the helper: it always carries Message-ID, which this test
+    # requires absent, to prove nothing is invented from missing data.
+    data = (
+        b"From: a@b.test\r\nTo: c@d.test\r\nSubject: t\r\nDate: Tue, 16 Sep 2025 09:15:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n\r\nb'
+    )
+    result = parse_bytes(data, "rfc822")
+    types = {o.type for o in result.observables}
+    assert "ipv4" not in types  # no Received header -> no IP invented
+    # Domains only from addresses actually present (b.test from From), never invented.
+    domains = {o.normalized_value for o in result.observables if o.type == "domain"}
+    assert domains == {"b.test"}
+    assert not any("reply_to" in o.roles for o in result.observables)
+    assert result.message_id is None
+    assert not any(o.type == "message_id" for o in result.observables)
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 4 — normative robustness matrix
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_fixture_preserves_stdlib_defects(limits):
+    result = parse_email(FIXTURES / "malformed_reasonable.eml", limits)
+    assert isinstance(result, ParsedEmail)
+    assert any("CloseBoundaryNotFoundDefect" in d for d in result.defects)  # truncation kept
+    assert "FA-2025-114" in result.text_parts[0].text  # useful body still readable
+    assert result.attachments[0].decode_status == "error"
+
+
+def test_zero_byte_attachment():
+    data = _simple_email(
+        'Content-Type: multipart/mixed; boundary="Z"\r\n\r\n--Z\r\n'
+        'Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="empty.bin"\r\n\r\n'
+        "\r\n--Z--\r\n",
+        "",
+    )
+    result = parse_bytes(data, "rfc822")
+    att = result.attachments[0]
+    assert att.decoded_size_bytes == 0
+    assert att.decode_status == "ok"
+    import hashlib
+
+    assert att.sha256 == hashlib.sha256(b"").hexdigest()
+
+
+def test_embedded_message_bounded():
+    inner = (
+        b"From: inner@x.test\r\nSubject: inner\r\nMIME-Version: 1.0\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n\r\ncorps interne'
+    )
+    data = _simple_email(
+        'Content-Type: multipart/mixed; boundary="E"\r\n\r\n--E\r\n'
+        'Content-Type: message/rfc822\r\n\r\n' + inner.decode("latin-1") + "\r\n--E--\r\n",
+        "",
+    )
+    result = parse_bytes(data, "rfc822")
+    assert any("embedded message" in d for d in result.defects)
+    assert any("corps interne" in p.text for p in result.text_parts)  # walked, bounded
+
+
+def test_same_payload_two_encodings_same_decoded_hash():
+    import base64 as b64mod
+    import hashlib
+
+    content = "Facture déjà payée.".encode("utf-8")
+    b64_body = b64mod.encodebytes(content).replace(b"\n", b"\r\n").rstrip(b"\r\n").decode("ascii")
+    qp_body = "Facture d=C3=A9j=C3=A0 pay=C3=A9e."
+    data = _simple_email(
+        'Content-Type: multipart/mixed; boundary="W"\r\n\r\n--W\r\n'
+        'Content-Type: text/plain; charset="utf-8"\r\nContent-Transfer-Encoding: base64\r\n'
+        'Content-Disposition: attachment; filename="a.txt"\r\n\r\n' + b64_body + "\r\n--W\r\n"
+        'Content-Type: text/plain; charset="utf-8"\r\nContent-Transfer-Encoding: quoted-printable\r\n'
+        'Content-Disposition: attachment; filename="b.txt"\r\n\r\n' + qp_body
+        + "\r\n--W--\r\n",
+        "",
+    )
+    result = parse_bytes(data, "rfc822")
+    hashes = {a.sha256 for a in result.attachments}
+    assert len(result.attachments) == 2
+    assert hashes == {hashlib.sha256(content).hexdigest()}  # identical decoded hash
+
+
+def test_idna_url_hostname():
+    data = _simple_email(
+        'Content-Type: text/html; charset="utf-8"\r\n\r\n'
+        '<a href="https://b\u00fccher.example.test/a?b=1">l</a>',
+        "",
+    )
+    result = parse_bytes(data, "rfc822")
+    link = result.links[0]
+    assert link.hostname == "xn--bcher-kva.example.test"  # IDNA, lowercased
+    assert "xn--bcher-kva.example.test" in (link.normalized_value or "")
+
+
+def test_cid_reference_absent_is_data_only():
+    data = _simple_email(
+        'Content-Type: text/html; charset="utf-8"\r\n\r\n<img src="cid:absent1" alt="">',
+        "",
+    )
+    result = parse_bytes(data, "rfc822")
+    link = result.links[0]
+    assert link.raw_value == "cid:absent1"
+    assert link.normalized_value is None  # never resolved, never fetched
+    assert link.hostname is None
+    assert result.images == []  # no invention of the referenced part

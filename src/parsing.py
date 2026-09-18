@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import ipaddress
 import json
 import re
 from email import message_from_bytes
@@ -316,10 +317,11 @@ def _part_id(index: int) -> str:
     return f"part_{index:04d}"
 
 
-def _count_decoded(state: _WalkState, my_id: str, size: int) -> None:
-    if size > state.limits.max_decoded_bytes_per_part:
-        state.limits_hit.append(_LIMIT_DECODED_PART)
-        state.defects.append(f"{my_id}: decoded part over per-part limit")
+def _count_decoded(state: _WalkState, size: int) -> None:
+    """Charge the decoded-bytes TOTAL budget only; a part over the per-part
+    limit is handled by its caller before reaching here. Exceeding the total
+    budget really stops the walk: no further part is decoded."""
+
     state.decoded_total += size
     if state.decoded_total > state.limits.max_decoded_bytes_total:
         state.limits_hit.append(_LIMIT_DECODED_TOTAL)
@@ -348,6 +350,22 @@ def _walk(
         state.aborted = True
         return
     my_id = _part_id(state.part_count)
+
+    # Preserve stdlib email/MIME defects deterministically (in addition to
+    # parser defects): readable name, stable order, local part reference.
+    for d in getattr(message, "defects", []):
+        state.defects.append(f"{my_id}: stdlib {type(d).__name__}")
+
+    if message.get_content_type() == "message/rfc822":
+        # In compat32 an embedded message yields a list payload, so
+        # is_multipart() is True and the generic branch would swallow it.
+        # Bounded walk of the embedded message, explicitly recorded.
+        state.defects.append(f"{_part_id(state.part_count)}: embedded message treated as bounded MIME")
+        payload = message.get_payload()
+        embedded = payload[0] if isinstance(payload, list) and payload else payload
+        if isinstance(embedded, Message):
+            _walk(embedded, depth + 1, state, text_parts, html_parts, links)
+        return
 
     if message.is_multipart():
         payload = message.get_payload()
@@ -386,7 +404,7 @@ def _walk(
         return
 
     if content_type in ("text/plain", "text/html"):
-        text, charset, defects = _decode_text_part(message, state, my_id)
+        text, charset, defects, over = _decode_text_part(message, state, my_id)
         part = TextPart(
             part_id=my_id,
             mime_type=content_type,
@@ -394,6 +412,12 @@ def _walk(
             text=text,
             decode_defects=defects,
         )
+        # Content over a limit is never kept nor exploited: the part is not
+        # added to the parsed email (defects + content_limits carry the
+        # information) and no URL is extracted from dropped content.
+        if over:
+            state.defects.extend(defects)
+            return
         if content_type == "text/plain":
             text_parts.append(part)
             links.extend(_extract_plain_urls(text, my_id))
@@ -414,9 +438,14 @@ def _walk(
 
 def _decode_text_part(
     message: Message, state: _WalkState, my_id: str
-) -> tuple[str, str | None, list[str]]:
+) -> tuple[str, str | None, list[str], bool]:
     """Decode a text part (transfer encoding then charset). Charset and
-    Base64/quoted-printable errors become defects, never exceptions."""
+    Base64/quoted-printable errors become defects, never exceptions.
+
+    Returns ``(text, charset, defects, over_limit)``. When ``over_limit`` is
+    True the text is NOT kept (empty string): a part over the per-part limit,
+    or any part decoded after the total budget is exhausted, is never
+    exploited as full content (no link extraction downstream)."""
 
     defects: list[str] = []
     charset = message.get_content_charset()
@@ -429,13 +458,25 @@ def _decode_text_part(
     if payload is None:
         defects.append(f"{my_id}: payload not decodable")
         payload = b""
+    size = len(payload)
+    over_part = size > state.limits.max_decoded_bytes_per_part
+    if over_part:
+        state.limits_hit.append(_LIMIT_DECODED_PART)
+        defects.append(f"{my_id}: decoded part over per-part limit; content not kept")
+    _count_decoded(state, size)
+    over_total = state.decoded_total > state.limits.max_decoded_bytes_total
+    if over_total and not over_part:
+        defects.append(f"{my_id}: decoded total over limit; content not kept")
+    if over_part or over_total:
+        if over_total:
+            state.aborted = True  # stop decoding further parts
+        return "", charset, defects, True
     try:
         text = payload.decode(charset or "utf-8", "replace")
     except (LookupError, UnicodeError) as exc:
         defects.append(f"{my_id}: charset error ({charset!r}): {exc}")
         text = payload.decode("utf-8", "replace")
-    _count_decoded(state, my_id, len(payload))
-    return text, charset, defects
+    return text, charset, defects, False
 
 
 def _build_attachment(
@@ -491,7 +532,7 @@ def _build_attachment(
             decode_status="over_limit",
             is_inline=inline,
         )
-    _count_decoded(state, my_id, size)
+    _count_decoded(state, size)
     if state.aborted:  # total limit reached: over_limit, no partial success
         return Attachment(
             part_id=my_id,
@@ -531,7 +572,21 @@ def _image_metadata(
         payload = None
     if payload is None:
         state.defects.append(f"{my_id}: image bytes unavailable")
-    digest = hashlib.sha256(payload).hexdigest() if payload is not None else ""
+        digest, status = "", "unavailable"
+    else:
+        size = len(payload)
+        over_part = size > state.limits.max_decoded_bytes_per_part
+        if over_part:
+            state.limits_hit.append(_LIMIT_DECODED_PART)
+            state.defects.append(f"{my_id}: image over per-part limit")
+        _count_decoded(state, size)
+        # An oversized image never gets a full hash presented as an accepted
+        # metadata_only visual: over_limit with no content hash.
+        if over_part or state.aborted:
+            state.defects.append(f"{my_id}: image not accepted (decode limit)")
+            digest, status = "", "over_limit"
+        else:
+            digest, status = hashlib.sha256(payload).hexdigest(), "metadata_only"
     return VisualEvidence(
         id=_det_id("vis", my_id, digest, content_type, content_id),
         sha256=digest,
@@ -540,7 +595,7 @@ def _image_metadata(
         part_id=my_id,
         content_id=content_id,
         local_ref=f"mime:{my_id}",
-        status="metadata_only",
+        status=status,  # type: ignore[assignment]
     )
 
 
@@ -549,11 +604,38 @@ def _image_metadata(
 # ---------------------------------------------------------------------------
 
 _MECH_RE = re.compile(r"\b(spf|dkim|dmarc)\s*[=:]\s*([A-Za-z0-9._-]+)", re.IGNORECASE)
-_MECH_DOMAIN_RES = (
-    re.compile(r"smtp\.mailfrom\s*[=:]\s*([^\s;]+)", re.IGNORECASE),
-    re.compile(r"header\.from\s*[=:]\s*([^\s;]+)", re.IGNORECASE),
-    re.compile(r"header\.d\s*[=:]\s*([^\s;]+)", re.IGNORECASE),
-)
+
+#: Identity property each mechanism carries (RFC 8601): SPF is validated
+#: against the envelope (smtp.mailfrom, else smtp.helo), DKIM against the
+#: signing domain (header.d), DMARC against the visible From domain
+#: (header.from). Each mechanism is matched ONLY within its own clause
+#: (up to the next ";"), never on the whole header. Parenthesized content is
+#: an RFC 8601 comment and is never taken as an identity.
+_MECH_IDENTITY_RES: dict[str, tuple[re.Pattern[str], ...]] = {
+    "spf": (
+        re.compile(r"\bsmtp\.mailfrom\s*[=:]\s*([^\s;]+)", re.IGNORECASE),
+        re.compile(r"\bsmtp\.helo\s*[=:]\s*([^\s;]+)", re.IGNORECASE),
+    ),
+    "dkim": (re.compile(r"\bheader\.d\s*[=:]\s*([^\s;]+)", re.IGNORECASE),),
+    "dmarc": (re.compile(r"\bheader\.from\s*[=:]\s*([^\s;]+)", re.IGNORECASE),),
+}
+
+
+def _mech_identity(mech: str, value: str, mech_start: int) -> str | None:
+    """Identity domain carried by THIS mechanism's own clause.
+
+    The search is scoped to the clause starting at ``mech_start`` (up to the
+    next ";"), so ``smtp.mailfrom`` can never be attributed to DKIM or DMARC.
+    No identity is invented when the clause carries none. No DNS ever happens.
+    """
+
+    clause_end = value.find(";", mech_start)
+    clause = value[mech_start : clause_end if clause_end != -1 else len(value)]
+    for res in _MECH_IDENTITY_RES[mech]:
+        m = res.search(clause)
+        if m:
+            return m.group(1).strip().strip("<>").lstrip("@").lower() or None
+    return None
 
 
 def _parse_authentication(headers: list[tuple[str, str]]) -> list[AuthObservation]:
@@ -576,12 +658,7 @@ def _parse_authentication(headers: list[tuple[str, str]]) -> list[AuthObservatio
                 continue
             seen.add(mech)
             result = mech_m.group(2).lower()
-            domain = None
-            for dom_re in _MECH_DOMAIN_RES:
-                dom_m = dom_re.search(value)
-                if dom_m:
-                    domain = dom_m.group(1).strip().strip("<>").lstrip("@").lower()
-                    break
+            domain = _mech_identity(mech, value, mech_m.start())
             out.append(
                 AuthObservation(
                     mechanism=mech,  # type: ignore[arg-type]
@@ -600,12 +677,68 @@ def _parse_authentication(headers: list[tuple[str, str]]) -> list[AuthObservatio
 # ---------------------------------------------------------------------------
 
 
+def _domain_of_address(addr: str) -> str | None:
+    """Exact domain of an email address; nothing invented when absent."""
+
+    if "@" not in addr:
+        return None
+    domain = addr.rsplit("@", 1)[1].strip().lower().rstrip(".>")
+    return domain or None
+
+
+#: IPs that never become transport observables: loopback, link-local, RFC1918
+#: and other non-global ranges (architecture §1.5: private/non-discriminating
+#: transport IPs are excluded from lookups). Documentation ranges (RFC 5737
+#: TEST-NET) ARE kept: fixtures and examples use them deliberately.
+_TRANSPORT_DOC_NETS = ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+
+
+def _is_transport_ip(candidate: str) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    if addr.is_global:
+        return True
+    return any(addr in ipaddress.ip_network(net) for net in _TRANSPORT_DOC_NETS)
+
+
+#: An IPv4 embedded in a Received header (leading "from" host may carry one).
+_IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+def _transport_ips(parsed: ParsedEmail) -> list[tuple[str, int]]:
+    """Documentation/public IPs carried by Received headers, in header order.
+
+    Private, loopback and link-local IPs are never recorded. No DNS, no
+    discrimination: the ``transport_ip`` role is data, not an accusation.
+    """
+
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for header in parsed.headers:
+        if header.name.lower() != "received":
+            continue
+        for m in _IPV4_RE.finditer(header.raw_value):
+            ip = m.group(1)
+            if ip in seen or not _is_transport_ip(ip):
+                continue
+            seen.add(ip)
+            out.append((ip, header.index))
+    return out
+
+
 def _build_observables(parsed: ParsedEmail) -> list[Observable]:
-    """Deterministic observables from parsed data; recipients keep the
-    ``recipient`` role and are excluded from IOC use downstream (§1.5)."""
+    """Deterministic observables from parsed data (architecture §1.5 roles).
+
+    Nothing is invented: a domain observable exists only when the source data
+    carries it. Recipients keep the ``recipient`` role and are never attacker
+    IOCs; a displayed_brand is a displayed fact, never a maliciousness claim.
+    """
 
     observables: list[Observable] = []
-    seen: set[tuple[str, str]] = set()
 
     def _add(value: str, normalized: str, obs_type: str, roles: list[str], source_ref: str) -> None:
         key = (obs_type, normalized)
@@ -625,16 +758,36 @@ def _build_observables(parsed: ParsedEmail) -> list[Observable]:
             )
         )
 
+    # --- email addresses (exact, never completed).
     for addr in parsed.from_addresses:
         _add(addr, addr.lower(), "email", ["sender"], "headers:from")
     for addr in parsed.reply_to:
         _add(addr, addr.lower(), "email", ["reply_to"], "headers:reply-to")
     for addr in parsed.return_path:
         _add(addr, addr.lower(), "email", ["return_path"], "headers:return-path")
-    for addr in (*parsed.to_addresses, *parsed.cc_addresses):
+    for addr in parsed.to_addresses:
         _add(addr, addr.lower(), "email", ["recipient"], "headers:to")
+    for addr in parsed.cc_addresses:
+        _add(addr, addr.lower(), "email", ["recipient"], "headers:cc")
+
+    # --- exact sender/return-path/reply-to domains derived from those addresses.
+    for addr, role, ref in (
+        *[(a, "sender", "headers:from") for a in parsed.from_addresses],
+        *[(a, "reply_to", "headers:reply-to") for a in parsed.reply_to],
+        *[(a, "return_path", "headers:return-path") for a in parsed.return_path],
+    ):
+        domain = _domain_of_address(addr)
+        if domain:
+            _add(domain, domain, "domain", [role], ref)
+
+    # --- transport IPs from Received (public/documentation only).
+    for ip, header_index in _transport_ips(parsed):
+        _add(ip, ip, "ipv4", ["transport_ip"], f"header:{header_index}:received")
+
     if parsed.message_id:
         _add(parsed.message_id, parsed.message_id.strip(), "message_id", [], "headers:message-id")
+
+    # --- links: href targets; explicitly displayed URLs become displayed_brand.
     for link in parsed.links:
         if link.hostname and link.normalized_value:
             _add(
@@ -643,6 +796,15 @@ def _build_observables(parsed: ParsedEmail) -> list[Observable]:
                 "url",
                 ["link_target"],
                 f"{link.part_id}:link:{link.id[:16]}",
+            )
+        if link.role == "href" and link.display_url and _hostname_of(link.display_url):
+            display_host = _hostname_of(link.display_url) or ""
+            _add(
+                link.display_url,
+                display_host,
+                "domain",
+                ["displayed_brand"],
+                f"{link.part_id}:link:{link.id[:16]}:display",
             )
     for att in parsed.attachments:
         if att.sha256:
