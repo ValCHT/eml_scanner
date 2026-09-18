@@ -1013,17 +1013,24 @@ class TestLiveInternalMatrix:
         responses across DISTINCT fixtures are a wiring DIAGNOSTIC, recorded
         here (and in the PR description) — identical verdicts alone, or
         identical outputs on proven-distinct inputs, are never by
-        themselves a technical failure."""
+        themselves a technical failure. Repeated runs of the SAME fixture
+        are NOT a diagnostic group: they share the input by design."""
 
-        by_canonical: dict[str, list[str]] = {}
+        # Group by fixture: a group with >1 DISTINCT fixture holding a
+        # strictly identical canonical Assessment is the diagnostic case.
+        by_canonical: dict[str, set[str]] = {}
         for record in live_matrix["accepted"]:
             canonical = canonical_bytes(record["assessment"]).decode("utf-8")
-            by_canonical.setdefault(canonical, []).append(record["fixture"])
+            by_canonical.setdefault(canonical, set()).add(record["fixture"])
         duplicates = {
-            digest: fixtures for digest, fixtures in by_canonical.items() if len(fixtures) > 1
+            canonical: fixtures
+            for canonical, fixtures in by_canonical.items()
+            if len(fixtures) > 1
         }
         diagnostic_path = _g2_dir() / "identical_assessments_diagnostic.json"
         if duplicates:
+            # Group key: full SHA-256 of the canonical JSON (never a
+            # truncated form — the complete digest is the group identity).
             diagnostic_path.write_text(
                 json.dumps(
                     {
@@ -1033,8 +1040,10 @@ class TestLiveInternalMatrix:
                             "proven distinct by untrusted_email_sha256/input_payload_sha256"
                         ),
                         "groups": {
-                            digest[:16]: sorted(set(fixtures))
-                            for digest, fixtures in duplicates.items()
+                            hashlib.sha256(canonical.encode("utf-8")).hexdigest(): sorted(
+                                fixtures
+                            )
+                            for canonical, fixtures in duplicates.items()
                         },
                     },
                     indent=2,
@@ -1061,27 +1070,38 @@ class TestLiveInternalMatrix:
     def test_live_distinct_fixtures_distinct_fingerprints(
         self, live_matrix: dict[str, Any]
     ) -> None:
-        """Distinct fixtures produce distinct untrusted_email_sha256
-        (docs/gates.md §5.1.1 check 3). Repeated runs of the SAME fixture
-        legitimately share the envelope: identical input bytes give an
-        identical deterministic projection — that identity is itself part
+        """Distinct fixtures produce distinct untrusted_email_sha256 AND
+        distinct input_payload_sha256 (docs/gates.md §5.1.1 check 3 covers
+        BOTH hash families). Repeated runs of the SAME fixture legitimately
+        share both fingerprints: identical input bytes give an identical
+        deterministic projection and payload — that identity is itself part
         of the fingerprint proof."""
 
-        seen: dict[str, str] = {}
+        seen_email: dict[str, str] = {}
+        seen_payload: dict[str, str] = {}
         for line in live_matrix["performance"]:
-            email_hash = line["untrusted_email_sha256"]
-            if not email_hash:
-                continue
             fixture = line["fixture"]
-            if email_hash in seen and seen[email_hash] != fixture:
-                pytest.fail(
-                    f"identical envelope for distinct fixtures: "
-                    f"{seen[email_hash]} and {fixture}"
-                )
-            seen.setdefault(email_hash, fixture)
-        # Every distinct fixture is represented by exactly one envelope hash.
+            email_hash = line["untrusted_email_sha256"]
+            if email_hash:
+                if email_hash in seen_email and seen_email[email_hash] != fixture:
+                    pytest.fail(
+                        f"identical untrusted_email_sha256 for distinct fixtures: "
+                        f"{seen_email[email_hash]} and {fixture}"
+                    )
+                seen_email.setdefault(email_hash, fixture)
+            payload_hash = line["input_payload_sha256"]
+            if payload_hash:
+                if payload_hash in seen_payload and seen_payload[payload_hash] != fixture:
+                    pytest.fail(
+                        f"identical input_payload_sha256 for distinct fixtures: "
+                        f"{seen_payload[payload_hash]} and {fixture}"
+                    )
+                seen_payload.setdefault(payload_hash, fixture)
+        # Every distinct fixture is represented by exactly one hash of EACH
+        # family (both uniqueness proofs cover the full run set).
         distinct_fixtures = {line["fixture"] for line in live_matrix["performance"]}
-        assert len(seen) == len(distinct_fixtures)
+        assert len(seen_email) == len(distinct_fixtures)
+        assert len(seen_payload) == len(distinct_fixtures)
 
     def test_live_injection_stays_schema_bound(self, live_matrix: dict[str, Any]) -> None:
         """prompt_injection.eml (both runs): the embedded instructions remain
