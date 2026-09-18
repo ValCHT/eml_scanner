@@ -3,7 +3,7 @@
 Implementation repository prepared from the frozen V1.2 specification dated 18/09/2026.
 
 **Implementation status (updated 18/09/2026):** TICKET-01 (G0 skeleton, settings and
-contract models) is implemented and validated — 42 non-live tests pass, `pip check`
+contract models) is implemented and validated — 44 non-live tests pass, `pip check`
 clean, gate controller recorded. Do **not** re-execute TICKET-01; the next product
 ticket is TICKET-02 (minimal Luna client), in a fresh session. See the open pull
 request #1 for the full diff and validation receipts.
