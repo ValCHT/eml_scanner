@@ -135,10 +135,11 @@ def test_extract_accepts_valid_content(
     clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(monkeypatch, tmp_path)
-    result, model, usage = client._extract_result(
+    result, model, usage, fenced = client._extract_result(
         _response_bytes('{"ok": true}'), OK_SCHEMA
     )
     assert result == {"ok": True}
+    assert fenced is False
     assert model == "openai/gpt-5.6-luna"
     assert usage["input_tokens"] == 3 and usage["output_tokens"] == 2
 
@@ -199,6 +200,69 @@ def test_extract_rejects_schema_violation(
     client = _client(monkeypatch, tmp_path)
     with pytest.raises(LLMInvalidResponse, match="schema violation"):
         client._extract_result(_response_bytes('{"ok": "not-a-bool"}'), OK_SCHEMA)
+
+
+def test_extract_accepts_fenced_json_and_stays_schema_valid(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Traced fence tolerance: fully validated, flagged, never a silent pass."""
+
+    client = _client(monkeypatch, tmp_path)
+    result, model, usage, fenced = client._extract_result(
+        _response_bytes('```json\n{"ok": true}\n```'), OK_SCHEMA
+    )
+    assert result == {"ok": True}  # no marker injected into the result
+    assert fenced is True
+    assert model == "openai/gpt-5.6-luna"
+    assert usage["input_tokens"] == 3
+
+
+def test_extract_rejects_fenced_invalid_json(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(monkeypatch, tmp_path)
+    with pytest.raises(LLMInvalidResponse, match="fenced content is not valid JSON"):
+        client._extract_result(_response_bytes("```json\n{broken\n```"), OK_SCHEMA)
+
+
+def test_extract_rejects_fenced_schema_violation(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fenced payload is validated EXACTLY like a raw one: no escape hatch."""
+
+    client = _client(monkeypatch, tmp_path)
+    with pytest.raises(LLMInvalidResponse, match="schema violation"):
+        client._extract_result(_response_bytes('```json\n{"ok": "yes"}\n```'), OK_SCHEMA)
+
+
+def test_fenced_live_path_leaves_trace_artifact(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """complete_json traces the fence deviation in the capture directory."""
+
+    import time as _time
+
+    calls: dict[str, str] = {}
+
+    client = _client(monkeypatch, tmp_path)
+
+    def _fake_post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        calls["url"] = url
+        return 200, _response_bytes('```json\n{"ok": true}\n```')
+
+    client._post_bytes = _fake_post  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_time.monotonic() + 10.0,
+    )
+    assert result == {"ok": True}
+    assert record.status == "ok"
+    trace = tmp_path / "captures" / "attempt_1_trace_fence_extracted.txt"
+    assert trace.is_file()
+    assert calls["url"] == "https://endpoint.invalid/chat/completions"
 
 
 # ---------------------------------------------------------------------------

@@ -287,18 +287,47 @@ class LunaClient:
         content = message.get("content")
         if not isinstance(content, str):
             raise LLMInvalidResponse(f"unexpected content type: {type(content).__name__}")
-        try:
-            result = json.loads(content)
-        except json.JSONDecodeError as error:
-            raise LLMInvalidResponse(f"content is not valid JSON: {error}") from error
-
+        result, fenced = LunaClient._parse_content(content)
+        if not isinstance(result, dict):
+            raise LLMInvalidResponse(f"unexpected content type: {type(result).__name__}")
+        # ``fenced`` is returned for tracing (CallRecord/artifacts) but never
+        # injected into the result object: the validated document must stay
+        # exactly what the schema allows (additionalProperties: false).
         errors = validate_against_schema(result, schema)
         if errors:
             raise LLMInvalidResponse("schema violation: " + "; ".join(errors[:5]))
 
         returned_model = data.get("model") if isinstance(data.get("model"), str) else None
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
-        return result, returned_model, LunaClient._normalize_usage(usage)
+        return result, returned_model, LunaClient._normalize_usage(usage), fenced
+
+    @staticmethod
+    def _parse_content(content: str) -> tuple[object, bool]:
+        """Parse the message content: strict JSON first, fenced JSON second.
+
+        Returns ``(parsed, fenced)``. A fenced block is accepted ONLY when the
+        content is exactly one markdown code fence whose payload is the JSON
+        object; anything else is an explicit error. The fence tolerance is a
+        traced transport deviation, not a structured-output fallback.
+        """
+
+        try:
+            return json.loads(content), False
+        except json.JSONDecodeError:
+            pass
+        fence = re.fullmatch(
+            r"```[a-zA-Z0-9]*\s*\n(?P<payload>.*)\n?```\s*",
+            content,
+            re.DOTALL,
+        )
+        if fence:
+            try:
+                return json.loads(fence.group("payload")), True
+            except json.JSONDecodeError as error:
+                raise LLMInvalidResponse(
+                    f"fenced content is not valid JSON: {error}"
+                ) from error
+        raise LLMInvalidResponse(f"content is not valid JSON: {content[:80]!r}")
 
     @staticmethod
     def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None]:
@@ -377,7 +406,7 @@ class LunaClient:
                 last_error = LLMTransportError(f"unexpected HTTP status {status}")
                 continue
             try:
-                result, returned_model, usage = self._extract_result(raw, schema)
+                result, returned_model, usage, fenced = self._extract_result(raw, schema)
             except LLMError as error:
                 last_error = error
                 if record.first_attempt_schema_valid is None and attempt == 1:
@@ -392,6 +421,12 @@ class LunaClient:
             record.cached_input_tokens = usage["cached_input_tokens"]
             record.output_tokens = usage["output_tokens"]
             record.reasoning_tokens = usage["reasoning_tokens"]
+            if fenced:
+                # Traced transport deviation (see _parse_content): never
+                # silent. The trace artifact under capture_dir and the
+                # smoke receipt mirror it; nothing is injected into the
+                # validated result object.
+                self._capture_trace(attempt, "fence_extracted")
             record.response_refs = [
                 str(path.relative_to(self._capture_dir))  # type: ignore[union-attr]
                 for path in sorted(self._capture_dir.glob("attempt_*_*.json*"))  # type: ignore[union-attr]
@@ -406,6 +441,15 @@ class LunaClient:
         raise LLMTimeout("no attempt could be executed before the deadline")
 
     # -- capture helpers (usage/hashes only; never request headers) -------------
+
+    def _capture_trace(self, attempt: int, kind: str) -> None:
+        if self._capture_dir is None:
+            return
+        (self._capture_dir / f"attempt_{attempt}_trace_{kind}.txt").write_text(
+            f"{kind}: transport deviation traced (content extracted from a "
+            "markdown code fence; JSON fully validated against the schema)",
+            encoding="utf-8",
+        )
 
     def _capture_response(self, attempt: int, raw: bytes) -> None:
         if self._capture_dir is None:
