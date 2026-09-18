@@ -226,24 +226,45 @@ def _select_observables(
     all_observables: dict[str, dict[str, Any]],
     kept_evidence: list[dict[str, Any]],
     budget: int,
-) -> tuple[dict[str, dict[str, Any]], bool]:
-    """Observables referenced by kept evidence FIRST (never a dangling ref),
-    then the remaining ones in registry order while the budget allows."""
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], bool]:
+    """Observables under the shared budget, evidence kept reference-consistent.
 
-    mandatory = {
+    Returns ``(selected_observables, kept_evidence, truncated)``:
+
+    - observables referenced by kept evidence are mandatory but still
+      budget-bound (the 16k URLs/observables limit applies to them too);
+    - an evidence entry whose observable no longer fits the budget is
+      DROPPED, so the sent payload never carries a reference to an
+      observable that is not in the registry (no dangling reference);
+    - the remaining observables follow in registry order while the budget
+      allows.
+    """
+
+    selected: dict[str, dict[str, Any]] = {}
+    used = 0
+    truncated = False
+    mandatory_ids = {
         entry["observable_id"]
         for entry in kept_evidence
         if entry.get("observable_id") is not None
     }
-    selected: dict[str, dict[str, Any]] = {}
-    used = 0
-    truncated = False
-    for obs_id in sorted(mandatory):
+    for obs_id in sorted(mandatory_ids):
         if obs_id not in all_observables:
             continue
         entry = all_observables[obs_id]
-        used += len(canonical_bytes(entry).decode("utf-8"))
+        cost = len(canonical_bytes(entry).decode("utf-8"))
+        if used + cost > budget:
+            truncated = True
+            continue  # excluded: its evidence entries are dropped below
         selected[obs_id] = entry
+        used += cost
+    # Reference consistency: drop evidence entries whose observable was
+    # excluded by the budget (never send a dangling observable_id).
+    kept_evidence = [
+        entry
+        for entry in kept_evidence
+        if entry.get("observable_id") is None or entry["observable_id"] in selected
+    ]
     for obs_id, entry in all_observables.items():
         if obs_id in selected:
             continue
@@ -253,7 +274,7 @@ def _select_observables(
             break
         selected[obs_id] = entry
         used += cost
-    return selected, truncated
+    return selected, kept_evidence, truncated
 
 
 # ---------------------------------------------------------------------------
@@ -277,12 +298,15 @@ def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[
 
     headers, headers_trunc = _select_headers(parsed, limits.headers_chars)
     # Text and HTML parts share the single body budget (docs/prompt_integration.md
-    # §3: 24,000 useful body characters overall, not per MIME type).
-    text_parts, _ = _select_parts(parsed.text_parts, limits.body_chars)
+    # §3: 24,000 useful body characters overall, not per MIME type). The
+    # truncation flag of EACH section is kept: a text/plain cut must be
+    # flagged in content_limits exactly like an HTML cut.
+    text_parts, text_trunc = _select_parts(parsed.text_parts, limits.body_chars)
     text_chars_used = sum(len(part["text"]) for part in text_parts)
-    html_parts, body_trunc = _select_parts(
+    html_parts, html_trunc = _select_parts(
         parsed.html_parts, max(0, limits.body_chars - text_chars_used)
     )
+    body_trunc = text_trunc or html_trunc
 
     links, links_used, links_trunc = _select_links(parsed, limits.urls_observables_chars)
 
@@ -291,7 +315,12 @@ def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[
 
     all_observables = _observable_entries(parsed)
     remaining_obs_budget = max(0, limits.urls_observables_chars - links_used)
-    observables, obs_trunc = _select_observables(
+    # Mandatory observables (referenced by kept evidence) are budget-bound
+    # too: one that no longer fits is excluded and the evidence entries
+    # referencing it are dropped, so no dangling reference ever remains
+    # (docs/prompt_integration.md §3: aucune preuve tronquée ne reste
+    # référençable).
+    observables, kept_evidence, obs_trunc = _select_observables(
         all_observables, kept_evidence, remaining_obs_budget
     )
 

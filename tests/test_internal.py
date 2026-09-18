@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import socket
 from pathlib import Path
 from typing import Any
@@ -630,6 +631,93 @@ def test_verdict_confidence_argmax_with_taxonomy_tiebreak():
 
 
 # ---------------------------------------------------------------------------
+# Review fixes: context budgets and stricter INTERNAL validation
+# ---------------------------------------------------------------------------
+
+
+def test_body_truncation_flag_covers_text_and_html_parts():
+    """Review fix: a text/plain cut must flag body_truncated exactly like
+    an HTML cut (both sections share the single body budget)."""
+
+    tiny = ContextLimits(body_chars=50)
+    envelope = build_internal_envelope(_parsed("phishing_simple.eml"), tiny)
+    assert "body_truncated" in envelope["UNTRUSTED_EMAIL"]["content_limits"]
+    # No silent empty replacement: the kept part text is a real prefix.
+    kept = [p for p in envelope["UNTRUSTED_EMAIL"]["text_parts"] if p["text"]]
+    assert kept and all(len(p["text"]) <= 50 for p in kept)
+
+
+def test_mandatory_observables_respect_budget_no_dangling_refs():
+    """Review fix: observables referenced by kept evidence are budget-bound
+    too; an evidence whose observable no longer fits is dropped, so the
+    payload never carries a dangling observable_id (and the 16k budget
+    holds for the OBSERVABLE_REGISTRY)."""
+
+    from src.prompts import canonical_bytes
+
+    tiny = ContextLimits(urls_observables_chars=200)
+    envelope = build_internal_envelope(_parsed("phishing_simple.eml"), tiny)
+    registry = envelope["OBSERVABLE_REGISTRY"]
+    used = sum(len(canonical_bytes(entry).decode("utf-8")) for entry in registry.values())
+    assert used <= tiny.urls_observables_chars
+    for ev in envelope["EVIDENCE_REGISTRY"].values():
+        assert ev["observable_id"] is None or ev["observable_id"] in registry
+
+
+def test_validator_rejects_any_non_interne_provenance():
+    """Review fix: INTERNAL rejects ANY provenance other than INTERNE
+    (INFERENCE included, and unknown/missing values) — not only
+    OSINT/SANDBOX."""
+
+    registry = _registry_for("phishing_simple.eml")
+    first_id = sorted(registry["evidence"].keys())[0]
+    for bad_provenance in ("INFERENCE", "OSINT", "SANDBOX", None, "unexpected"):
+        poisoned = dict(registry["evidence"][first_id])
+        poisoned["provenance"] = bad_provenance
+        candidate_registry = {
+            "evidence": {first_id: poisoned},
+            "observables": registry["observables"],
+        }
+        candidate = _valid_candidate()
+        candidate["observations"] = [first_id]
+        issues = validate_assessment_shape_and_refs(
+            candidate, candidate_registry, "internal"
+        )
+        assert any("INTERNE evidence only" in issue for issue in issues), bad_provenance
+
+
+def test_validate_reports_requires_registries(tmp_path: Path):
+    """Review fix: the validator cannot prove references without the
+    registries — a bare Assessment (or a wrapped record missing one
+    registry) is rejected, never accepted on probabilities alone."""
+
+    import subprocess
+    import sys
+
+    assessment = _valid_candidate()
+    bare = tmp_path / "bare.jsonl"
+    bare.write_text(json.dumps(assessment) + "\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "scripts/validate_reports.py", "--assessments", str(bare)],
+        cwd=PROJECT_ROOT, shell=False, capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    assert "assessment" in (proc.stderr + proc.stdout)
+
+    missing_one = tmp_path / "missing_one.jsonl"
+    missing_one.write_text(
+        json.dumps({"assessment": assessment, "evidence_registry": {}}) + "\n",
+        encoding="utf-8",
+    )
+    proc2 = subprocess.run(
+        [sys.executable, "scripts/validate_reports.py", "--assessments", str(missing_one)],
+        cwd=PROJECT_ROOT, shell=False, capture_output=True, text=True,
+    )
+    assert proc2.returncode != 0
+    assert "observable_registry" in (proc2.stderr + proc2.stdout)
+
+
+# ---------------------------------------------------------------------------
 # LIVE matrix (explicit --live): real calls, real artifacts, G2 evidence
 # ---------------------------------------------------------------------------
 
@@ -663,14 +751,30 @@ def _run_live_matrix() -> dict[str, Any]:
     # 14 fixtures once + a second run for injection and auth-pass.
     plan: list[tuple[str, int]] = [(entry["file"], 1) for entry in MANIFEST["fixtures"]]
     plan += [("prompt_injection.eml", 2), ("phishing_auth_pass.eml", 2)]
+    canonical_run_ids = {
+        f"{fixture.removesuffix('.eml')}_rep{repetition}" for fixture, repetition in plan
+    }
+    # Stale directories from an earlier session (e.g. a fixture renamed or a
+    # plan change) are removed: only the canonical run set may remain.
+    for stale in runs_dir.iterdir():
+        if stale.name not in canonical_run_ids:
+            shutil.rmtree(stale)
 
     performance: list[dict[str, Any]] = []
     accepted: list[dict[str, Any]] = []
+    canonical_session: list[str] = []
     for fixture_name, repetition in plan:
         stem = fixture_name.removesuffix(".eml")
         entry = _entry(fixture_name)
         run_id = f"{stem}_rep{repetition}"
         capture_dir = runs_dir / run_id
+        # Remise à zéro systématique: un répertoire réutilisé d'une session
+        # précédente peut contenir des artefacts stale (attempt_2_*, rejets
+        # de validation antérieurs) qui contamineraient la preuve de CE run.
+        if capture_dir.exists():
+            shutil.rmtree(capture_dir)
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        canonical_session.append(run_id)
         parsed = _parsed(fixture_name)
         client = LunaClient(
             settings,
@@ -846,16 +950,113 @@ class TestLiveInternalMatrix:
             for ev in record["evidence_registry"].values():
                 assert ev["provenance"] == "INTERNE"
 
-    def test_live_anchors_were_transmitted(self, live_matrix: dict[str, Any]) -> None:
-        """Anti-wiring: for each real run, the declared anchors were really
-        in the transmitted envelope (input hashes + counters present)."""
+    def test_live_anchors_and_counters_for_every_sent_entry(
+        self, live_matrix: dict[str, Any]
+    ) -> None:
+        """Anti-wiring per docs/gates.md §5.1.1 (blocking checks 1 and 4),
+        applied to EVERY run that actually sent an entry — accepted runs AND
+        runs that later failed (their sent input must be proven correct too,
+        not skipped):
+
+        - the manifest-declared anchors (subject, excerpts, expected URLs)
+          really appear in the transmitted UNTRUSTED_EMAIL;
+        - the four counters recomputed from the ARCHIVED request bytes equal
+          the audit fields archived at send time.
+        """
 
         for line in live_matrix["performance"]:
-            if line["technical_status"] != "ok":
-                continue
-            assert line["untrusted_email_sha256"], line["sample_id"]
-            assert line["body_chars_sent"] > 0 or line["headers_chars_sent"] > 0
-            assert line["input_payload_sha256"], line["sample_id"]
+            sample_id = line["sample_id"]
+            request_path = _g2_dir() / "runs" / sample_id / "internal_attempt_1.request.json"
+            audit_path = _g2_dir() / "runs" / sample_id / "internal_attempt_1.input_audit.json"
+            assert request_path.is_file(), f"{sample_id}: no archived request"
+            assert audit_path.is_file(), f"{sample_id}: no archived audit"
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+
+            # (4) Recompute hashes and the four counters from the archived
+            # request itself — not from the in-memory objects.
+            archived = request_path.read_bytes()
+            assert (
+                hashlib.sha256(archived).hexdigest() == audit["input_payload_sha256"]
+            ), sample_id
+            sent = json.loads(archived.decode("utf-8"))
+            envelope = json.loads(sent["messages"][1]["content"])
+            untrusted = envelope["UNTRUSTED_EMAIL"]
+            assert audit["untrusted_email_sha256"] == hashlib.sha256(
+                canonical_bytes(untrusted)
+            ).hexdigest(), sample_id
+            assert audit["body_chars_sent"] == sum(
+                len(p["text"]) for p in untrusted["text_parts"] + untrusted["html_parts"]
+            ), sample_id
+            assert audit["headers_chars_sent"] == sum(
+                len(h["name"]) + len(h["decoded_value"]) for h in untrusted["headers"]
+            ), sample_id
+            assert audit["evidence_count_sent"] == len(envelope["EVIDENCE_REGISTRY"]), sample_id
+            assert audit["observable_count_sent"] == len(envelope["OBSERVABLE_REGISTRY"]), sample_id
+
+            # (1) The expected useful content of THIS fixture is really in
+            # the transmitted envelope — an ID/filename/text of another
+            # fixture would not satisfy this check.
+            anchors = _entry(line["fixture"])["content_anchors"]
+            serialized_untrusted = json.dumps(untrusted, ensure_ascii=False)
+            assert anchors["subject"] in serialized_untrusted, sample_id
+            if anchors.get("text_plain_excerpt"):
+                assert anchors["text_plain_excerpt"] in serialized_untrusted, sample_id
+            if anchors.get("html_excerpt"):
+                assert anchors["html_excerpt"] in serialized_untrusted, sample_id
+            for url in anchors.get("expected_urls", []):
+                assert url in serialized_untrusted, sample_id
+
+    def test_live_identical_assessments_record_diagnostic(
+        self, live_matrix: dict[str, Any]
+    ) -> None:
+        """docs/gates.md §5.1.1 check 5: strictly identical Assessment
+        responses across DISTINCT fixtures are a wiring DIAGNOSTIC, recorded
+        here (and in the PR description) — identical verdicts alone, or
+        identical outputs on proven-distinct inputs, are never by
+        themselves a technical failure."""
+
+        by_canonical: dict[str, list[str]] = {}
+        for record in live_matrix["accepted"]:
+            canonical = canonical_bytes(record["assessment"]).decode("utf-8")
+            by_canonical.setdefault(canonical, []).append(record["fixture"])
+        duplicates = {
+            digest: fixtures for digest, fixtures in by_canonical.items() if len(fixtures) > 1
+        }
+        diagnostic_path = _g2_dir() / "identical_assessments_diagnostic.json"
+        if duplicates:
+            diagnostic_path.write_text(
+                json.dumps(
+                    {
+                        "note": (
+                            "identical canonical Assessment responses across distinct "
+                            "fixtures: wiring diagnostic (§5.1.1 check 5); inputs were "
+                            "proven distinct by untrusted_email_sha256/input_payload_sha256"
+                        ),
+                        "groups": {
+                            digest[:16]: sorted(set(fixtures))
+                            for digest, fixtures in duplicates.items()
+                        },
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        else:
+            # No duplicate: record the negative fact explicitly so the
+            # diagnostic artifact always documents the check outcome.
+            diagnostic_path.write_text(
+                json.dumps(
+                    {
+                        "note": "no identical canonical Assessment across distinct fixtures",
+                        "groups": {},
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        assert diagnostic_path.is_file()
 
     def test_live_distinct_fixtures_distinct_fingerprints(
         self, live_matrix: dict[str, Any]

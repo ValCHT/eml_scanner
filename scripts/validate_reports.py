@@ -57,16 +57,16 @@ def _validate_assessment_line(
 ) -> list[str]:
     """Full G2 Assessment validation of one archived JSONL record.
 
-    Two accepted record layouts:
+    The ONLY accepted layout is the wrapped record actually archived by the
+    G2 harness: ``{"assessment": {...}, "evidence_registry": {...},
+    "observable_registry": {...}, ...}``. The registries are MANDATORY:
+    without them the validator could not prove that the referenced IDs
+    exist, so a bare Assessment object (or a wrapped record missing a
+    registry) is rejected — never accepted on probabilities alone.
 
-    - wrapped: ``{"assessment": {...}, "evidence_registry": {...},
-      "observable_registry": {...}, ...}`` — the Assessment is validated
-      strictly against the frozen schema AND its references against the
-      sibling registries (unknown IDs, OSINT/SANDBOX provenances, non-empty
-      ``rag_case_ids`` reject the record);
-    - bare: a plain Assessment object — strict schema and probability
-      validation (reference checks are meaningless without registries).
-
+    The Assessment is validated strictly against the frozen schema AND its
+    references against the sibling registries (unknown IDs, any
+    non-INTERNE provenance, non-empty ``rag_case_ids`` reject the record).
     Invalid documents are rejected and never repaired or normalized.
     """
 
@@ -81,18 +81,25 @@ def _validate_assessment_line(
     except (OSError, json.JSONDecodeError) as error:
         return [f"{where}: assessment schema unreadable: {error}"]
 
-    if isinstance(data.get("assessment"), dict):
-        target = data["assessment"]
-        evidence_registry = data.get("evidence_registry")
-        observable_registry = data.get("observable_registry")
-        has_registries = isinstance(evidence_registry, dict) and isinstance(
-            observable_registry, dict
-        )
-    else:
-        target = data
-        evidence_registry = {}
-        observable_registry = {}
-        has_registries = False
+    if not isinstance(data.get("assessment"), dict):
+        return [
+            f"{where}: missing 'assessment' object — the G2 archive format "
+            "requires {assessment, evidence_registry, observable_registry}"
+        ]
+    target = data["assessment"]
+    evidence_registry = data.get("evidence_registry")
+    observable_registry = data.get("observable_registry")
+    for name, registry_value in (
+        ("evidence_registry", evidence_registry),
+        ("observable_registry", observable_registry),
+    ):
+        if not isinstance(registry_value, dict):
+            problems.append(
+                f"{where}: missing or invalid '{name}' — references cannot be "
+                "proven without it (record rejected, not repaired)"
+            )
+    if problems:
+        return problems
 
     # 1. Strict schema conformance against the frozen schema.
     schema_problems = validate_against_schema(target, schema)
@@ -100,24 +107,14 @@ def _validate_assessment_line(
         problems.append(f"{where}: schema: {problem}")
 
     # 2. Semantic/shape/reference validation (TICKET-04 scope).
-    if has_registries:
-        registry: dict[str, dict[str, object]] = {
-            "evidence": evidence_registry,
-            "observables": observable_registry,
-        }
-        problems.extend(
-            f"{where}: {issue}"
-            for issue in validate_assessment_shape_and_refs(target, registry, "internal")
-        )
-    else:
-        from src.verify import _bad_probabilities
-
-        problems.extend(
-            f"{where}: {issue}"
-            for issue in _bad_probabilities(
-                target.get("probabilities") if isinstance(target, dict) else None
-            )
-        )
+    registry: dict[str, dict[str, object]] = {
+        "evidence": evidence_registry,
+        "observables": observable_registry,
+    }
+    problems.extend(
+        f"{where}: {issue}"
+        for issue in validate_assessment_shape_and_refs(target, registry, "internal")
+    )
     return problems
 
 

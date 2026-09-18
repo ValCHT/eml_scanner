@@ -178,9 +178,12 @@ def validate_assessment_shape_and_refs(
                 issues.append(f"{where}: unknown evidence ID {evidence_id!r}")
                 continue
             provenance = _evidence_provenance(evidence_id)
-            if provenance in ("OSINT", "SANDBOX"):
+            if provenance != "INTERNE":
+                # INTERNAL is email-only: ANY non-INTERNE provenance is
+                # rejected (not just OSINT/SANDBOX) — an unknown or missing
+                # provenance value cannot be trusted either.
                 issues.append(
-                    f"{where}: evidence {evidence_id!r} has provenance {provenance}; "
+                    f"{where}: evidence {evidence_id!r} has provenance {provenance!r}; "
                     "INTERNAL may reference INTERNE evidence only"
                 )
 
