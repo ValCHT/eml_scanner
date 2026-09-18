@@ -273,18 +273,28 @@ def test_fenced_live_path_leaves_trace_artifact(
 def test_timeout_expired_deadline_sends_nothing(
     clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Real deadline semantics: no attempt runs after the deadline, no network."""
+    """Real deadline semantics: no attempt runs after the deadline, no network.
+
+    Blocker 1 contract: the public method returns ``(None, record)`` with
+    ``record.status="error"`` — it never raises.
+    """
 
     client = _client(monkeypatch, tmp_path)
-    with pytest.raises(LLMTimeout, match="deadline expired"):
-        client.complete_json(
-            messages=[{"role": "user", "content": "ping"}],
-            schema=OK_SCHEMA,
-            effort="medium",
-            max_output_tokens=128,
-            deadline=0.0,  # already expired on any monotonic clock
-        )
-    # nothing was sent: no capture, no request hash recorded on disk
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="medium",
+        max_output_tokens=128,
+        deadline=0.0,  # already expired on any monotonic clock
+    )
+    assert result is None
+    assert record.status == "error"
+    assert record.phase == "internal"
+    assert record.requested_model == "openai/gpt-5.6-luna"
+    assert record.reasoning_effort == "medium"
+    assert record.attempts == 0  # no attempt was ever launched
+    assert record.request_sha256 is None  # nothing was ever sent
+    # nothing was sent: no capture, no artifact written
     assert not (tmp_path / "captures").exists() or not any((tmp_path / "captures").iterdir())
 
 
@@ -296,20 +306,25 @@ def test_timeout_expired_deadline_sends_nothing(
 def test_canary_never_leaks_in_errors_or_captures(
     clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unresolvable endpoint: real transport error, canary value absent."""
+    """Unresolvable endpoint: real transport error, canary value absent.
+
+    Blocker 1 contract: the transport failure returns ``(None, record)``
+    instead of raising; the canary never reaches the record or artifacts.
+    """
 
     import glob
 
     client = _client(monkeypatch, tmp_path)
-    with pytest.raises(Exception) as excinfo:  # noqa: PT011 - any failure class
-        client.complete_json(
-            messages=[{"role": "user", "content": "ping"}],
-            schema=OK_SCHEMA,
-            effort="medium",
-            max_output_tokens=128,
-            deadline=_client_deadline(),
-        )
-    assert CANARY not in str(excinfo.value)
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="medium",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result is None
+    assert record.status == "error"
+    assert CANARY not in str(record.model_dump())
     assert expurgate(f"Bearer {CANARY}") == "[REDACTED]"
     for path in glob.glob(str(tmp_path / "captures" / "*")):
         assert CANARY not in Path(path).read_text(encoding="utf-8", errors="replace")
@@ -319,6 +334,310 @@ def _client_deadline() -> float:
     import time
 
     return time.monotonic() + 5.0
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1: complete_json NEVER raises — (None, record) on every failure
+# ---------------------------------------------------------------------------
+
+
+def _refusal_body() -> bytes:
+    return json.dumps(
+        {
+            "model": "openai/gpt-5.6-luna",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": None, "refusal": "no"},
+                }
+            ],
+        }
+    ).encode("utf-8")
+
+
+def _failure_cases() -> list[str]:
+    """Parametrized failure modes; ids only, bodies built inside the test.
+
+    Keep this function ABOVE the parametrized test (the decorator evaluates
+    at definition time).
+    """
+
+    return ["timeout", "transport", "refusal", "invalid_json", "schema_invalid"]
+
+
+@pytest.mark.parametrize("failure_case", _failure_cases())
+def test_complete_json_returns_none_record_on_every_failure_mode(
+    clean_env: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_case: str,
+) -> None:
+    """Parametrized: timeout, transport, refusal, invalid JSON, bad schema.
+
+    The frozen public contract holds in EVERY case: ``(None, CallRecord)``
+    with ``status="error"``, never a raised exception.
+    """
+
+    import time as _time
+
+    from src.llm import LLMTimeout, LLMTransportError
+    from src.state import CallRecord
+
+    client = _client(monkeypatch, tmp_path)
+
+    if failure_case == "timeout":
+        def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+            raise LLMTimeout("deadline")
+    elif failure_case == "transport":
+        def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+            raise LLMTransportError("boom")
+    elif failure_case == "refusal":
+        body_bytes: bytes = _refusal_body()
+        def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+            return 200, body_bytes
+    elif failure_case == "invalid_json":
+        body_bytes = _response_bytes("definitely not json")
+        def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+            return 200, body_bytes
+    else:  # schema_invalid
+        body_bytes = _response_bytes('{"ok": "not-a-bool"}')
+        def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+            return 200, body_bytes
+
+    client._post_bytes = _post  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="medium",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result is None, f"failure mode {failure_case} must return None"
+    assert isinstance(record, CallRecord)
+    assert record.status == "error"
+    assert record.phase == "internal"
+    assert record.requested_model == "openai/gpt-5.6-luna"
+    assert record.reasoning_effort == "medium"
+    assert record.attempts == 2  # MAX_LLM_ATTEMPTS default: both attempts ran
+    assert record.request_sha256 is not None  # a request was really sent
+    assert record.response_refs  # error artifacts are referenced
+    for ref in record.response_refs:
+        assert (tmp_path / "captures" / ref).is_file()
+    assert CANARY not in str(record.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Blocker 2: metadata-only persistence; hash of the EXACT provider bytes
+# ---------------------------------------------------------------------------
+
+
+def test_no_raw_response_persisted_and_hash_of_exact_provider_bytes(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No attempt_*_response.json raw body anywhere; meta carries the real hash.
+
+    ``response_sha256`` is computed on the raw provider bytes BEFORE parsing,
+    not on the normalized result.
+    """
+
+    import hashlib
+
+    client = _client(monkeypatch, tmp_path)
+    raw = _response_bytes('{"ok": true}')
+    client._post_bytes = lambda url, body, timeout_s: (200, raw)  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result == {"ok": True} and record.status == "ok"
+    captures = tmp_path / "captures"
+    # NO raw provider response is ever on disk:
+    assert not list(captures.glob("attempt_*_response.json"))
+    # the raw body content is absent from every artifact:
+    for artifact in captures.iterdir():
+        assert b'"prompt_tokens"' not in artifact.read_bytes()
+    # the meta file carries the hash of the EXACT raw bytes:
+    metas = list(captures.glob("attempt_*_response_meta.json"))
+    assert len(metas) == 1
+    meta = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert meta["response_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert meta["response_sha256"] != hashlib.sha256(
+        json.dumps({"ok": True}, sort_keys=True).encode("utf-8")
+    )  # NOT a hash of the normalized result
+    assert meta["response_bytes"] == len(raw)
+    assert meta["returned_model"] == "openai/gpt-5.6-luna"
+    assert meta["usage"]["input_tokens"] == 3
+    assert meta["fence_extracted"] is False
+
+
+def test_smoke_payload_reflects_client_metadata_hash(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The smoke reads the client's real raw-bytes hash (never a result hash)."""
+
+    import hashlib
+    import importlib.util
+    import types
+
+    client = _client(monkeypatch, tmp_path)
+    raw = _response_bytes('{"ok": true}')
+    client._post_bytes = lambda url, body, timeout_s: (200, raw)  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    # load scripts/smoke.py the same way a ``python scripts/smoke.py`` run does
+    spec = importlib.util.spec_from_file_location(
+        "smoke_module", Path(__file__).resolve().parent.parent / "scripts" / "smoke.py"
+    )
+    assert spec and spec.loader
+    smoke = importlib.util.module_from_spec(spec)  # defines __file__ properly
+    spec.loader.exec_module(smoke)  # noqa: S101 - test context
+    payload = smoke._public_payload(result, record, tmp_path / "captures")
+    assert payload["response_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert payload["response_bytes"] == len(raw)
+
+
+# ---------------------------------------------------------------------------
+# Blocker 3: no-model-fallback enforced on the returned model
+# ---------------------------------------------------------------------------
+
+
+def test_model_identical_is_accepted(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Returned model == requested model: normal success path."""
+
+    client = _client(monkeypatch, tmp_path)  # requested: openai/gpt-5.6-luna
+    client._post_bytes = lambda url, body, timeout_s: (  # type: ignore[method-assign]
+        200, _response_bytes('{"ok": true}')
+    )
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result == {"ok": True} and record.status == "ok"
+    assert record.returned_model == record.requested_model
+
+
+def test_model_missing_is_rejected(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``model`` field in the provider response: NO success declared."""
+
+    body = json.loads(_response_bytes('{"ok": true}').decode("utf-8"))
+    body.pop("model")
+    client = _client(monkeypatch, tmp_path)
+    client._post_bytes = lambda url, body_, timeout_s: (  # type: ignore[method-assign]
+        200, json.dumps(body).encode("utf-8")
+    )
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result is None and record.status == "error"
+    assert record.returned_model is None
+
+
+def test_model_substitution_is_rejected(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silent model substitution: explicit refusal of the success path."""
+
+    body = json.loads(_response_bytes('{"ok": true}').decode("utf-8"))
+    body["model"] = "totally-different/model"
+    client = _client(monkeypatch, tmp_path)
+    client._post_bytes = lambda url, body_, timeout_s: (  # type: ignore[method-assign]
+        200, json.dumps(body).encode("utf-8")
+    )
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result is None and record.status == "error"
+    assert record.returned_model is None  # never advertise a refused model
+    assert record.attempts == 2
+
+
+# ---------------------------------------------------------------------------
+# Blocker 5: REAL transport timeout against a local unresponsive socket
+# ---------------------------------------------------------------------------
+
+
+def test_real_transport_timeout_converts_to_llm_timeout(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local server accepts the connection and NEVER answers.
+
+    Deterministic and cross-platform: 127.0.0.1, ephemeral port, no proxy in
+    this environment, no Internet, no external quota. The socket.timeout
+    path must surface as LLMTimeout internally, and complete_json must
+    return (None, record) per the frozen public contract.
+    """
+
+    import socket as _socket
+    import threading
+    import time as _time
+
+    from src.llm import LLMTimeout
+
+    server = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    release = threading.Event()
+
+    def _accept_and_hold() -> None:
+        try:
+            conn, _addr = server.accept()
+            release.wait(5.0)  # accepted, then deliberately silent
+            conn.close()
+        except OSError:
+            pass
+
+    worker = threading.Thread(target=_accept_and_hold, daemon=True)
+    worker.start()
+
+    client = _client(monkeypatch, tmp_path)
+    local_url = f"http://127.0.0.1:{port}/chat/completions"
+    client._settings.LITELLM_CHAT_URL = local_url  # transport-level test only
+    try:
+        # internal conversion check: socket.timeout -> LLMTimeout
+        with pytest.raises(LLMTimeout, match="timed out"):
+            client._post_bytes(local_url, b"{}", timeout_s=0.5)
+        # public contract check: (None, record). A transport timeout consumes
+        # the remaining budget (docs/architecture.md §1.4: "chaque timeout est
+        # borné par le temps restant"), so exactly one attempt was launched:
+        # a second attempt would start with timeout_s≈0. record.attempts == 1
+        # is the documented correct behavior here, NOT a dropped retry.
+        result, record = client.complete_json(
+            messages=[{"role": "user", "content": "ping"}],
+            schema=OK_SCHEMA,
+            effort="low",
+            max_output_tokens=128,
+            deadline=_time.monotonic() + 10.0,
+        )
+        assert result is None and record.status == "error"
+        assert record.attempts == 1
+        assert record.request_sha256 is not None
+    finally:
+        release.set()
+        server.close()
 
 
 # ---------------------------------------------------------------------------

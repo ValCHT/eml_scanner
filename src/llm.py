@@ -248,14 +248,23 @@ class LunaClient:
         except urllib.error.URLError as error:
             reason = expurgate(str(error.reason))
             raise LLMTransportError(f"connection failed: {reason}") from error
+        except OSError as error:
+            # ConnectionResetError and other raw socket errors are raised
+            # DIRECTLY by http.client during read (not wrapped in URLError):
+            # without this catch-all they would escape complete_json and
+            # break the frozen (None, CallRecord) public contract.
+            raise LLMTransportError(f"network I/O failure: {expurgate(str(error))}") from error
 
     # -- response handling -----------------------------------------------------
 
     @staticmethod
-    def _extract_result(body: bytes, schema: dict[str, Any]) -> tuple[dict[str, Any], str | None, dict[str, int | None]]:
+    def _extract_result(
+        body: bytes, schema: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None, dict[str, int | None], bool]:
         """Parse a successful HTTP body; every anomaly is an explicit error.
 
-        The returned usage is already normalized to the CallRecord fields.
+        Returns ``(result, returned_model, usage, fenced)`` — 4 items. The
+        usage is already normalized to the CallRecord fields.
         """
 
         try:
@@ -401,9 +410,14 @@ class LunaClient:
                 last_error = error
                 self._capture_error(attempt, error)
                 continue  # transient or not: keep the first-class error, retry within budget
-            self._capture_response(attempt, raw)
+            # Hash of the EXACT provider bytes, computed BEFORE any parsing
+            # (blocker 2): this is the only provider-response fingerprint
+            # that is ever persisted; the raw body itself never is.
+            response_sha256 = hashlib.sha256(raw).hexdigest()
             if status != 200:
                 last_error = LLMTransportError(f"unexpected HTTP status {status}")
+                self._capture_response_meta(attempt, response_sha256, len(raw), None, None, None)
+                self._capture_error(attempt, last_error)
                 continue
             try:
                 result, returned_model, usage, fenced = self._extract_result(raw, schema)
@@ -411,10 +425,34 @@ class LunaClient:
                 last_error = error
                 if record.first_attempt_schema_valid is None and attempt == 1:
                     record.first_attempt_schema_valid = False
+                self._capture_response_meta(attempt, response_sha256, len(raw), None, None, None)
                 self._capture_error(attempt, error)
                 continue
             if attempt == 1:
                 record.first_attempt_schema_valid = True
+            # No-model-fallback (blocker 3): a success is never declared when
+            # the provider did not report the model actually used, or when it
+            # silently substituted the requested model.
+            if returned_model is None:
+                last_error = LLMInvalidResponse(
+                    "provider did not report the model actually used"
+                )
+                self._capture_response_meta(attempt, response_sha256, len(raw), None, usage, fenced)
+                self._capture_error(attempt, last_error)
+                continue
+            if returned_model != record.requested_model:
+                last_error = LLMInvalidResponse(
+                    "model substitution refused: requested "
+                    f"{record.requested_model!r}, returned {returned_model!r}"
+                )
+                self._capture_response_meta(
+                    attempt, response_sha256, len(raw), returned_model, usage, fenced
+                )
+                self._capture_error(attempt, last_error)
+                continue
+            self._capture_response_meta(
+                attempt, response_sha256, len(raw), returned_model, usage, fenced
+            )
             record.status = "ok"
             record.returned_model = returned_model
             record.input_tokens = usage["input_tokens"]
@@ -427,18 +465,27 @@ class LunaClient:
                 # smoke receipt mirror it; nothing is injected into the
                 # validated result object.
                 self._capture_trace(attempt, "fence_extracted")
-            record.response_refs = [
-                str(path.relative_to(self._capture_dir))  # type: ignore[union-attr]
-                for path in sorted(self._capture_dir.glob("attempt_*_*.json*"))  # type: ignore[union-attr]
-            ]
+            record.response_refs = self._attempt_artifact_names()
             return result, record
 
+        # Blocker 1: the frozen public contract returns (None, record) on any
+        # failure with record.status="error"; the error classes stay internal
+        # (used by _post_bytes / _extract_result) and NEVER escape this
+        # method. The cause remains available through the error artifacts
+        # referenced by response_refs.
         record.status = "error"
-        if last_error is not None:
-            # Re-raise the original error class: the caller must be able to
-            # distinguish a timeout from a refusal or a transport failure.
-            raise last_error
-        raise LLMTimeout("no attempt could be executed before the deadline")
+        record.response_refs = self._attempt_artifact_names()
+        return None, record
+
+    def _attempt_artifact_names(self) -> list[str]:
+        """Names of every attempt artifact (metadata, errors, traces)."""
+
+        if self._capture_dir is None:
+            return []
+        return sorted(
+            str(path.relative_to(self._capture_dir))
+            for path in self._capture_dir.glob("attempt_*")
+        )
 
     # -- capture helpers (usage/hashes only; never request headers) -------------
 
@@ -451,10 +498,33 @@ class LunaClient:
             encoding="utf-8",
         )
 
-    def _capture_response(self, attempt: int, raw: bytes) -> None:
+    def _capture_response_meta(
+        self,
+        attempt: int,
+        response_sha256: str,
+        response_bytes: int,
+        returned_model: str | None,
+        usage: dict[str, int | None] | None,
+        fenced: bool | None,
+    ) -> None:
+        """Blocker 2: metadata ONLY — the raw provider response body is never
+        written to disk. Persisted fields: SHA-256 of the exact raw bytes
+        (computed before parsing), byte size, returned model, usage and the
+        markdown-fence trace flag when observed."""
+
         if self._capture_dir is None:
             return
-        (self._capture_dir / f"attempt_{attempt}_response.json").write_bytes(raw)
+        meta = {
+            "response_sha256": response_sha256,
+            "response_bytes": response_bytes,
+            "returned_model": returned_model,
+            "usage": usage,
+            "fence_extracted": fenced,
+        }
+        (self._capture_dir / f"attempt_{attempt}_response_meta.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def _capture_error(self, attempt: int, error: LLMError) -> None:
         if self._capture_dir is None:
