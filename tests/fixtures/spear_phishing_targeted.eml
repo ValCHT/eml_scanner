@@ -1,0 +1,25 @@
+From: "Claire Dubois (Achats)" <claire.dubois@fournisseur-projet.example>
+To: marie.martin@entreprise.example
+Subject: =?utf-8?q?Projet_Orion_-_revue_budgetaire_de_mardi?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <spear-006@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <claire.dubois@fournisseur-projet.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bnd_spear"
+
+--bnd_spear
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Bonjour Marie,
+Pour la revue budgetaire de mardi sur le projet Orion, j'ai depose la synthese achats dans le dossier securise.
+Connexion: https://orion-docs.notice.test/auth?token=ORION-2025
+
+--bnd_spear
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Bonjour Marie,</p><p>Pour la revue budgetaire de mardi sur le projet Orion, la synthese achats est dans le dossier securise.</p><p><a href="https://orion-docs.notice.test/auth?token=ORION-2025">Acceder au dossier Orion</a></p></body></html>
+--bnd_spear--
+

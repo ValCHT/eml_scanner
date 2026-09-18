@@ -1,0 +1,24 @@
+From: "Facturation" <facturation@fournisseur.example>
+To: comptabilite@entreprise.example
+Subject: =?utf-8?q?Facture_FA-2025-114_-_RIB_modifie?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <attach-007@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@fournisseur.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd_attach"
+
+--bnd_attach
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Veuillez trouver la facture ci-joint et modifier le paiement vers le nouveau compte.
+
+--bnd_attach
+Content-Type: text/plain; charset="utf-8"; name="facture.txt"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="facture.txt"
+
+Rml4dHVyZSBiw6luaWduZSA6IGF1Y3VuIHByb2dyYW1tZS4=
+--bnd_attach--
+

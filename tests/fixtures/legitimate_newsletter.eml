@@ -1,0 +1,25 @@
+From: "=?utf-8?q?Association_Photo_Lumi=C3=A8re?=" <newsletter@photo-lumiere.example.org>
+To: abonne@example.org
+Subject: =?utf-8?q?La_gazette_de_septembre?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <newsletter-002@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@news.example.org>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bnd_newsletter"
+
+--bnd_newsletter
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+La gazette de septembre est en ligne.
+Article: https://news.example.org/article/42
+Desabonnement: https://news.example.org/unsubscribe?u=abonne&camp=sept
+
+--bnd_newsletter
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Le portfolio de septembre est en ligne.</p><p><a href="https://news.example.org/article/42">Lire le portfolio</a></p><p><a href="https://news.example.org/unsubscribe?u=abonne&amp;camp=sept">Desabonnement</a></p></body></html>
+--bnd_newsletter--
+

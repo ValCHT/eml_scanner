@@ -1,0 +1,23 @@
+From: "Livraison" <livraison@suivi-colis.example>
+To: victime@example.org
+Subject: =?utf-8?q?Colis_en_attente_-_frais_de_livraison?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <redirect-010@fixture.test>
+Received: from mailer.fixture.test (192.0.2.77) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@suivi-colis.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bnd_redirect"
+
+--bnd_redirect
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Un colis vous attend. Reglez 1,99 EUR de frais et confirmez vos identifiants bancaires: https://redirect.notice.test/r/42?src=sms
+
+--bnd_redirect
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Un colis vous attend.</p><p><a href="https://redirect.notice.test/r/42?src=sms">Regler les frais et confirmer</a></p></body></html>
+--bnd_redirect--
+

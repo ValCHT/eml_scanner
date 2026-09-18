@@ -1,0 +1,24 @@
+From: "Messagerie Exemple" <alert@notice.test>
+To: victime@example.org
+Subject: =?utf-8?q?URGENT_=3A_confirmez_votre_mot_de_passe?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <phishing-simple-001@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@notice.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bnd_phishing_simple"
+
+--bnd_phishing_simple
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Votre mot de passe expire dans 24 heures.
+Confirmez-le immediatement: https://login.notice.test/verify
+
+--bnd_phishing_simple
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>Votre mot de passe expire dans 24 heures.</p><p><a href="https://login.notice.test/verify?uid=V1C2">https://mail.example.com</a></p></body></html>
+--bnd_phishing_simple--
+

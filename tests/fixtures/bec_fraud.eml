@@ -1,0 +1,17 @@
+From: "Direction Generale" <dg@entreprise.example>
+To: tresorerie@entreprise.example
+Subject: =?utf-8?q?Transfert_urgent_-_changement_d'IBAN?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <bec-004@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <dg@entreprise.example>
+Reply-To: comptabilite@consultant.example.net
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Transferz 18 450 EUR au nouveau beneficiaire avant 17h.
+IBAN: FR76 3000 4000 0100 0012 3456 789.
+Confidentialite absolue: ne passez pas par le circuit a quatre yeux, le dossier est suivi par la direction.
+Confirmez par retour de mail uniquement.
+

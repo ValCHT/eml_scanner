@@ -1,0 +1,24 @@
+From: paiement@fournisseur.example
+To: comptabilite@entreprise.example
+Subject: =?utf-8?q?Paiement_fournisseur?=
+Subject: Paiement fournisseur - copie
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <malformed-014@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@fournisseur.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bnd_malformed"
+
+--bnd_malformed
+Content-Type: text/plain; charset="x-unknown-9"
+Content-Transfer-Encoding: 8bit
+
+Demande de paiement: veuillez regler la facture FA-2025-114 avant le 30 septembre.
+
+--bnd_malformed
+Content-Type: application/octet-stream; name="detail.txt"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="detail.txt"
+
+QUJDRE
+
