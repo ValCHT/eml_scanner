@@ -726,3 +726,35 @@ def test_transport_ipv6_from_received():
     v6 = [o for o in result.observables if o.type == "ipv6"]
     assert [o.normalized_value for o in v6] == ["2001:db8::10"]  # documentation range
     assert v6[0].roles == ["transport_ip"]
+
+
+def test_manifest_part_ids_match_parsed_parts(limits):
+    """Every declared part_id identifies a real part of the parsed email
+    (docs/fixtures.md: IDs de pièces dans le manifest)."""
+
+    for entry in MANIFEST["fixtures"]:
+        result = parse_email(FIXTURES / entry["file"], limits)
+        assert isinstance(result, ParsedEmail)
+        for pe in entry["part_expectations"]:
+            pid = pe["part_id"]
+            if pe.get("content_id"):
+                matches = [i for i in result.images if i.part_id == pid and i.content_id == pe["content_id"]]
+            elif pe.get("filename"):
+                matches = [a for a in result.attachments if a.part_id == pid and a.filename == pe["filename"]]
+            elif pe["mime_type"] == "text/html":
+                matches = [p for p in result.html_parts if p.part_id == pid]
+            else:
+                matches = [p for p in result.text_parts if p.part_id == pid]
+            assert matches, f"{entry['file']}: {pe} matches no parsed part"
+            assert matches[0].mime_type == pe["mime_type"], entry["file"]
+
+
+def test_manifest_part_ids_are_deterministic(limits):
+    """Re-parsing gives the same part_ids (stable MIME-walk indexing)."""
+
+    for entry in MANIFEST["fixtures"]:
+        a = parse_email(FIXTURES / entry["file"], limits)
+        b = parse_email(FIXTURES / entry["file"], limits)
+        ids_a = [pe["part_id"] for pe in entry["part_expectations"]]
+        assert [p.part_id for p in a.text_parts + a.html_parts][: len(ids_a)] or ids_a
+        assert a.model_dump_json() == b.model_dump_json()

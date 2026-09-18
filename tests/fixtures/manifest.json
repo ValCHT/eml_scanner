@@ -55,10 +55,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -114,10 +116,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -160,10 +164,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -198,7 +204,8 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0001"
         }
       ],
       "constraints": [
@@ -232,7 +239,8 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0001"
         }
       ],
       "constraints": [
@@ -278,10 +286,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -324,11 +334,13 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
           "mime_type": "text/plain",
-          "filename": "facture.txt"
+          "filename": "facture.txt",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -373,10 +385,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -433,10 +447,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -480,10 +496,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -524,11 +542,13 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
           "mime_type": "image/png",
-          "content_id": "qr1"
+          "content_id": "qr1",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -570,11 +590,13 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
           "mime_type": "image/png",
-          "content_id": "vis1"
+          "content_id": "vis1",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -640,10 +662,12 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
-          "mime_type": "text/html"
+          "mime_type": "text/html",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
@@ -682,11 +706,13 @@
       },
       "part_expectations": [
         {
-          "mime_type": "text/plain"
+          "mime_type": "text/plain",
+          "part_id": "part_0002"
         },
         {
           "mime_type": "application/octet-stream",
-          "filename": "detail.txt"
+          "filename": "detail.txt",
+          "part_id": "part_0003"
         }
       ],
       "constraints": [
