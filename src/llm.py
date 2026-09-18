@@ -22,6 +22,18 @@ because FILES ALLOWED for TICKET-02 does not include the dependency
 manifests (pyproject.toml / requirements.lock). httpx will be introduced by
 the ticket that may edit them; the client isolates the transport in
 ``_post_bytes`` so that swap stays local.
+
+TICKET-04 addition — exact-bytes input audit (docs/contracts.md §2.6.1):
+the payload is serialized ONCE, the audit (``input_audit`` fields) is
+calculated from those exact bytes and those exact bytes are what the
+transport sends. Per attempt actually emitted, the client archives
+``<phase>_attempt_<n>.input_audit.json``; the full HTTP request body is
+archived as ``<phase>_attempt_<n>.request.json`` ONLY when the caller
+explicitly enables it (``persist_request_body=True``), which the harness
+does exclusively for ``source_profile=fixture``. The default is
+minimization: for ``public_corpus`` / ``private_authorized`` the same
+serialization/audit path runs entirely in memory and no request body is
+ever persisted.
 """
 
 from __future__ import annotations
@@ -37,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .prompts import canonical_bytes
 from .state import CallRecord
 
 #: Mask anything secret-like before an error message can be displayed or
@@ -183,6 +196,7 @@ class LunaClient:
         phase: str = "internal",
         capture_dir: Path | None = None,
         clock: Any = time.monotonic,
+        persist_request_body: bool = False,
     ) -> None:
         if phase not in ("internal", "final"):
             raise ValueError("phase must be 'internal' or 'final'")
@@ -190,6 +204,11 @@ class LunaClient:
         self._phase = phase
         self._capture_dir = Path(capture_dir) if capture_dir is not None else None
         self._clock = clock
+        # §2.6.1 minimization: the full request body is persisted ONLY when
+        # the caller explicitly allows it (fixture source profile for G2
+        # wiring proof). Default False: public_corpus/private_authorized
+        # never leave a request body on disk.
+        self._persist_request_body = persist_request_body
 
     # -- request construction ------------------------------------------------
 
@@ -362,6 +381,114 @@ class LunaClient:
             ),
         }
 
+    # -- exact-bytes input audit (docs/contracts.md §2.6.1) ---------------------
+
+    @staticmethod
+    def compute_input_audit(body: bytes, phase: str) -> dict[str, Any]:
+        """Audit fields computed from the EXACT bytes handed to transport.
+
+        The serialized request body is parsed back (same bytes object that
+        ``_post_bytes`` receives), the user envelope is extracted from it and
+        the §2.6.1 fields are derived from that extraction — never from the
+        pre-projection objects:
+
+        - ``input_payload_sha256``: SHA-256 of the exact body bytes;
+        - ``untrusted_email_sha256``: SHA-256 of ``C(UNTRUSTED_EMAIL)``
+          extracted from the user message in this body (``None`` when the
+          call carries no INTERNAL/FINAL envelope — e.g. the G0 smoke);
+        - ``body_chars_sent`` / ``headers_chars_sent``: Unicode character
+          counters of the useful content actually included;
+        - ``evidence_count_sent`` / ``observable_count_sent``: registry
+          entry counts actually included.
+        """
+
+        payload = json.loads(body.decode("utf-8"))
+        messages = payload.get("messages") if isinstance(payload, dict) else None
+        user_content: Any = None
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict) and message.get("role") == "user":
+                    user_content = message.get("content")
+        # Multimodal form: read the first text block of the content parts.
+        if isinstance(user_content, list):
+            first_text = next(
+                (part.get("text") for part in user_content if isinstance(part, dict) and part.get("type") == "text"),
+                None,
+            )
+            user_content = first_text
+
+        envelope: dict[str, Any] | None = None
+        if isinstance(user_content, str):
+            try:
+                parsed_content = json.loads(user_content)
+            except json.JSONDecodeError:
+                parsed_content = None
+            if isinstance(parsed_content, dict) and "UNTRUSTED_EMAIL" in parsed_content:
+                envelope = parsed_content
+
+        if envelope is None:
+            # No INTERNAL/FINAL envelope in this call (e.g. smoke probe): the
+            # envelope-specific audit fields are truthfully absent/zero, and
+            # the payload hash stays exact.
+            return {
+                "phase": phase,
+                "input_payload_sha256": hashlib.sha256(body).hexdigest(),
+                "untrusted_email_sha256": None,
+                "body_chars_sent": 0,
+                "headers_chars_sent": 0,
+                "evidence_count_sent": 0,
+                "observable_count_sent": 0,
+            }
+
+        untrusted = envelope["UNTRUSTED_EMAIL"]
+        body_chars = sum(
+            len(part.get("text") or "")
+            for part in (
+                *(untrusted.get("text_parts") or []),
+                *(untrusted.get("html_parts") or []),
+            )
+            if isinstance(part, dict)
+        )
+        headers_chars = sum(
+            len(header.get("name") or "") + len(header.get("decoded_value") or "")
+            for header in (untrusted.get("headers") or [])
+            if isinstance(header, dict)
+        )
+        evidence_registry = envelope.get("EVIDENCE_REGISTRY")
+        observable_registry = envelope.get("OBSERVABLE_REGISTRY")
+        return {
+            "phase": phase,
+            "input_payload_sha256": hashlib.sha256(body).hexdigest(),
+            "untrusted_email_sha256": hashlib.sha256(
+                canonical_bytes(untrusted)
+            ).hexdigest(),
+            "body_chars_sent": body_chars,
+            "headers_chars_sent": headers_chars,
+            "evidence_count_sent": (
+                len(evidence_registry) if isinstance(evidence_registry, dict) else 0
+            ),
+            "observable_count_sent": (
+                len(observable_registry) if isinstance(observable_registry, dict) else 0
+            ),
+        }
+
+    def _capture_attempt_input(
+        self, attempt: int, body: bytes, audit: dict[str, Any]
+    ) -> None:
+        """Archive the per-attempt audit (always) and the request body (only
+        when explicitly allowed for the fixture source profile)."""
+
+        if self._capture_dir is None:
+            return
+        (self._capture_dir / f"{self._phase}_attempt_{attempt}.input_audit.json").write_text(
+            json.dumps(audit, indent=2, sort_keys=True, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if self._persist_request_body:
+            # The EXACT bytes object handed to transport — one serialization,
+            # one variable, no independent re-serialization for the archive.
+            (self._capture_dir / f"{self._phase}_attempt_{attempt}.request.json").write_bytes(body)
+
     # -- public contract ---------------------------------------------------------
 
     def complete_json(
@@ -404,6 +531,11 @@ class LunaClient:
                 break
             record.attempts = attempt
             record.request_sha256 = hashlib.sha256(body).hexdigest()
+            # §2.6.1: audit computed from the EXACT body bytes about to be
+            # handed to transport (same variable, no re-serialization), then
+            # those exact bytes are sent.
+            input_audit = self.compute_input_audit(body, self._phase)
+            self._capture_attempt_input(attempt, body, input_audit)
             try:
                 status, raw = self._post_bytes(url, body, timeout_s=remaining)
             except LLMError as error:
@@ -482,9 +614,12 @@ class LunaClient:
 
         if self._capture_dir is None:
             return []
+        # ``*attempt_*`` also matches the §2.6.1 per-attempt audit files
+        # (``<phase>_attempt_<n>.input_audit.json``) and, when the fixture
+        # source profile explicitly allows it, the archived request bodies.
         return sorted(
             str(path.relative_to(self._capture_dir))
-            for path in self._capture_dir.glob("attempt_*")
+            for path in self._capture_dir.glob("*attempt_*")
         )
 
     # -- capture helpers (usage/hashes only; never request headers) -------------

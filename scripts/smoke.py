@@ -13,6 +13,16 @@ the endpoint configured by ``Settings``:
 - credentials present, failure  -> non-zero exit, ``live_failed``; G0 then
   FAIL/BLOCKED.
 
+``smoke.py luna --require-configured`` (TICKET-04, G2): credentials are
+MANDATORY —
+
+- credentials absent            -> explicit failure, non-zero exit (never
+  ``live_pending``; G2 lifts the G0 allowance);
+- credentials + real successful structured call -> exit 0;
+- credentials + failed real call -> non-zero exit.
+
+Success is never simulated.
+
 ``smoke.py luna-efforts`` runs REAL structured probes for ``medium`` and
 ``xhigh`` reasoning efforts (same tiny ``{ok: boolean}`` schema, no SOC
 content) and archives factual observations per effort: HTTP-level success,
@@ -125,11 +135,20 @@ def _write_receipt(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def smoke_luna(if_configured: bool) -> int:
+def smoke_luna(if_configured: bool = False, require_configured: bool = False) -> int:
     """Real Luna smoke; distinguishes pending (no key) from failure (key present).
 
     ``complete_json`` never raises (frozen public contract): every failure
     comes back as ``(None, record)`` with ``record.status="error"``.
+
+    Modes (mutually exclusive at the CLI level):
+
+    - ``--if-configured``: no credentials => explicit ``live_pending`` and
+      exit 0 (permissive G0 behavior, unchanged);
+    - ``--require-configured``: no credentials => explicit failure and
+      non-zero exit; credentials + real successful structured call => exit
+      0; credentials + failed real call => non-zero. Success is never
+      simulated.
     """
 
     settings: Settings = load_settings(None)
@@ -137,6 +156,23 @@ def smoke_luna(if_configured: bool) -> int:
     key_present = settings.LITELLM_API_KEY is not None
 
     if not key_present:
+        if require_configured:
+            payload = {
+                "status": "live_failed",
+                "reason": (
+                    "LITELLM_API_KEY absent: --require-configured demands real "
+                    "credentials; nothing simulated, no live_pending allowance."
+                ),
+                "requested_model": settings.LITELLM_MODEL,
+                "endpoint_configured": settings.LITELLM_CHAT_URL,
+            }
+            _write_receipt(capture_dir / "smoke_result.json", payload)
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            print(
+                "smoke luna: FAILED - credentials absent and --require-configured passed",
+                file=sys.stderr,
+            )
+            return 1
         payload = {
             "status": "live_pending",
             "reason": "LITELLM_API_KEY absent: no real call possible; nothing simulated.",
@@ -311,10 +347,23 @@ def main() -> int:
         action="store_true",
         help="credentials absent => exit 0 with explicit live_pending (never a fake success)",
     )
+    parser.add_argument(
+        "--require-configured",
+        action="store_true",
+        help=(
+            "TICKET-04/G2: credentials mandatory - absent => explicit failure "
+            "(non-zero); real structured call must succeed => exit 0"
+        ),
+    )
     args = parser.parse_args()
+    if args.if_configured and args.require_configured:
+        parser.error("--if-configured and --require-configured are mutually exclusive")
     os.chdir(PROJECT_ROOT)
     if args.target == "luna":
-        return smoke_luna(if_configured=args.if_configured)
+        return smoke_luna(
+            if_configured=args.if_configured,
+            require_configured=args.require_configured,
+        )
     return probe_luna_efforts()
 
 
