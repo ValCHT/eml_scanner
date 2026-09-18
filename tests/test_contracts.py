@@ -17,7 +17,9 @@ from src.state import (
     Assessment,
     EmailTriageState,
     Evidence,
+    Inference,
     Observable,
+    ObservableAssessment,
     ParsedEmail,
     Probabilities,
     Timings,
@@ -288,3 +290,50 @@ def test_assessment_defaults_not_shared() -> None:
     assert a2.observations == []
     a1.missing_information.append("tool_unavailable")
     assert a2.missing_information == []
+
+
+def test_nested_required_fields_have_no_defaults() -> None:
+    """Inference and ObservableAssessment: nested list fields are required,
+    matching schemas/assessment.schema.json (no default_factory)."""
+
+    with pytest.raises(ValidationError):  # Inference.evidence_ids required
+        Inference(id="inf_1", code="link_mismatch", summary="s", rag_case_ids=[])
+    with pytest.raises(ValidationError):  # Inference.rag_case_ids required
+        Inference(id="inf_1", code="link_mismatch", summary="s", evidence_ids=[])
+    with pytest.raises(ValidationError):  # ObservableAssessment.evidence_ids required
+        ObservableAssessment(observable_id="obs_1", category="B", reason_code="unconfirmed")
+    # explicit empty lists are valid (empty != missing)
+    Inference(id="inf_1", code="link_mismatch", summary="s", evidence_ids=[], rag_case_ids=[])
+    ObservableAssessment(observable_id="obs_1", category="B", evidence_ids=[], reason_code="unconfirmed")
+
+
+def test_assessment_rejects_more_than_six_inferences() -> None:
+    """Schema: at most six inferences."""
+
+    base = dict(make_assessment().model_dump())
+    inferences = [
+        Inference(id=f"inf_{i}", code="insufficient_information", summary="s", evidence_ids=[], rag_case_ids=[])
+        for i in range(7)
+    ]
+    with pytest.raises(ValidationError):
+        Assessment(**{**base, "inferences": inferences})
+    Assessment(**{**base, "inferences": inferences[:6]})  # exactly 6 is valid
+
+
+def test_assessment_rejects_more_than_three_decisive_ids() -> None:
+    """Schema: at most three decisive_evidence_ids."""
+
+    base = dict(make_assessment().model_dump())
+    with pytest.raises(ValidationError):
+        Assessment(**{**base, "decisive_evidence_ids": ["ev_1", "ev_2", "ev_3", "ev_4"]})
+    Assessment(**{**base, "decisive_evidence_ids": ["ev_1", "ev_2", "ev_3"]})  # 3 is valid
+
+
+def test_assessment_rejects_missing_top_level_fields() -> None:
+    """Schema-required top-level fields cannot be omitted via defaults."""
+
+    required_fields = set(Assessment.model_fields)
+    for omitted in required_fields:
+        partial = {k: v for k, v in make_assessment().model_dump().items() if k != omitted}
+        with pytest.raises(ValidationError):
+            Assessment(**partial)

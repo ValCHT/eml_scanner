@@ -261,14 +261,14 @@ class Inference(_Strict):
         "insufficient_information",
     ]
     summary: str = Field(max_length=240)
-    evidence_ids: list[str] = Field(default_factory=list)
-    rag_case_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str]
+    rag_case_ids: list[str]
 
 
 class ObservableAssessment(_Strict):
     observable_id: str
     category: Literal["M", "S", "C", "B"] | None
-    evidence_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str]
     reason_code: Literal[
         "attack_artifact",
         "context_only",

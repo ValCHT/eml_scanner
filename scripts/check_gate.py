@@ -75,15 +75,67 @@ GATE_COMMANDS: dict[str, list[str]] = {
 
 #: Tickets that must be recorded as DONE before the gate receipt may reach
 #: PASS (docs/gates.md §5.1). G0 requires TICKET-01 AND TICKET-02: command
-#: success alone never yields a premature G0 PASS.
+#: success alone never yields a premature G0 PASS. The table is complete for
+#: every gate so no later gate can PASS without its tickets recorded DONE.
 REQUIRED_TICKETS: dict[str, list[str]] = {
     "G0": ["TICKET-01", "TICKET-02"],
+    "G1": ["TICKET-03"],
+    "G2": ["TICKET-04"],
+    "G3": ["TICKET-05"],
+    "G4": ["TICKET-06", "TICKET-07", "TICKET-08"],
+    "G5": ["TICKET-09", "TICKET-10", "TICKET-11"],
+    "G6": ["TICKET-12", "TICKET-13", "TICKET-14"],
+    "G7-A": ["TICKET-15"],
+    "G7-B": ["TICKET-16"],
+    "G7-C": ["TICKET-17"],
 }
 
 #: Files that must exist for the gate (docs/gates.md §5.2).
 REQUIRED_FILES: dict[str, list[str]] = {
     "G7-C": ["docs/fine_tuning_decision.md"],
 }
+
+#: The eleven mandatory fields of docs/evaluation.md §8.5 when the G7-C
+#: decision is YES. A decision file missing any of them forbids PASS.
+G7C_YES_FIELDS = (
+    "target_failure_modes",
+    "why_prompting_is_insufficient",
+    "why_retrieval_is_insufficient",
+    "why_enrichment_is_insufficient",
+    "training_data_needed",
+    "estimated_number_of_examples",
+    "candidate_models",
+    "evaluation_protocol",
+    "non_regression_requirements",
+    "estimated_training_cost",
+    "phase_2_go_no_go_conditions",
+)
+
+
+def validate_g7c_decision_file() -> list[str]:
+    """G7-C (docs/gates.md §5.2): the decision file must carry an explicit
+    YES/NO/INCONCLUSIVE status and, when YES, all eleven §8.5 fields.
+    An empty or status-less file can never yield a PASS."""
+
+    problems: list[str] = []
+    path = PROJECT_ROOT / "docs" / "fine_tuning_decision.md"
+    if not path.is_file():
+        return ["docs/fine_tuning_decision.md missing"]
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return ["docs/fine_tuning_decision.md is empty"]
+
+    m = re.search(r"(?i)fine[-_ ]?tune[^\n]*?(YES|NO|INCONCLUSIVE)", text)
+    decision = m.group(1).upper() if m else None
+    if decision is None:
+        problems.append("no explicit decision status YES|NO|INCONCLUSIVE found")
+        return problems
+
+    if decision == "YES":
+        for field in G7C_YES_FIELDS:
+            if not re.search(rf"(?im)^[#*\-\s]*{re.escape(field)}\b", text):
+                problems.append(f"YES decision but §8.5 field missing: {field}")
+    return problems
 
 REQUIRED_TESTS: dict[str, dict[str, int]] = {
     "G0": {"min_collected": 1, "failures": 0, "skipped": 0, "xfailed": 0},
@@ -255,11 +307,20 @@ def record(gate: str) -> int:
     if missing_tickets:
         all_ok = False
 
+    # G7-C deep validation (docs/gates.md §5.2, evaluation.md §8.5): an
+    # existing-but-empty or incomplete decision file can never yield PASS.
+    g7c_problems: list[str] = []
+    if gate == "G7-C":
+        g7c_problems = validate_g7c_decision_file()
+        if g7c_problems:
+            all_ok = False
+
     receipt = {
         "status": "PASS" if all_ok else "FAIL",
         "gate": gate,
         "completed_tickets": completed,
         "missing_tickets": missing_tickets,
+        "g7c_validation_problems": g7c_problems,
         "tested_commit": worktree_fingerprint(),
         "validated_scope_hashes": {},
         "commands": commands,
@@ -276,6 +337,9 @@ def record(gate: str) -> int:
     print(f"gate={gate} status={receipt['status']}")
     if missing_tickets:
         print(f"  missing tickets for PASS: {', '.join(missing_tickets)}")
+    if g7c_problems:
+        for problem in g7c_problems:
+            print(f"  G7-C validation problem: {problem}")
     for entry in commands:
         print(f"  exit={entry['exit_code']} {entry['command']}")
     return 0 if all_ok else 1
