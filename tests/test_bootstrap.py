@@ -5,6 +5,9 @@ Secret presence/absence only — values are never displayed.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -229,3 +232,98 @@ def test_settings_module_rejects_unknown_env_field(clean_env: None, monkeypatch:
     monkeypatch.setenv("TOTALLY_UNKNOWN_SETTING", "1")
     settings = load_settings(None)
     assert not hasattr(settings, "TOTALLY_UNKNOWN_SETTING")
+
+
+# ---------------------------------------------------------------------------
+# G0 maintenance fix: real CLI semantics of the pytest ``--live`` flag.
+#
+# The frozen gate commands (docs/gates.md §5.2) run pytest with ``--live``;
+# the option is defined by tests/conftest.py, which must ALSO lift the
+# default ``-m 'not live'`` exclusion of pyproject.toml ``addopts`` when the
+# flag is explicitly given. These regressions exercise the REAL conftest of
+# this repository, copied into a temporary isolated pytest project, through
+# subprocess (shell=False) — cross-platform, no Bash/PowerShell syntax.
+# ---------------------------------------------------------------------------
+
+
+def _write_live_probe_project(tmp_path: Path, project_root: Path) -> Path:
+    """Minimal isolated pytest project using the REAL repository conftest."""
+
+    conftest_source = (project_root / "tests" / "conftest.py").read_text(encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(conftest_source, encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\n"
+        "addopts = \"-m 'not live'\"\n"
+        "markers = [\"live: tests calling real external services\", \"g0: gate G0 tests\"]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_probe.py").write_text(
+        "import pytest\n\n\n@pytest.mark.live\ndef test_live_probe() -> None:\n    assert True\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def _run_pytest_in_probe(project_root: Path, probe_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run the repository interpreter's pytest inside the probe project."""
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(project_root)  # the copied conftest imports src.config
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "test_probe.py", "-q", *args],
+        cwd=probe_dir,
+        shell=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+
+def test_pytest_live_flag_semantics(project_root: Path, tmp_path: Path) -> None:
+    """A/B/C: default exclusion, flag acceptance, real execution of live."""
+
+    probe_dir = _write_live_probe_project(tmp_path, project_root)
+
+    # A. WITHOUT --live: the live-marked test stays excluded by the default
+    #    ``-m 'not live'`` addopts; nothing runs (exit code 5, deselected).
+    without_flag = _run_pytest_in_probe(project_root, probe_dir)
+    assert without_flag.returncode == 5, without_flag.stdout + without_flag.stderr
+    assert "deselected" in without_flag.stdout
+    assert "1 passed" not in without_flag.stdout
+
+    # B/C. WITH --live: the option is ACCEPTED (no ``unrecognized arguments``)
+    #      AND the live-marked test is REALLY executed — i.e. the flag does
+    #      not merely get recognized while the default exclusion stays active.
+    with_flag = _run_pytest_in_probe(project_root, probe_dir, "--live")
+    assert "unrecognized arguments" not in with_flag.stderr, with_flag.stderr
+    assert with_flag.returncode == 0, with_flag.stdout + with_flag.stderr
+    assert "1 passed" in with_flag.stdout
+    assert "deselected" not in with_flag.stdout
+
+
+def test_pytest_live_flag_preserves_explicit_marker_expression(
+    project_root: Path, tmp_path: Path
+) -> None:
+    """``--live`` never destroys a user-chosen ``-m`` expression that differs
+    from the project default (the only preservation the mandate requires).
+
+    Known, documented limit: an explicit ``-m 'not live'`` is byte-identical
+    to the ``addopts`` default after pytest merges them, so the flag lifts it
+    too — the spec only protects expressions DIFFERENT from the default.
+    """
+
+    probe_dir = _write_live_probe_project(tmp_path, project_root)
+
+    # An explicit non-default expression is preserved: the live test is
+    # deselected by the user's own ``-m 'g0'`` despite ``--live`` being given.
+    explicit_other = _run_pytest_in_probe(project_root, probe_dir, "--live", "-m", "g0")
+    assert "unrecognized arguments" not in explicit_other.stderr, explicit_other.stderr
+    assert explicit_other.returncode == 5, explicit_other.stdout + explicit_other.stderr
+    assert "deselected" in explicit_other.stdout
+    assert "1 passed" not in explicit_other.stdout
+
+    # An explicit live-targeting expression keeps working with the flag.
+    explicit_live = _run_pytest_in_probe(project_root, probe_dir, "--live", "-m", "live")
+    assert explicit_live.returncode == 0, explicit_live.stdout + explicit_live.stderr
+    assert "1 passed" in explicit_live.stdout
