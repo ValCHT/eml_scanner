@@ -3,6 +3,13 @@
 ``Settings`` mirrors the canonical environment variable names and defaults.
 All secrets are ``SecretStr | None`` and are excluded from the public dump
 (``Settings.public_dump``). No secret value is ever printed or logged.
+
+Authorized derogation (user request, TICKET-01): the runtime LLM default is
+``claude-haiku-4-5`` on the OpenAI-compatible endpoint injected in the
+sandbox instead of the Orange Luna proxy. Credentials are never hardcoded:
+``load_settings`` maps the injected ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL``
+environment variables onto the canonical ``LITELLM_*`` fields when the
+latter are absent.
 """
 
 from __future__ import annotations
@@ -49,9 +56,9 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
-    # --- Luna / LLM proxy ---------------------------------------------------
-    LITELLM_CHAT_URL: str = "https://management.llmproxy.ai.orange/chat/completions"
-    LITELLM_MODEL: str = "openai/gpt-5.6-luna"
+    # --- Runtime LLM (derogation: claude-haiku-4-5 instead of Luna) ---------
+    LITELLM_CHAT_URL: str = "https://www.genspark.ai/api/llm_proxy/v1/chat/completions"
+    LITELLM_MODEL: str = "claude-haiku-4-5"
     LITELLM_API_KEY: SecretStr | None = None
 
     # --- Tools credentials / switches ---------------------------------------
@@ -136,9 +143,26 @@ def load_settings(env_file: Path | None = None) -> Settings:
 
     ``env_file`` may be ``None`` (environment only) or a path to a dotenv
     file. Secrets stay ``None`` when absent; no fallback value is invented.
+
+    Sandbox credential mapping: when the canonical ``LITELLM_*`` variables
+    are not set, the OpenAI-compatible credentials injected in the sandbox
+    (``OPENAI_API_KEY``, ``OPENAI_BASE_URL``) are used. The key value is
+    only carried inside ``SecretStr`` and never logged.
     """
 
-    return Settings(_env_file=env_file, _env_file_encoding="utf-8")
+    import os
+
+    overrides: dict[str, str] = {}
+    if not os.environ.get("LITELLM_CHAT_URL") and os.environ.get("OPENAI_BASE_URL"):
+        base = os.environ["OPENAI_BASE_URL"].rstrip("/")
+        if base.endswith("/chat/completions"):
+            overrides["LITELLM_CHAT_URL"] = base
+        else:
+            overrides["LITELLM_CHAT_URL"] = base + "/chat/completions"
+    if not os.environ.get("LITELLM_API_KEY") and os.environ.get("OPENAI_API_KEY"):
+        overrides["LITELLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
+
+    return Settings(_env_file=env_file, _env_file_encoding="utf-8", **overrides)
 
 
 # ---------------------------------------------------------------------------

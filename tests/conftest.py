@@ -18,13 +18,20 @@ def project_root() -> Path:
 
 @pytest.fixture()
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove every canonical settings variable from the environment."""
+    """Remove every canonical settings variable from the environment.
+
+    Also removes the sandbox-injected OpenAI-compatible variables so the
+    credential mapping in ``load_settings`` cannot leak into tests that
+    assume a bootstrap without any key.
+    """
 
     import os
 
     from src.config import Settings
 
     for name in Settings.model_fields:
+        monkeypatch.delenv(name, raising=False)
+    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     assert not any(
         name in os.environ for name in ("LITELLM_API_KEY", "VT_API_KEY", "OPENCTI_API_KEY", "URLSCAN_API_KEY")

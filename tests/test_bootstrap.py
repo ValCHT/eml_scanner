@@ -34,8 +34,10 @@ def test_settings_load_without_any_key(clean_env: None) -> None:
 
 def test_settings_defaults_clean_env(clean_env: None) -> None:
     settings = load_settings(None)
-    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    # Authorized derogation (user request): claude-haiku-4-5 on the injected
+    # OpenAI-compatible endpoint instead of the Orange Luna proxy.
+    assert settings.LITELLM_CHAT_URL == "https://www.genspark.ai/api/llm_proxy/v1/chat/completions"
+    assert settings.LITELLM_MODEL == "claude-haiku-4-5"
     assert settings.OPENCTI_URL == "https://demo.opencti.io"
     assert settings.VT_ACCESS_AUTHORIZED is False
     assert settings.MODEL_SUPPORTS_VISION is False
@@ -115,6 +117,36 @@ def test_new_state_rejects_relative_path(clean_env: None) -> None:
 
     with pytest.raises(ValueError):
         new_state(Path("relative.eml"), "fixture", "0" * 64)
+
+
+def test_sandbox_credential_mapping(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Injected OPENAI_* variables map onto canonical LITELLM_* fields.
+
+    The key value is never displayed — only its presence is asserted.
+    """
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example/api/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
+    settings = load_settings(None)
+    assert settings.LITELLM_CHAT_URL == "https://proxy.example/api/v1/chat/completions"
+    assert settings.secret_presence()["LITELLM_API_KEY"] is True
+    # the value never leaks into dumps or repr
+    assert "mapped-secret-value-456" not in str(settings.public_dump())
+    assert "mapped-secret-value-456" not in repr(settings)
+
+
+def test_canonical_env_wins_over_sandbox_mapping(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit LITELLM_* variables take precedence over the injected ones."""
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example/api/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
+    monkeypatch.setenv("LITELLM_CHAT_URL", "https://luna.example/chat/completions")
+    settings = load_settings(None)
+    assert settings.LITELLM_CHAT_URL == "https://luna.example/chat/completions"
 
 
 def test_conftest_import_independent_of_cwd(project_root: Path) -> None:
