@@ -38,10 +38,17 @@ SECRET_PATTERNS = [
 ]
 
 #: Fixed command list per gate (docs/gates.md §5.2). Python 3.11 venv active.
+#: TICKET-02 extends G0 with the client tests and the real Luna smoke:
+#: the three VALIDATION COMMANDS of docs/tickets/TICKET-02.md.
 GATE_COMMANDS: dict[str, list[str]] = {
     "G0": [
         [sys.executable, "-m", "pip", "check"],
-        [sys.executable, "-m", "pytest", "tests/test_bootstrap.py", "tests/test_contracts.py", "-q"],
+        [
+            sys.executable, "-m", "pytest",
+            "tests/test_llm_client.py", "tests/test_bootstrap.py", "tests/test_contracts.py",
+            "-q",
+        ],
+        [sys.executable, "scripts/smoke.py", "luna", "--if-configured"],
     ],
     "G1": [[sys.executable, "-m", "pytest", "tests/test_parsing.py", "-q"]],
     "G2": [
@@ -349,8 +356,9 @@ def check_prerequisites(gate: str) -> list[str]:
             missing.append(required)
     if gate == "G0":
         for required in (
-            "src/config.py", "src/state.py", "tests/test_bootstrap.py",
-            "tests/test_contracts.py", "configs/gate.yaml", "configs/policy.yaml",
+            "src/config.py", "src/llm.py", "src/state.py", "tests/test_llm_client.py",
+            "tests/test_bootstrap.py", "tests/test_contracts.py", "scripts/smoke.py",
+            "scripts/validate_reports.py", "configs/gate.yaml", "configs/policy.yaml",
             "configs/tools.yaml", "schemas/assessment.schema.json",
             "schemas/triage_report.schema.json",
         ):
@@ -416,6 +424,31 @@ def record(gate: str) -> int:
             if tests.get(key, 0) > PYTEST_PASS_RULE[key]:
                 all_ok = False
 
+    # G0 live status (docs/tickets/TICKET-02.md): the smoke receipt must be
+    # live_ok (real answer) or live_pending (no credentials, G0-only
+    # allowance). A live_failed with credentials present always blocks PASS.
+    limitations: list[str] = []
+    if gate == "G0":
+        smoke_receipt = PROJECT_ROOT / "runs" / "gates" / "G0" / "smoke_luna" / "smoke_result.json"
+        if smoke_receipt.is_file():
+            try:
+                smoke_data = json.loads(smoke_receipt.read_text(encoding="utf-8"))
+                smoke_status = smoke_data.get("status")
+                if smoke_status == "live_pending":
+                    limitations.append(
+                        "live_pending: no Luna credentials in this environment; "
+                        "G2 must lift this pending before PASS (docs/gates.md §5.1)"
+                    )
+                elif smoke_status != "live_ok":
+                    all_ok = False
+                    limitations.append(f"smoke status {smoke_status!r} forbids G0 PASS")
+            except (json.JSONDecodeError, OSError):
+                all_ok = False
+                limitations.append("smoke receipt unreadable")
+        else:
+            all_ok = False
+            limitations.append("missing smoke receipt runs/gates/G0/smoke_luna/smoke_result.json")
+
     # Ticket completion is NEVER inferred from command success (docs/gates.md
     # §5.2). The gate may only reach PASS once its required tickets have been
     # recorded DONE in the operator registry.
@@ -446,7 +479,7 @@ def record(gate: str) -> int:
         "tests": tests,
         "live_evidence_refs": [],
         "dependency_receipts": [],
-        "limitations": [],
+        "limitations": limitations,
         "python_version": platform.python_version(),
     }
     out_dir = PROJECT_ROOT / "runs" / "gates" / gate
