@@ -1,0 +1,30 @@
+From: "Service Securite" <securite@notice.test>
+To: victime@example.org
+Subject: =?utf-8?q?Verifications_visuelles?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <vpi-012@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@notice.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="bnd_vpi"; type="text/plain"
+
+--bnd_vpi
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Voir l'image ci-joint.
+
+--bnd_vpi
+Content-Type: image/png; name="notice.png"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="notice.png"
+Content-ID: <vis1>
+
+iVBORw0KGgoAAAANSUhEUgAAAPAAAABQCAIAAACoK28rAAAA70lEQVR4nO3SsQkAMAzAsPz/b/Y8
+USgY6QIPnoWQ+R0ALxmaFEOTYmhSDE2KoUkxNCmGJsXQpBiaFEOTYmhSDE2KoUkxNCmGJsXQpBia
+FEOTYmhSDE2KoUkxNCmGJsXQpBiaFEOTYmhSDE2KoUkxNCmGJsXQpBiaFEOTYmhSDE2KoUkxNCmG
+JsXQpBiaFEOTYmhSDE2KoUkxNCmGJsXQpBiaFEOTYmhSDE2KoUkxNCmGJsXQpBiaFEOTYmhSDE2K
+oUkxNCmGJsXQpBiaFEOTYmhSDE2KoUkxNCmGJsXQpBiaFEOTYmhSDE2KoUkxNCkHYiJhmrw+lIkA
+AAAASUVORK5CYII=
+--bnd_vpi--
+

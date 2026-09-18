@@ -1,0 +1,24 @@
+From: "Imprimerie Rapide" <promo@imprimerie.example.net>
+To: contact@client.example
+Subject: =?utf-8?q?_-40=25_sur_vos_flyers-?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <spam-003@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@imprimerie.example.net>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bnd_spam"
+
+--bnd_spam
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Offre commerciale: -40% sur les flyers jusqu'a dimanche.
+Catalogue: https://promo.example.net/catalogue?src=email
+
+--bnd_spam
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>-40% sur vos flyers jusqu a dimanche.</p><p><a href="https://promo.example.net/catalogue?src=email">Voir le catalogue</a></p></body></html>
+--bnd_spam--
+

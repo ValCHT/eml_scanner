@@ -1,0 +1,388 @@
+{
+  "version": "1.0",
+  "description": "Parser fixture expectations (TICKET-03, docs/fixtures.md). Design labels are expectations, never G2 PASS assertions.",
+  "fixtures": [
+    {
+      "file": "phishing_simple.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "URGENT : confirmez votre mot de passe",
+        "from_addresses": [
+          "alert@notice.test"
+        ],
+        "to_addresses": [
+          "victime@example.org"
+        ],
+        "header_presence": [
+          "From",
+          "To",
+          "Subject",
+          "Date",
+          "Message-ID",
+          "Received",
+          "Return-Path",
+          "MIME-Version",
+          "Content-Type"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://login.notice.test/verify?uid=V1C2",
+            "role": "href",
+            "hostname": "login.notice.test",
+            "href_display_mismatch": true
+          },
+          {
+            "raw_value": "https://login.notice.test/verify",
+            "role": "visible_url"
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "legitimate_newsletter.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "La gazette de septembre",
+        "from_addresses": [
+          "newsletter@photo-lumiere.example.org"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://news.example.org/article/42",
+            "role": "href",
+            "hostname": "news.example.org",
+            "href_display_mismatch": false
+          },
+          {
+            "raw_value": "https://news.example.org/unsubscribe?u=abonne&camp=sept",
+            "role": "href",
+            "hostname": "news.example.org",
+            "href_display_mismatch": false,
+            "html_entity_decoded": true
+          },
+          {
+            "raw_value": "https://news.example.org/article/42",
+            "role": "visible_url"
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "spam_promo.eml",
+      "parsable": true,
+      "expect": {
+        "subject": " -40% sur vos flyers-",
+        "from_addresses": [
+          "promo@imprimerie.example.net"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://promo.example.net/catalogue?src=email",
+            "role": "href",
+            "hostname": "promo.example.net",
+            "href_display_mismatch": false
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "bec_fraud.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Transfert urgent - changement d'IBAN",
+        "from_addresses": [
+          "dg@entreprise.example"
+        ],
+        "reply_to": [
+          "comptabilite@consultant.example.net"
+        ],
+        "has_full_headers": true,
+        "links": [],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "threat_extortion.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Vos donnees seront publiees dans 24 heures",
+        "from_addresses": [
+          "no-reply@anon.example"
+        ],
+        "has_full_headers": true,
+        "links": [],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "spear_phishing_targeted.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Projet Orion - revue budgetaire de mardi",
+        "from_addresses": [
+          "claire.dubois@fournisseur-projet.example"
+        ],
+        "to_addresses": [
+          "marie.martin@entreprise.example"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://orion-docs.notice.test/auth?token=ORION-2025",
+            "role": "href",
+            "hostname": "orion-docs.notice.test",
+            "href_display_mismatch": false
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "attachment_suspicious.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Facture FA-2025-114 - RIB modifie",
+        "from_addresses": [
+          "facturation@fournisseur.example"
+        ],
+        "has_full_headers": true,
+        "links": [],
+        "attachments": [
+          {
+            "filename": "facture.txt",
+            "mime_type": "text/plain",
+            "disposition": "attachment",
+            "decode_status": "ok",
+            "decoded_size_bytes": 35,
+            "sha256": "1a911ada554a07897288bf14d6a633648a6aa86828f5a9f39edadc43b83840b3",
+            "content": "Fixture bénigne : aucun programme."
+          }
+        ],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "prompt_injection.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Verification requise",
+        "from_addresses": [
+          "support@notice.test"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://collecte.notice.test/login",
+            "role": "href",
+            "hostname": "collecte.notice.test",
+            "href_display_mismatch": false
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0,
+        "html_contains_hidden_instruction": true
+      }
+    },
+    {
+      "file": "shared_infra_benign.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Votre commande 1234 est expediee",
+        "from_addresses": [
+          "notifications@boutique.example"
+        ],
+        "return_path": [
+          "bounce+client=example.org@esp-mailer.example.net"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://boutique.example/commande/1234",
+            "role": "href",
+            "hostname": "boutique.example",
+            "href_display_mismatch": false
+          },
+          {
+            "raw_value": "https://track.esp-mailer.example.net/open?id=abc123",
+            "role": "remote_resource",
+            "hostname": "track.esp-mailer.example.net"
+          },
+          {
+            "raw_value": "https://boutique.example/commande/1234",
+            "role": "visible_url"
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "malicious_url_redirect.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Colis en attente - frais de livraison",
+        "from_addresses": [
+          "livraison@suivi-colis.example"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://redirect.notice.test/r/42?src=sms",
+            "role": "href",
+            "hostname": "redirect.notice.test",
+            "href_display_mismatch": false
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "qr_phishing.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Scannez pour confirmer",
+        "from_addresses": [
+          "alert@notice.test"
+        ],
+        "has_full_headers": true,
+        "links": [],
+        "attachments": [],
+        "images": [
+          {
+            "content_id": "qr1",
+            "mime_type": "image/png",
+            "sha256": "cc1ae2f6f28a46a92a51b3a505a0df1aaf49bbe0a3b6d4d731fac3aacdb3af1d",
+            "status": "metadata_only"
+          }
+        ],
+        "essential_visual_content": true,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "visual_prompt_injection.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Verifications visuelles",
+        "from_addresses": [
+          "securite@notice.test"
+        ],
+        "has_full_headers": true,
+        "links": [],
+        "attachments": [],
+        "images": [
+          {
+            "content_id": "vis1",
+            "mime_type": "image/png",
+            "sha256": "96cb6e98d1a64bffcbb0abf58a760c6b038808660623587bc87e277c23cc4f06",
+            "status": "metadata_only"
+          }
+        ],
+        "essential_visual_content": true,
+        "auth_count": 0,
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "phishing_auth_pass.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Session inhabituelle - verifiez votre identite",
+        "from_addresses": [
+          "alert@notice.test"
+        ],
+        "has_full_headers": true,
+        "links": [
+          {
+            "raw_value": "https://portail.notice.test/session",
+            "role": "href",
+            "hostname": "portail.notice.test",
+            "href_display_mismatch": false
+          }
+        ],
+        "attachments": [],
+        "image_count": 0,
+        "auth": [
+          {
+            "mechanism": "spf",
+            "result": "pass",
+            "domain": "notice.test",
+            "authserv_id": "mx.example.org",
+            "trust": "reported_unverified"
+          },
+          {
+            "mechanism": "dkim",
+            "result": "pass",
+            "domain": "notice.test",
+            "authserv_id": "mx.example.org",
+            "trust": "reported_unverified"
+          },
+          {
+            "mechanism": "dmarc",
+            "result": "pass",
+            "domain": "notice.test",
+            "authserv_id": "mx.example.org",
+            "trust": "reported_unverified"
+          }
+        ],
+        "defects_min": 0
+      }
+    },
+    {
+      "file": "malformed_reasonable.eml",
+      "parsable": true,
+      "expect": {
+        "subject": "Paiement fournisseur",
+        "from_addresses": [
+          "paiement@fournisseur.example"
+        ],
+        "has_full_headers": true,
+        "links": [],
+        "attachments": [
+          {
+            "filename": "detail.txt",
+            "decode_status": "error"
+          }
+        ],
+        "image_count": 0,
+        "auth_count": 0,
+        "defects_min": 2,
+        "duplicated_subject_headers": 2
+      }
+    }
+  ]
+}

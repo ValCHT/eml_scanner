@@ -1,0 +1,30 @@
+From: "Messagerie Exemple" <alert@notice.test>
+To: victime@example.org
+Subject: =?utf-8?q?Scannez_pour_confirmer?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <qr-011@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@notice.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="bnd_qr"; type="text/plain"
+
+--bnd_qr
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Scannez pour confirmer votre compte.
+
+--bnd_qr
+Content-Type: image/png; name="qr.png"
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="qr.png"
+Content-ID: <qr1>
+
+iVBORw0KGgoAAAANSUhEUgAAAGMAAABjAQAAAACnQIM4AAABHElEQVR42q1UsY3EIBAcPwEZbgCJ
+NshoyTRgnxvALTnbNpBowM4coNtfZ/fJr4MjQxrtzgwzgD9OxXduHQivGFYGbP3B5/l7Q19YYKak
+wKQgJ+td8iP7QUeGF8yRniB93msmHbmwhw3F6jwBLwMzqdpvrw6ZmW7P/kdu5KcYCmpWkVed0Db2
+s+b8yGHjcF7tVBTx27aN4CIXTdE7+oHhUtNc4gN1SmZlMUrhmXc/XBipz/r2VmIfWNgqM2cJ544p
+tnfStl9VjFovaDyZyY+7OakvD7TPqQ6k83SQ1fLucHqWOiIW6lnPZ5AHLdYv9KCbV3VWoqL3aEY7
+gEVHSuR65nakB0gStmrq7m5Od0eMihTtGxtp05z0bn75V/wFx+1kjROE8tMAAAAASUVORK5CYII=
+--bnd_qr--
+

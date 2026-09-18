@@ -1,0 +1,23 @@
+From: "Boutique Exemple" <notifications@boutique.example>
+To: client@example.org
+Subject: =?utf-8?q?Votre_commande_1234_est_expediee?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <shared-009@fixture.test>
+Received: from mailer.fixture.test (203.0.113.25) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce+client=example.org@esp-mailer.example.net>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="bnd_shared"
+
+--bnd_shared
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Votre commande 1234 a ete expediee. Suivi: https://boutique.example/commande/1234
+
+--bnd_shared
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Votre commande 1234 a ete expediee.</p><p><a href="https://boutique.example/commande/1234">Suivre la commande</a></p><img src="https://track.esp-mailer.example.net/open?id=abc123" width="1" height="1" alt=""></body></html>
+--bnd_shared--
+

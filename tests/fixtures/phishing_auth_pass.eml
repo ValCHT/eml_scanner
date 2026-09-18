@@ -1,0 +1,24 @@
+From: "Messagerie Exemple" <alert@notice.test>
+To: victime@example.org
+Subject: =?utf-8?q?Session_inhabituelle_-_verifiez_votre_identite?=
+Date: Tue, 16 Sep 2025 09:15:00 +0000
+Message-ID: <authpass-013@fixture.test>
+Received: from mailer.fixture.test (198.51.100.10) by mx.example.org with ESMTPS id f1xture; Tue, 16 Sep 2025 09:15:00 +0000
+Return-Path: <bounce@notice.test>
+MIME-Version: 1.0
+Authentication-Results: mx.example.org; spf=pass smtp.mailfrom=notice.test; dkim=pass header.d=notice.test; dmarc=pass header.from=notice.test
+Content-Type: multipart/alternative; boundary="bnd_authpass"
+
+--bnd_authpass
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Connexion inhabituelle detectee. Verifiez votre identite: https://portail.notice.test/session
+
+--bnd_authpass
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html><body><p>Connexion inhabituelle detectee.</p><p><a href="https://portail.notice.test/session">Verifier mon identite</a></p></body></html>
+--bnd_authpass--
+
