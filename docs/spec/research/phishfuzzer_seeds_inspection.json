@@ -1,0 +1,56 @@
+{
+  "source": "https://raw.githubusercontent.com/DataPhish/PhishFuzzer/main/PhishFuzzer_emails_original_seed_v1.json",
+  "bytes": 8218997,
+  "sha256": "394d542e27dcef57321bc69f0f93b03e5965531f616eb3d3c79416cc60a30765",
+  "count": 3300,
+  "keys": [
+    "Body",
+    "Created by",
+    "File",
+    "Language",
+    "Motivation",
+    "No.",
+    "Original_ID",
+    "Sender",
+    "Source",
+    "Subject",
+    "Type",
+    "URL",
+    "Year"
+  ],
+  "labels": {
+    "Phishing": 1126,
+    "Spam": 1074,
+    "Valid": 1100
+  },
+  "created_by": {
+    "Human": 3176,
+    "None": 1,
+    "Huamn": 1,
+    "SpamAssassin": 122
+  },
+  "field_presence": {
+    "URL": 2723,
+    "File": 189,
+    "Original_ID": 3300,
+    "Body": 3298,
+    "Sender": 3300,
+    "Subject": 3298
+  },
+  "sample_field_types": {
+    "No.": "int",
+    "Subject": "str",
+    "Body": "str",
+    "Sender": "str",
+    "URL": "list",
+    "File": "NoneType",
+    "Type": "str",
+    "Created by": "str",
+    "Source": "str",
+    "Year": "int",
+    "Motivation": "str",
+    "Original_ID": "int",
+    "Language": "str"
+  },
+  "inspection_date": "2026-09-17"
+}

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Runtime outputs and restricted data
+runs/
+corpus/raw/
+corpus/normalized/
+corpus/private/
+corpus/gold/gold_test.jsonl
+corpus/gold/test_*.jsonl
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local agent/user overrides
+CLAUDE.local.md
+.opencode.local.json

@@ -1,0 +1,224 @@
+{
+  "source": "https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz",
+  "sampling": "first 50 regular members in archive order; nonrepresentative structural spot-check",
+  "counts": {
+    "messages": 50,
+    "From": 50,
+    "To": 49,
+    "Subject": 50,
+    "Date": 50,
+    "Message-ID": 50,
+    "Received": 0,
+    "Return-Path": 0,
+    "Authentication-Results": 0,
+    "DKIM-Signature": 0,
+    "text": 50,
+    "html": 0,
+    "urls_lexical": 2,
+    "attachment_parts": 0,
+    "image_parts": 0
+  },
+  "sample_member_hashes": [
+    {
+      "path": "maildir/blair-l/personnel___promotions/1.",
+      "sha256": "59cd29294f390a33c64af8581ad92a911a0cbb661777beb57679c0320e506962"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/8.",
+      "sha256": "b1925b37449dd7a6995bd01bccde4bb9afe4a71fdf89489f99eb107fd35ccae8"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/16.",
+      "sha256": "f48f1e0589b916e0144a002fc0489324b2e98092d945e8ffeff761895eeea2cb"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/13.",
+      "sha256": "c86b8af668e522f128c9ed8bbbdc458fd8c2ca404de44ec072e59587ef9e87f6"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/14.",
+      "sha256": "29127d814b799de5397bf73a7186481d2b9692529baa5df7e29f4bdad0710541"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/10.",
+      "sha256": "0a706d45341fd4f4e5c9d11e60c24e68b52261bee0b54f02c23958ad17e6a5ef"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/9.",
+      "sha256": "9eecd4db0cde715854e6ee343918b257aa1c7581838320be7c6bf520aa06acf0"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/11.",
+      "sha256": "86bc2408008f6709c154c5508fb33b30f906c14a817be9df18eb17a0c149a9e9"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/15.",
+      "sha256": "43e17eb1a080f6ece95f5337516b5f48062a0f980cb93793eadf96bb11908500"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/3.",
+      "sha256": "2a495238525782bd1fc566aa07016194d3d16f9dfb7a87c457097d7d763c5312"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/4.",
+      "sha256": "d3c106dde4f3ddf1a83ea81921997caaa94eae56018b3482110ef67f4084a33e"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/6.",
+      "sha256": "18b310fbd401cae8e3cacd7c2c692cafe45e7b7a71b93f88dc1714724101a836"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/7.",
+      "sha256": "bae8941045f5834a29adca4b29f79448d3ee1baf0f38d3086c6bdcbc49172f57"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/5.",
+      "sha256": "64c4de0cae3b4fb99548865b3feea05558a492fb8dd262cd1720a414bcdd7308"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/2.",
+      "sha256": "b4fdf704b2af7ba44a74ef7db16eb3c575bbb7f72da9704e3d55fc04b047ee9e"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/1.",
+      "sha256": "c7164fe76e1daa24becd04c50ec25e13415b7856b22d0e84e28ec1f3dc252276"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/12.",
+      "sha256": "5e882a7c2e74b74b3a5431a6b8f748df1191accf324800ce3df76e67e1165079"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/18.",
+      "sha256": "18309b6954222d0241f75064cacc76deac1867bb73c1da81049bf0def6dd6c59"
+    },
+    {
+      "path": "maildir/blair-l/meetings___nng_customer_mtg/17.",
+      "sha256": "9bd325f431410ddf7a01b4906c5853eb441519eee654fa88a768e82602dc925d"
+    },
+    {
+      "path": "maildir/blair-l/nng___sla_settlement/3.",
+      "sha256": "2f5ddfcfffd807c146773450945b31253e3303fcfd3d44c30161fda15a27ac96"
+    },
+    {
+      "path": "maildir/blair-l/nng___sla_settlement/4.",
+      "sha256": "7821f9e089070bf9f22fd49cface09c350a9a2bed0f478750380f374a8e700b8"
+    },
+    {
+      "path": "maildir/blair-l/nng___sla_settlement/5.",
+      "sha256": "69b18a9e99dbc5949a7123a7fb042ae662e5f40d2380f931e565e6dcc1a665cd"
+    },
+    {
+      "path": "maildir/blair-l/nng___sla_settlement/2.",
+      "sha256": "cb3a750a8855fabe8026c870b7b7d30bbb2227ca73b0a58655406a3d9b0d4ba2"
+    },
+    {
+      "path": "maildir/blair-l/nng___sla_settlement/1.",
+      "sha256": "9fbe057edd30a1692ea774bdcb4e66631fd1b4b170a7643a907e2849b12e202e"
+    },
+    {
+      "path": "maildir/blair-l/tw___negotiated_rates_issues/7.",
+      "sha256": "1fe5fe529cd8ff347970a2fa2ee52f8582d001a9d964ecb4c19276ace9647bb8"
+    },
+    {
+      "path": "maildir/blair-l/tw___negotiated_rates_issues/2.",
+      "sha256": "0fac4bb334652d6694bff59757dd57176d28c2518ab6dc18908f4bd19bab0bf1"
+    },
+    {
+      "path": "maildir/blair-l/tw___negotiated_rates_issues/1.",
+      "sha256": "84c9105d898a33ea9094d920c7cbb2142bed52e482de60447fb3b1ac8fd17880"
+    },
+    {
+      "path": "maildir/blair-l/customer___uses/8.",
+      "sha256": "d54ac1bf8800aef002409e3ebfa120720f2605e7415982b2e7af2b74a3850b40"
+    },
+    {
+      "path": "maildir/blair-l/customer___uses/3.",
+      "sha256": "fb940e0120b44fc21adc67bce9a5d6bc12dcda7ebab88ef1c9a29de2195d2cf6"
+    },
+    {
+      "path": "maildir/blair-l/customer___uses/4.",
+      "sha256": "ac24ae8c47361561d362ffc5a2a8655c27f76bc691843269607e707d5da04801"
+    },
+    {
+      "path": "maildir/blair-l/customer___uses/5.",
+      "sha256": "df2a2c3599ebf6dfbcefbe1d997d4a1736092b59bc68274abf97ef68182e1543"
+    },
+    {
+      "path": "maildir/blair-l/customer___uses/2.",
+      "sha256": "78cc7e212fcbc00ccac819b835ff0533f8f653d9dd195cb56d04f8dcf576719c"
+    },
+    {
+      "path": "maildir/blair-l/customer___uses/1.",
+      "sha256": "47ff5536c084eb58a3131114c3c0fe058330f1d7c1eebfd5498379026d1212e4"
+    },
+    {
+      "path": "maildir/blair-l/training___business_objects/3.",
+      "sha256": "8a9aab1bd4d655be88549797c191d473bceed8aabc306508454bd4b09bef2b02"
+    },
+    {
+      "path": "maildir/blair-l/training___business_objects/4.",
+      "sha256": "2db70a09264c51e6030eabd4d6e6ab5f3e478607b7ff86c1671185ed3d7a32e8"
+    },
+    {
+      "path": "maildir/blair-l/training___business_objects/6.",
+      "sha256": "1df718d85e2f653ecc2a037f53e9caa5a7e927706a98ec635ee16c0bd00900d5"
+    },
+    {
+      "path": "maildir/blair-l/training___business_objects/2.",
+      "sha256": "44d5cddef28ebdb812efecd267cbc2286c22669e139aec0ae12d13b9dfb05823"
+    },
+    {
+      "path": "maildir/blair-l/training___business_objects/1.",
+      "sha256": "f5a9992930ec0e4d58fffd86d52d1af0fc1b7bef45991d05d3f741f87828f705"
+    },
+    {
+      "path": "maildir/blair-l/tw___imbalances___netting_trading/8.",
+      "sha256": "7809a4aeadd213ab7c79df86b485fa90a5d2ab6c174d3da44fa7638827f0e278"
+    },
+    {
+      "path": "maildir/blair-l/tw___imbalances___netting_trading/5.",
+      "sha256": "c11e995ed64f09ebb44d8cecb7edd058fe47ac3c53bf2ff7906ab7499dfa1dc8"
+    },
+    {
+      "path": "maildir/blair-l/tw___imbalances___netting_trading/2.",
+      "sha256": "ecc9ee9662d1f51e33f46def8975ff8457cb50dcca59d4cf519c434d986307d9"
+    },
+    {
+      "path": "maildir/blair-l/tw___imbalances___netting_trading/1.",
+      "sha256": "5b65acaf45e83d7208d89a39cb4d20e980091abf5475cddf5c7e471c82c5a573"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/27.",
+      "sha256": "fe8ce4f51151067ea85623fdb0df6c4efbf89515a6784ac752175cdf433b772e"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/8.",
+      "sha256": "5e6fed8a5cc270008f3fb12499149ad2a60cadc32235584024a71364705cfbdf"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/23.",
+      "sha256": "e5bf99cfd62a07e3ba95069b3cba50d9f0ae5c7b9042c9ff79dcecd93975b851"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/19.",
+      "sha256": "cc64c3433bb5c70f7c40b8a73882e356bf7ab8b30b78f6e9cd5920bc413e201c"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/79.",
+      "sha256": "29a213a8244f8a0a7bbd47b1ae5ab3c5c25870875628f70f5b4a6d3531340684"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/77.",
+      "sha256": "423e8526ec52ef75744970bda5553d9feb63c6984cdf272d7ea0c5de6e91e604"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/81.",
+      "sha256": "e59052df9b5370f3dbe16ec72e6b3206b17ca9ea578e9a32ac2871ecce2303e5"
+    },
+    {
+      "path": "maildir/blair-l/customer___oneok/16.",
+      "sha256": "e1b706de298444aa06675ada58a99c404486a03e9789821b258c1e0ef3571565"
+    }
+  ],
+  "inspection_date": "2026-09-17"
+}

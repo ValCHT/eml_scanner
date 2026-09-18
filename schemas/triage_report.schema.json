@@ -1,0 +1,1268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0",
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "email_sha256": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "run_status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "degraded",
+        "error"
+      ]
+    },
+    "internal_verdict": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Label"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "internal_confidence": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "internal_probabilities": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Probabilities"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "gate_decision": {
+      "type": "string",
+      "enum": [
+        "simple",
+        "complex"
+      ]
+    },
+    "gate_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "enrichment": {
+      "$ref": "#/$defs/Enrichment"
+    },
+    "visual_evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/VisualEvidence"
+      }
+    },
+    "final_verdict": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Label"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "final_confidence": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "final_probabilities": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Probabilities"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "final_source": {
+      "type": "string",
+      "enum": [
+        "internal_copy",
+        "final_llm",
+        "internal_fallback",
+        "none"
+      ]
+    },
+    "verdict_changed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decisive_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decisive_evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      }
+    },
+    "observables": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Observable"
+      }
+    },
+    "inferences": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Inference"
+      }
+    },
+    "unsupported_claims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/VerificationIssue"
+      }
+    },
+    "verification_warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/VerificationIssue"
+      }
+    },
+    "recommended_action": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "REVIEW",
+        "ESCALATE"
+      ]
+    },
+    "policy_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "analyst_summary": {
+      "type": "string"
+    },
+    "timings": {
+      "$ref": "#/$defs/Timings"
+    },
+    "llm_calls": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CallRecord"
+      }
+    },
+    "cost_usd": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cost_status": {
+      "type": "string",
+      "enum": [
+        "estimated",
+        "provider_reported",
+        "unknown",
+        "partial"
+      ]
+    },
+    "reproducibility": {
+      "$ref": "#/$defs/Reproducibility"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "email_sha256",
+    "run_status",
+    "internal_verdict",
+    "internal_confidence",
+    "internal_probabilities",
+    "gate_decision",
+    "gate_reasons",
+    "enrichment",
+    "visual_evidence",
+    "final_verdict",
+    "final_confidence",
+    "final_probabilities",
+    "final_source",
+    "verdict_changed",
+    "decisive_evidence",
+    "decisive_evidence_ids",
+    "evidence",
+    "observables",
+    "inferences",
+    "unsupported_claims",
+    "verification_warnings",
+    "recommended_action",
+    "policy_reasons",
+    "analyst_summary",
+    "timings",
+    "llm_calls",
+    "cost_usd",
+    "cost_status",
+    "reproducibility"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "CallRecord": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": [
+            "internal",
+            "final"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error",
+            "skipped"
+          ]
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requested_model": {
+          "type": "string"
+        },
+        "returned_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning_effort": {
+          "type": "string"
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cached_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost_status": {
+          "type": "string",
+          "enum": [
+            "estimated",
+            "provider_reported",
+            "unknown",
+            "partial"
+          ]
+        },
+        "first_attempt_schema_valid": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "request_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "phase",
+        "status",
+        "attempts",
+        "requested_model",
+        "returned_model",
+        "reasoning_effort",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cost_usd",
+        "cost_status",
+        "first_attempt_schema_valid",
+        "response_refs",
+        "request_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "Category": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "M",
+            "S",
+            "C",
+            "B"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Enrichment": {
+      "type": "object",
+      "properties": {
+        "virustotal": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolResult"
+          }
+        },
+        "opencti": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolResult"
+          }
+        },
+        "urlscan": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolResult"
+          }
+        },
+        "rag": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RagCase"
+          }
+        }
+      },
+      "required": [
+        "virustotal",
+        "opencti",
+        "urlscan",
+        "rag"
+      ],
+      "additionalProperties": false
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "source_kind": {
+          "type": "string",
+          "enum": [
+            "parser",
+            "virustotal",
+            "opencti",
+            "urlscan"
+          ]
+        },
+        "observable_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "type": "string",
+          "enum": [
+            "header_value",
+            "body_excerpt",
+            "url_found",
+            "href_display_mismatch",
+            "attachment_hash",
+            "attachment_filename",
+            "image_present",
+            "auth_reported",
+            "auth_trusted",
+            "vt_malicious_count",
+            "vt_suspicious_count",
+            "vt_harmless_count",
+            "vt_undetected_count",
+            "vt_engine_total",
+            "vt_analysis_time",
+            "cti_exact_match",
+            "cti_label",
+            "cti_score",
+            "cti_revoked",
+            "cti_external_reference",
+            "sandbox_redirect",
+            "sandbox_final_url",
+            "sandbox_page_title",
+            "sandbox_form_field",
+            "sandbox_provider_malicious",
+            "sandbox_screenshot",
+            "sandbox_dom_excerpt",
+            "qr_payload"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "source_ref": {
+          "type": "string"
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "match_level": {
+          "type": "string",
+          "enum": [
+            "EXACT",
+            "GENERIC",
+            "NONE"
+          ]
+        },
+        "source_group": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "provenance",
+        "source_kind",
+        "observable_id",
+        "predicate",
+        "value",
+        "source_ref",
+        "observed_at",
+        "match_level",
+        "source_group"
+      ],
+      "additionalProperties": false
+    },
+    "Inference": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "code": {
+          "$ref": "#/$defs/ReasonCode"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rag_case_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "summary",
+        "evidence_ids",
+        "rag_case_ids"
+      ],
+      "additionalProperties": false
+    },
+    "Label": {
+      "type": "string",
+      "enum": [
+        "spear_phishing",
+        "phishing",
+        "fraude",
+        "menace",
+        "spam",
+        "legitime"
+      ]
+    },
+    "Observable": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "normalized_value": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/ObservableType"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sender",
+              "return_path",
+              "reply_to",
+              "recipient",
+              "link_target",
+              "displayed_brand",
+              "shared_host",
+              "transport_ip",
+              "attachment",
+              "campaign_id",
+              "tool_discovery"
+            ]
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "source_ref": {
+          "type": "string"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "justification": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "value",
+        "normalized_value",
+        "type",
+        "roles",
+        "provenance",
+        "source_ref",
+        "evidence_ids",
+        "category",
+        "justification"
+      ],
+      "additionalProperties": false
+    },
+    "ObservableType": {
+      "type": "string",
+      "enum": [
+        "url",
+        "domain",
+        "ipv4",
+        "ipv6",
+        "email",
+        "sha256",
+        "sha1",
+        "md5",
+        "message_id",
+        "campaign_id"
+      ]
+    },
+    "Probabilities": {
+      "type": "object",
+      "properties": {
+        "spear_phishing": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "phishing": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "fraude": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "menace": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "spam": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "legitime": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "spear_phishing",
+        "phishing",
+        "fraude",
+        "menace",
+        "spam",
+        "legitime"
+      ],
+      "additionalProperties": false
+    },
+    "Provenance": {
+      "type": "string",
+      "enum": [
+        "INTERNE",
+        "OSINT",
+        "SANDBOX",
+        "INFERENCE"
+      ]
+    },
+    "RagCase": {
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "public_source_url": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "record_sha256": {
+          "type": "string"
+        },
+        "validated_label": {
+          "$ref": "#/$defs/Label"
+        },
+        "analyst_validation_ref": {
+          "type": "string"
+        },
+        "campaign_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duplicate_group": {
+          "type": "string"
+        },
+        "family_group": {
+          "type": "string"
+        },
+        "text_excerpt": {
+          "type": "string"
+        },
+        "analyst_rationale": {
+          "type": "string"
+        },
+        "distance": {
+          "type": "number",
+          "minimum": 0
+        },
+        "embedding_model_id": {
+          "type": "string"
+        },
+        "is_public": {
+          "const": true,
+          "type": "boolean"
+        },
+        "split": {
+          "const": "rag_reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "public_source_url",
+        "dataset",
+        "record_sha256",
+        "validated_label",
+        "analyst_validation_ref",
+        "campaign_id",
+        "duplicate_group",
+        "family_group",
+        "text_excerpt",
+        "analyst_rationale",
+        "distance",
+        "embedding_model_id",
+        "is_public",
+        "split"
+      ],
+      "additionalProperties": false
+    },
+    "ReasonCode": {
+      "type": "string",
+      "enum": [
+        "credential_collection",
+        "targeted_context",
+        "payment_diversion",
+        "extortion",
+        "unsolicited_promotion",
+        "coherent_transaction",
+        "identity_mismatch",
+        "link_mismatch",
+        "prompt_injection",
+        "visual_content_unread",
+        "external_support",
+        "external_conflict",
+        "insufficient_information"
+      ]
+    },
+    "Reproducibility": {
+      "type": "object",
+      "properties": {
+        "code_commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "python_version": {
+          "type": "string"
+        },
+        "dependencies_sha256": {
+          "type": "string"
+        },
+        "prompt_internal_sha256": {
+          "type": "string"
+        },
+        "prompt_final_sha256": {
+          "type": "string"
+        },
+        "assessment_schema_sha256": {
+          "type": "string"
+        },
+        "config_sha256": {
+          "type": "string"
+        },
+        "corpus_split_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "live",
+            "recorded"
+          ]
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code_commit",
+        "python_version",
+        "dependencies_sha256",
+        "prompt_internal_sha256",
+        "prompt_final_sha256",
+        "assessment_schema_sha256",
+        "config_sha256",
+        "corpus_split_sha256",
+        "mode",
+        "started_at"
+      ],
+      "additionalProperties": false
+    },
+    "Timings": {
+      "type": "object",
+      "properties": {
+        "parse_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "internal_llm_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "gate_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "vt_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "opencti_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "urlscan_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rag_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "merge_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "final_llm_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "verify_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "policy_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "report_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "total_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "parse_ms",
+        "internal_llm_ms",
+        "gate_ms",
+        "vt_ms",
+        "opencti_ms",
+        "urlscan_ms",
+        "rag_ms",
+        "merge_ms",
+        "final_llm_ms",
+        "verify_ms",
+        "policy_ms",
+        "report_ms",
+        "total_ms"
+      ],
+      "additionalProperties": false
+    },
+    "ToolResult": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": [
+            "virustotal",
+            "opencti",
+            "urlscan"
+          ]
+        },
+        "query_observable_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "not_found",
+            "unavailable",
+            "skipped"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          }
+        },
+        "observables": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Observable"
+          }
+        },
+        "response_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "collected_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "live",
+            "recorded",
+            "none"
+          ]
+        },
+        "elapsed_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "requests_sent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "visibility": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "private",
+                "unlisted"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "tool",
+        "query_observable_id",
+        "status",
+        "reason",
+        "evidence",
+        "observables",
+        "response_sha256",
+        "response_ref",
+        "collected_at",
+        "mode",
+        "elapsed_ms",
+        "requests_sent",
+        "visibility",
+        "scan_id"
+      ],
+      "additionalProperties": false
+    },
+    "VerificationIssue": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "error",
+            "critical"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "parse",
+            "internal",
+            "final",
+            "tool",
+            "policy",
+            "runtime"
+          ]
+        },
+        "object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "source",
+        "object_id",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "VisualEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "part_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local_ref": {
+          "type": "string"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "height": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "metadata_only",
+            "supplied_to_model",
+            "unsupported",
+            "over_limit",
+            "unavailable"
+          ]
+        },
+        "qr_payloads": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "sha256",
+        "mime_type",
+        "provenance",
+        "part_id",
+        "content_id",
+        "local_ref",
+        "width",
+        "height",
+        "status",
+        "qr_payloads"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

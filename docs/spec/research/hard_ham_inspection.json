@@ -1,0 +1,23 @@
+{
+  "source": "https://spamassassin.apache.org/old/publiccorpus/20030228_hard_ham.tar.bz2",
+  "bytes": 1029898,
+  "sha256": "ce2ce67880643dbde65ea7f85bffbfe4417349c4bd80b6b0de56262ae6b0a9c9",
+  "counts": {
+    "messages": 250,
+    "From": 250,
+    "To": 250,
+    "Subject": 249,
+    "Date": 250,
+    "Message-ID": 250,
+    "Received": 250,
+    "Return-Path": 241,
+    "Authentication-Results": 0,
+    "DKIM-Signature": 0,
+    "text": 130,
+    "html": 165,
+    "urls_lexical": 244,
+    "attachment_parts": 23,
+    "image_parts": 21
+  },
+  "inspection_date": "2026-09-17"
+}

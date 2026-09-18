@@ -1,0 +1,23 @@
+{
+  "source": "https://spamassassin.apache.org/old/publiccorpus/20030228_spam.tar.bz2",
+  "bytes": 1183768,
+  "sha256": "c08debc32413804949a866be45ef78195cec2cbafd1da744ed76cdb860589743",
+  "counts": {
+    "messages": 500,
+    "From": 500,
+    "To": 500,
+    "Subject": 500,
+    "Date": 500,
+    "Message-ID": 500,
+    "Received": 500,
+    "Return-Path": 494,
+    "Authentication-Results": 0,
+    "DKIM-Signature": 0,
+    "text": 288,
+    "html": 258,
+    "urls_lexical": 416,
+    "attachment_parts": 10,
+    "image_parts": 5
+  },
+  "inspection_date": "2026-09-17"
+}

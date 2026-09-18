@@ -1,0 +1,57 @@
+{
+  "source": "https://raw.githubusercontent.com/DataPhish/PhishFuzzer/main/PhishFuzzer_emails_entity_rephrased_v1.json",
+  "bytes": 48159145,
+  "sha256": "62f9c1231cf7e9d1b4a9740680aefcf8723e689ac60ae171ea4e0eef70f1275d",
+  "count": 19800,
+  "keys": [
+    "Body",
+    "Created by",
+    "Entity_Type",
+    "File",
+    "Language",
+    "Length_Type",
+    "Motivation",
+    "No.",
+    "Original_ID",
+    "Sender",
+    "Source",
+    "Subject",
+    "Type",
+    "URL",
+    "Year"
+  ],
+  "labels": {
+    "Phishing": 6756,
+    "Spam": 6444,
+    "Valid": 6600
+  },
+  "created_by": {
+    "LLM": 19800
+  },
+  "field_presence": {
+    "URL": 17438,
+    "File": 995,
+    "Original_ID": 19800,
+    "Body": 19800,
+    "Sender": 19794,
+    "Subject": 19800
+  },
+  "sample_field_types": {
+    "No.": "int",
+    "Original_ID": "int",
+    "Subject": "str",
+    "Body": "str",
+    "Sender": "str",
+    "URL": "list",
+    "File": "NoneType",
+    "Type": "str",
+    "Motivation": "str",
+    "Created by": "str",
+    "Source": "str",
+    "Year": "int",
+    "Entity_Type": "str",
+    "Length_Type": "str",
+    "Language": "str"
+  },
+  "inspection_date": "2026-09-17"
+}

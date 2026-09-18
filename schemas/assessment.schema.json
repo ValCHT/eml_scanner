@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "probabilities": {
+      "$ref": "#/$defs/Probabilities"
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "inferences": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Inference"
+      }
+    },
+    "observable_assessments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ObservableAssessment"
+      }
+    },
+    "needs_enrichment": {
+      "type": "boolean"
+    },
+    "missing_information": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MissingCode"
+      }
+    },
+    "decisive_evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "probabilities",
+    "observations",
+    "inferences",
+    "observable_assessments",
+    "needs_enrichment",
+    "missing_information",
+    "decisive_evidence_ids"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Category": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "M",
+            "S",
+            "C",
+            "B"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Inference": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "code": {
+          "$ref": "#/$defs/ReasonCode"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rag_case_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "summary",
+        "evidence_ids",
+        "rag_case_ids"
+      ],
+      "additionalProperties": false
+    },
+    "MissingCode": {
+      "type": "string",
+      "enum": [
+        "authentication_untrusted",
+        "destination_unverified",
+        "attachment_not_inspected",
+        "essential_visual_unread",
+        "insufficient_context",
+        "tool_unavailable",
+        "content_truncated"
+      ]
+    },
+    "ObservableAssessment": {
+      "type": "object",
+      "properties": {
+        "observable_id": {
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "attack_artifact",
+            "context_only",
+            "shared_infrastructure",
+            "spoofed_identity",
+            "unconfirmed",
+            "benign_context"
+          ]
+        }
+      },
+      "required": [
+        "observable_id",
+        "category",
+        "evidence_ids",
+        "reason_code"
+      ],
+      "additionalProperties": false
+    },
+    "Probabilities": {
+      "type": "object",
+      "properties": {
+        "spear_phishing": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "phishing": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "fraude": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "menace": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "spam": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "legitime": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "spear_phishing",
+        "phishing",
+        "fraude",
+        "menace",
+        "spam",
+        "legitime"
+      ],
+      "additionalProperties": false
+    },
+    "ReasonCode": {
+      "type": "string",
+      "enum": [
+        "credential_collection",
+        "targeted_context",
+        "payment_diversion",
+        "extortion",
+        "unsolicited_promotion",
+        "coherent_transaction",
+        "identity_mismatch",
+        "link_mismatch",
+        "prompt_injection",
+        "visual_content_unread",
+        "external_support",
+        "external_conflict",
+        "insufficient_information"
+      ]
+    }
+  }
+}

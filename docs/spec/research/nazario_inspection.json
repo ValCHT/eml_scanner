@@ -1,0 +1,23 @@
+{
+  "source": "https://monkey.org/~jose/phishing/phishing-2025",
+  "bytes": 18769863,
+  "sha256": "f1fa7e0fe35c9a16f36d9aa20ade7e1d3908d1d0c1d917b8c53c8aa799ec1c8f",
+  "counts": {
+    "messages": 481,
+    "From": 481,
+    "To": 471,
+    "Subject": 481,
+    "Date": 478,
+    "Message-ID": 476,
+    "Received": 481,
+    "Return-Path": 481,
+    "Authentication-Results": 481,
+    "DKIM-Signature": 401,
+    "text": 188,
+    "html": 473,
+    "urls_lexical": 399,
+    "attachment_parts": 102,
+    "image_parts": 55
+  },
+  "inspection_date": "2026-09-17"
+}

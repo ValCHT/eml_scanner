@@ -1,0 +1,23 @@
+{
+  "source": "https://spamassassin.apache.org/old/publiccorpus/20030228_easy_ham.tar.bz2",
+  "bytes": 1612216,
+  "sha256": "2b7b65904bcfcc31d2b5f51946f2d261370b257402cbbd62930b46ab83367438",
+  "counts": {
+    "messages": 2500,
+    "From": 2500,
+    "To": 2348,
+    "Subject": 2500,
+    "Date": 2500,
+    "Message-ID": 2500,
+    "Received": 2365,
+    "Return-Path": 2500,
+    "Authentication-Results": 0,
+    "DKIM-Signature": 0,
+    "text": 2500,
+    "html": 8,
+    "urls_lexical": 2356,
+    "attachment_parts": 18,
+    "image_parts": 0
+  },
+  "inspection_date": "2026-09-17"
+}

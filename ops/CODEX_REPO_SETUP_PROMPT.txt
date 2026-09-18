@@ -1,0 +1,75 @@
+# CODEX PROMPT — REPOSITORY SETUP ONLY
+
+You are preparing the GitHub repository for the SOC Email Triage POC.
+The repository already contains the frozen V1.2 specification and agent-oriented starter layout.
+
+IMPORTANT: this task is REPOSITORY SETUP ONLY.
+DO NOT execute TICKET-01 or any implementation ticket.
+DO NOT create product/runtime code.
+DO NOT rewrite the specification for style.
+
+Read `AGENTS.md` first, then inspect:
+- `README.md`
+- `docs/`
+- `docs/tickets/`
+- `docs/spec/`
+- `prompts/`
+- `schemas/`
+- `opencode.jsonc`
+- `.github/workflows/cross-platform.yml`
+- `ops/`
+
+Your tasks:
+
+1. Verify that the repository root is the actual Git working tree and that the starter files are not nested one directory too deep.
+2. Verify that all 18 tickets exist under `docs/tickets/` and are numbered TICKET-01 through TICKET-18.
+3. Verify that the two runtime prompts and two JSON schemas exist at the repository root locations documented in README.
+4. Verify that `docs/spec/` contains the frozen V1.2 plan, QA, V1→V1.1 and V1.1→V1.2 changelogs/matrices, source checksum manifest and research inspection metadata.
+5. Verify that `.gitattributes` contains `*.eml -text`; RFC822 fixtures must remain byte-stable across Windows/macOS/Linux.
+6. Verify that `.gitignore` excludes secrets, runtime outputs, raw/private corpus data and `gold_test`.
+7. Verify that `AGENTS.md` is concise, consistent with `docs/gates.md §5.3`, and explicitly enforces one ticket per session plus FILES ALLOWED.
+8. Verify that `CLAUDE.md` imports `AGENTS.md` rather than duplicating a second project policy.
+9. Verify that `opencode.jsonc` uses current OpenCode V2 fields (`permissions`, `shell`, `subagent`) and does not hard-code a model/provider.
+10. Verify that `.github/workflows/cross-platform.yml` is syntactically plausible and runs only non-live Python 3.11 tests on Linux, macOS and Windows once `pyproject.toml` exists.
+11. Run `python ops/verify_repo_setup.py`.
+12. Run `git status --short` and `git diff --check`.
+
+Allowed changes for this setup task:
+- `AGENTS.md`
+- `CLAUDE.md`
+- `opencode.jsonc`
+- `.gitignore`
+- `.gitattributes`
+- `.editorconfig`
+- `.github/workflows/cross-platform.yml`
+- `.opencode/commands/ticket.md`
+- `README.md`
+- files under `ops/`
+
+Do NOT modify:
+- `docs/architecture.md`
+- `docs/contracts.md`
+- `docs/corpus.md`
+- `docs/decisions.md`
+- `docs/evaluation.md`
+- `docs/fixtures.md`
+- `docs/gates.md`
+- `docs/prompt_integration.md`
+- `docs/threat_model.md`
+- any file under `docs/tickets/`
+- any file under `docs/spec/`
+- `prompts/*`
+- `schemas/*`
+
+If one of those frozen files appears internally inconsistent, do not fix it in this setup task. Report `BLOCKED` or a follow-up finding with the exact file/section.
+
+Do not run `/init` for Codex or another coding agent; `AGENTS.md` is already provided.
+Do not add Docker, Make, Poetry, uv, pre-commit, a task runner, a database, a web framework, or application code.
+Do not push, merge, or deploy unless the user explicitly asks after reviewing your diff.
+
+Expected final report:
+- repository setup status: READY | BLOCKED
+- files changed
+- checks executed and actual results
+- any blocker/follow-up
+- explicit statement: `TICKET-01 HAS NOT BEEN EXECUTED`
