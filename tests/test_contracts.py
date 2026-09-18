@@ -311,27 +311,73 @@ def test_gate_result_rule_hits_exact_keys() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_worktree_fingerprint_detects_tracked_changes() -> None:
-    """Any tracked staged/unstaged change must alter the fingerprint."""
+def test_worktree_fingerprint_detects_tracked_changes(tmp_path: Path) -> None:
+    """Any tracked staged/unstaged change must alter the fingerprint.
 
+    Runs entirely inside a temporary Git repository under ``tmp_path``:
+    the current repository is never modified nor restored.
+    """
+
+    import shutil
     import subprocess as sp
+    import sys
 
-    from scripts.check_gate import PROJECT_ROOT, worktree_fingerprint
+    from scripts.check_gate import PROJECT_ROOT
 
-    clean_fp = worktree_fingerprint()
-    marker = PROJECT_ROOT / "src" / "__init__.py"
-    original = marker.read_text(encoding="utf-8")
-    try:
-        marker.write_text(original + "\n# fingerprint probe\n", encoding="utf-8")
-        dirty_fp = worktree_fingerprint()
-        assert dirty_fp != clean_fp, "unstaged tracked change must invalidate fingerprint"
-        marker.write_text(original + "\n# second probe\n", encoding="utf-8")
-        second_fp = worktree_fingerprint()
-        assert second_fp != dirty_fp != clean_fp, "each tracked change gives a distinct fingerprint"
-    finally:
-        marker.write_text(original, encoding="utf-8")
-        sp.run(["git", "checkout", "--", str(marker)], cwd=PROJECT_ROOT, shell=False, check=False)
-    assert worktree_fingerprint() == clean_fp
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy2(PROJECT_ROOT / "scripts" / "check_gate.py", repo / "scripts" / "check_gate.py")
+    (repo / "src").mkdir()
+    (repo / "src" / "__init__.py").write_text("# probe package\n", encoding="utf-8")
+
+    def git(*args: str) -> None:
+        sp.run(["git", *args], cwd=repo, shell=False, check=True, capture_output=True)
+
+    git("init")
+    git("config", "user.name", "Fingerprint Test")
+    git("config", "user.email", "fingerprint@test.local")
+    git("add", ".")
+
+    def fingerprint() -> str:
+        proc = sp.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, '.'); "
+             "from scripts.check_gate import worktree_fingerprint; "
+             "print(worktree_fingerprint())"],
+            cwd=repo, shell=False, capture_output=True, text=True, check=True,
+        )
+        return proc.stdout.strip()
+
+    git("commit", "-m", "baseline")
+    clean_fp = fingerprint()
+
+    # staged-only tracked change (no unstaged diff left) invalidates the receipt
+    (repo / "src" / "__init__.py").write_text("# probe package\n# staged change\n", encoding="utf-8")
+    git("add", "src/__init__.py")
+    staged_fp = fingerprint()
+    assert staged_fp != clean_fp, "staged tracked change must invalidate fingerprint"
+
+    # returning the worktree to HEAD (index included) restores the clean fingerprint
+    git("reset", "--hard")
+    assert fingerprint() == clean_fp
+
+    # unstaged tracked change also invalidates it
+    (repo / "src" / "__init__.py").write_text("# probe package\n# change one\n", encoding="utf-8")
+    dirty_fp = fingerprint()
+    assert dirty_fp != clean_fp, "unstaged tracked change must invalidate fingerprint"
+
+    # a different tracked change gives a different fingerprint
+    (repo / "src" / "__init__.py").write_text("# probe package\n# change two\n", encoding="utf-8")
+    second_fp = fingerprint()
+    assert second_fp != dirty_fp != clean_fp
+
+    # staging identical content does not change the content fingerprint (determinism)
+    git("add", "src/__init__.py")
+    assert fingerprint() == second_fp
+
+    # returning the worktree to HEAD (index included) restores the clean fingerprint
+    git("reset", "--hard")
+    assert fingerprint() == clean_fp
 
 
 def test_pytest_pass_rule_rejects_skip_only_run() -> None:
@@ -352,6 +398,54 @@ def test_pytest_pass_rule_rejects_skip_only_run() -> None:
         and all(healthy[k] <= PYTEST_PASS_RULE[k] for k in ("failures", "skipped", "xfailed"))
     )
     assert ok_healthy is True
+
+
+def test_expurgate_hides_all_secret_forms() -> None:
+    """No secret value may survive expurgate() in any usual form."""
+
+    from scripts.check_gate import expurgate
+
+    secrets = ["super-secret-token-123", "a" * 40, "sk-abcdef0123456789"]
+    samples = [
+        # Authorization header
+        f"Authorization: Bearer {secrets[0]}",
+        f"AUTHORIZATION: bearer {secrets[0]}",
+        # JSON fields
+        f'{{"api_key": "{secrets[1]}", "model": "x"}}',
+        f"{{\"token\": \"{secrets[0]}\"}}",
+        f'{{"secret": "{secrets[2]}", "n": 1}}',
+        f'{{"password": "{secrets[0]}"}}',
+        # key=value / key: value forms
+        f"api_key={secrets[1]}",
+        f"api-key: {secrets[1]}",
+        f"token={secrets[0]}",
+        f"secret={secrets[2]}",
+        f"password={secrets[0]}",
+        f"access_token: {secrets[0]}",
+        # known prefixes
+        secrets[2],
+    ]
+    for sample in samples:
+        cleaned = expurgate(sample)
+        for secret in secrets:
+            assert secret not in cleaned, f"secret leaked in expurgated output: {sample!r}"
+        assert "[REDACTED]" in cleaned, f"secret form not redacted: {sample!r}"
+    # the sk- prefix case is redacted too
+    assert "[REDACTED]" in expurgate(secrets[2])
+    # benign content is untouched
+    benign = "gate=G0 status=FAIL tests 42 passed"
+    assert expurgate(benign) == benign
+
+
+def test_expurgate_applies_to_gate_logs(tmp_path: Path) -> None:
+    """Logged command output goes through expurgate() before archiving."""
+
+    from scripts.check_gate import expurgate
+
+    leaked = "POST /chat 200\nAuthorization: Bearer live-key-value-999\nok"
+    cleaned = expurgate(leaked)
+    assert "live-key-value-999" not in cleaned
+    assert "[REDACTED]" in cleaned
 
 
 def test_g7c_decision_file_validation(tmp_path: Path) -> None:

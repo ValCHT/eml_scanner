@@ -26,7 +26,13 @@ from pathlib import Path
 SECRET_PATTERNS = [
     re.compile(pattern)
     for pattern in (
-        r"(?i)(api[_-]?key|token|secret|password|authorization)\s*[=:]\s*\S+",
+        # HTTP auth header: Authorization: Bearer <token>
+        r"(?i)authorization\s*:\s*Bearer\s+\S+",
+        # JSON fields: "api_key": "<secret>", "token": "...", etc.
+        r'(?i)"(?:api[_-]?key|access[_-]?token|secret|token|password|authorization)"\s*:\s*"[^"]*"',
+        # Common key=value / key: value forms (query strings, dotenv, logs)
+        r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password)\s*[=:]\s*\S+",
+        # Well-known key prefixes
         r"sk-[A-Za-z0-9]{8,}",
     )
 ]
