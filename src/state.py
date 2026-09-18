@@ -314,10 +314,14 @@ TAXONOMY_ORDER: tuple[Label, ...] = (
 
 
 class Assessment(_Strict):
+    """Strictly conforms to schemas/assessment.schema.json: every field is
+    required (no defaults) and list sizes obey the frozen spec (§2.5).
+    """
+
     probabilities: Probabilities
-    observations: list[str] = Field(default_factory=list)
-    inferences: list[Inference] = Field(default_factory=list)
-    observable_assessments: list[ObservableAssessment] = Field(default_factory=list)
+    observations: list[str]
+    inferences: list[Inference] = Field(max_length=6)
+    observable_assessments: list[ObservableAssessment]
     needs_enrichment: bool
     missing_information: list[
         Literal[
@@ -329,8 +333,8 @@ class Assessment(_Strict):
             "tool_unavailable",
             "content_truncated",
         ]
-    ] = Field(default_factory=list)
-    decisive_evidence_ids: list[str] = Field(default_factory=list)
+    ]
+    decisive_evidence_ids: list[str] = Field(max_length=3)
 
 
 # ---------------------------------------------------------------------------
@@ -399,11 +403,23 @@ class Reproducibility(_Strict):
 
 
 class GateResult(_Strict):
-    decision: Literal["simple", "complex"] | None = None
+    """Decided gate result: ``decision`` is mandatory (``simple``|``complex``).
+
+    The "not yet decided" state is ``EmailTriageState.gate = None``, never a
+    ``GateResult`` without a decision (docs/contracts.md §2.2).
+    """
+
+    decision: Literal["simple", "complex"]
     reasons: list[str] = Field(default_factory=list)
     rule_hits: dict[Literal["R1", "R2", "R3"], bool] = Field(
         default_factory=lambda: {"R1": False, "R2": False, "R3": False}
     )
+
+    @model_validator(mode="after")
+    def _exact_rule_keys(self) -> "GateResult":
+        if set(self.rule_hits.keys()) != {"R1", "R2", "R3"}:
+            raise ValueError("rule_hits must have exactly the keys R1, R2, R3")
+        return self
 
 
 class EmailTriageState(_Strict):

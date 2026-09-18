@@ -45,9 +45,16 @@ def make_parsed_email() -> ParsedEmail:
 
 
 def make_assessment() -> Assessment:
+    """Minimal valid Assessment — all schema-required fields provided explicitly."""
+
     return Assessment(
         probabilities=make_probabilities(),
+        observations=[],
+        inferences=[],
+        observable_assessments=[],
         needs_enrichment=False,
+        missing_information=[],
+        decisive_evidence_ids=[],
     )
 
 
@@ -150,7 +157,7 @@ def test_state_json_serialization(tmp_path: Path) -> None:
     assert again.run_id == state.run_id
 
 
-def test_invalid_enums_rejected() -> None:
+def test_invalid_enums_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         Evidence(
             id="ev_x", provenance="MAGIE", source_kind="parser", observable_id=None,
@@ -158,7 +165,7 @@ def test_invalid_enums_rejected() -> None:
             observed_at=None, match_level="EXACT", source_group="",
         )
     with pytest.raises(ValidationError):
-        new_state(Path("/tmp/x.eml"), "guessed_profile", "0" * 64)  # type: ignore[arg-method]
+        new_state(tmp_path / "x.eml", "guessed_profile", "0" * 64)  # type: ignore[arg-method]
     with pytest.raises(ValidationError):
         Evidence(
             id="ev_x", provenance="INTERNE", source_kind="parser", observable_id=None,
@@ -261,13 +268,18 @@ def test_gate_config_rejects_invalid_boolean(configs_dir: Path, tmp_path: Path) 
         load_yaml_config(bad, GateConfig)
 
 
-def test_gate_result_defaults() -> None:
+def test_gate_result_decision_mandatory() -> None:
+    """GateResult always has a decision; 'not yet decided' is state.gate=None."""
+
     from src.state import GateResult
 
-    gate = GateResult()
-    assert gate.decision is None
+    gate = GateResult(decision="simple")
     assert gate.reasons == []
     assert gate.rule_hits == {"R1": False, "R2": False, "R3": False}
+    gate_complex = GateResult(decision="complex", reasons=["urls_present"])
+    assert gate_complex.decision == "complex"
+    with pytest.raises(ValidationError):
+        GateResult()  # decision is mandatory, never null
 
 
 def test_assessment_defaults_not_shared() -> None:

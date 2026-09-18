@@ -151,10 +151,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
     ``env_file`` may be ``None`` (environment only) or a path to a dotenv
     file. Secrets stay ``None`` when absent; no fallback value is invented.
 
-    Sandbox credential mapping (environment-scoped derogation): only when the
-    injected ``OPENAI_BASE_URL`` is the Genspark LLM proxy and the canonical
-    ``LITELLM_*`` variables are absent, the sandbox credentials are used and
-    the model is ``claude-haiku-4-5``. The key value is only carried inside
+    Sandbox credential mapping (environment-scoped ATOMIC derogation):
+    if any canonical ``LITELLM_CHAT_URL`` / ``LITELLM_MODEL`` /
+    ``LITELLM_API_KEY`` is provided — via environment variables or via
+    ``env_file`` — no ``OPENAI_*`` field is mapped at all (explicit
+    configuration and injected credentials are never combined). Otherwise,
+    only when the injected ``OPENAI_BASE_URL`` points at the Genspark LLM
+    proxy, the sandbox mapping applies as a whole: URL + model
+    ``claude-haiku-4-5`` + key. The key value is only carried inside
     ``SecretStr`` and never logged. Outside that environment, the canonical
     V1.2 Luna defaults always apply.
     """
@@ -162,24 +166,39 @@ def load_settings(env_file: Path | None = None) -> Settings:
     import os
     from urllib.parse import urlparse
 
-    overrides: dict[str, str] = {}
+    env_file_keys: set[str] = set()
+    if env_file is not None:
+        path = Path(env_file)
+        if path.is_file():
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                env_file_keys.add(line.partition("=")[0].strip())
+
+    canonical_provided = any(
+        os.environ.get(name) is not None or name in env_file_keys
+        for name in ("LITELLM_CHAT_URL", "LITELLM_MODEL", "LITELLM_API_KEY")
+    )
     injected_base = os.environ.get("OPENAI_BASE_URL", "")
     injected_host = urlparse(injected_base).hostname if injected_base else None
-    if not injected_base or injected_host not in _GENSPARK_LLM_HOSTS:
-        # Not the sanctioned Genspark sandbox environment (no injected
-        # OpenAI-compatible base, or it points elsewhere): the canonical
-        # V1.2 Luna defaults apply and nothing is mapped.
+    sandbox_eligible = bool(injected_base) and injected_host in _GENSPARK_LLM_HOSTS
+
+    if canonical_provided or not sandbox_eligible:
+        # Explicit canonical configuration, or not the sanctioned Genspark
+        # sandbox: nothing is mapped; canonical V1.2 Luna defaults apply.
         return Settings(_env_file=env_file, _env_file_encoding="utf-8")
 
-    if not os.environ.get("LITELLM_CHAT_URL") and injected_base:
-        base = injected_base.rstrip("/")
-        if base.endswith("/chat/completions"):
-            overrides["LITELLM_CHAT_URL"] = base
-        else:
-            overrides["LITELLM_CHAT_URL"] = base + "/chat/completions"
-    if not os.environ.get("LITELLM_MODEL"):
-        overrides["LITELLM_MODEL"] = "claude-haiku-4-5"
-    if not os.environ.get("LITELLM_API_KEY") and os.environ.get("OPENAI_API_KEY"):
+    # Atomic sandbox mapping: URL + model + key applied together, never a
+    # partial mix of canonical and injected values.
+    base = injected_base.rstrip("/")
+    overrides: dict[str, str] = {
+        "LITELLM_CHAT_URL": (
+            base if base.endswith("/chat/completions") else base + "/chat/completions"
+        ),
+        "LITELLM_MODEL": "claude-haiku-4-5",
+    }
+    if os.environ.get("OPENAI_API_KEY"):
         overrides["LITELLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
 
     return Settings(_env_file=env_file, _env_file_encoding="utf-8", **overrides)

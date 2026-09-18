@@ -157,14 +157,61 @@ def test_mapping_refused_for_foreign_openai_endpoint(
 def test_canonical_env_wins_over_sandbox_mapping(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Explicit LITELLM_* variables take precedence over the injected ones."""
+    """Explicit canonical LITELLM_* config: NO OPENAI_* field is mapped.
+
+    Atomicity rule: explicit canonical configuration and injected sandbox
+    credentials are never combined.
+    """
 
     monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
     monkeypatch.setenv("LITELLM_CHAT_URL", "https://luna.example/chat/completions")
-    monkeypatch.setenv("LITELLM_MODEL", "openai/gpt-5.6-luna")
     settings = load_settings(None)
     assert settings.LITELLM_CHAT_URL == "https://luna.example/chat/completions"
+    # canonical V1.2 default model (no model override mapped)
+    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    # the injected key is NOT carried over: mapping refused as a whole
+    assert settings.secret_presence()["LITELLM_API_KEY"] is False
+
+
+def test_canonical_env_file_blocks_mapping(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical LITELLM_* provided via env_file also blocks the mapping."""
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
+    env_file = tmp_path / ".env"
+    env_file.write_text("LITELLM_MODEL=openai/gpt-5.6-luna\n", encoding="utf-8")
+    settings = load_settings(env_file)
+    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    # canonical Luna URL default (nothing mapped)
+    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
+    assert settings.secret_presence()["LITELLM_API_KEY"] is False
+
+
+def test_atomic_mapping_no_partial_mix(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single canonical LITELLM_* field forbids every OPENAI_* mapping."""
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
+    monkeypatch.setenv("LITELLM_MODEL", "openai/gpt-5.6-luna")  # only one canonical field
+    settings = load_settings(None)
+    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
+    assert settings.secret_presence()["LITELLM_API_KEY"] is False
+
+
+def test_atomic_mapping_requires_genspark_base_for_key(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an injected Genspark base URL, an OPENAI_API_KEY maps nothing."""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "orphan-secret-value-999")
+    settings = load_settings(None)
+    assert settings.secret_presence()["LITELLM_API_KEY"] is False
     assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
 
 

@@ -63,6 +63,26 @@ GATE_COMMANDS: dict[str, list[str]] = {
         [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
          "--from-run", "runs/eval/dev_baseline", "--out", "runs/eval/dev_recomputed"],
     ],
+    # Optional gates (docs/gates.md §5.1): G7-A RAG (TICKET-15), G7-B vision
+    # (TICKET-16), G7-C fine-tuning decision (TICKET-17).
+    "G7-A": [[sys.executable, "-m", "pytest", "tests/test_rag.py", "-q"]],
+    "G7-B": [[sys.executable, "-m", "pytest", "tests/test_vision.py", "--live", "-q"]],
+    "G7-C": [
+        [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
+         "--from-run", "runs/eval/dev_baseline", "--out", "runs/eval/dev_for_ft_decision"],
+    ],
+}
+
+#: Tickets that must be recorded as DONE before the gate receipt may reach
+#: PASS (docs/gates.md §5.1). G0 requires TICKET-01 AND TICKET-02: command
+#: success alone never yields a premature G0 PASS.
+REQUIRED_TICKETS: dict[str, list[str]] = {
+    "G0": ["TICKET-01", "TICKET-02"],
+}
+
+#: Files that must exist for the gate (docs/gates.md §5.2).
+REQUIRED_FILES: dict[str, list[str]] = {
+    "G7-C": ["docs/fine_tuning_decision.md"],
 }
 
 REQUIRED_TESTS: dict[str, dict[str, int]] = {
@@ -70,6 +90,32 @@ REQUIRED_TESTS: dict[str, dict[str, int]] = {
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+#: Operator-maintained record of tickets whose own validation reached DONE.
+#: The gate controller never infers ticket completion from command success.
+COMPLETED_TICKETS_FILE = PROJECT_ROOT / "runs" / "gates" / "completed_tickets.json"
+
+
+def load_completed_tickets() -> list[str]:
+    if not COMPLETED_TICKETS_FILE.is_file():
+        return []
+    data = json.loads(COMPLETED_TICKETS_FILE.read_text(encoding="utf-8"))
+    return list(data.get("completed_tickets", [])) if isinstance(data, dict) else []
+
+
+def record_completed_ticket(ticket: str) -> int:
+    """Record a ticket as DONE (explicit operator/ticket-flow action)."""
+
+    tickets = load_completed_tickets()
+    if ticket not in tickets:
+        tickets.append(ticket)
+    COMPLETED_TICKETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    COMPLETED_TICKETS_FILE.write_text(
+        json.dumps({"completed_tickets": sorted(tickets)}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"recorded completed ticket: {ticket}")
+    return 0
 
 
 def expurgate(text: str) -> str:
@@ -131,6 +177,9 @@ def check_prerequisites(gate: str) -> list[str]:
         return missing
     if not (PROJECT_ROOT / "pyproject.toml").is_file():
         missing.append("pyproject.toml")
+    for required in REQUIRED_FILES.get(gate, []):
+        if not (PROJECT_ROOT / required).is_file():
+            missing.append(required)
     if gate == "G0":
         for required in (
             "src/config.py", "src/state.py", "tests/test_bootstrap.py",
@@ -196,13 +245,21 @@ def record(gate: str) -> int:
             if tests.get(key, 0) > required[key]:
                 all_ok = False
 
+    # Ticket completion is NEVER inferred from command success (docs/gates.md
+    # §5.2). The gate may only reach PASS once its required tickets have been
+    # recorded DONE in the operator registry.
+    completed = load_completed_tickets()
+    missing_tickets = [
+        t for t in REQUIRED_TICKETS.get(gate, []) if t not in completed
+    ]
+    if missing_tickets:
+        all_ok = False
+
     receipt = {
         "status": "PASS" if all_ok else "FAIL",
         "gate": gate,
-        # Ticket completion is NOT inferred from command success: G0 PASS
-        # requires TICKET-01 AND TICKET-02; this field is filled by the
-        # operator/ticket flow, never auto-claimed here.
-        "completed_tickets": [],
+        "completed_tickets": completed,
+        "missing_tickets": missing_tickets,
         "tested_commit": worktree_fingerprint(),
         "validated_scope_hashes": {},
         "commands": commands,
@@ -217,6 +274,8 @@ def record(gate: str) -> int:
     (out_dir / "gate.json").write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
 
     print(f"gate={gate} status={receipt['status']}")
+    if missing_tickets:
+        print(f"  missing tickets for PASS: {', '.join(missing_tickets)}")
     for entry in commands:
         print(f"  exit={entry['exit_code']} {entry['command']}")
     return 0 if all_ok else 1
@@ -240,11 +299,17 @@ def verify(gate: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fixed-list gate controller")
-    parser.add_argument("gate", help="gate id, e.g. G0")
+    parser.add_argument("gate", help="gate id, e.g. G0 or G7-A")
     parser.add_argument("--record", action="store_true", help="run commands and write the receipt")
+    parser.add_argument(
+        "--complete-ticket", metavar="TICKET",
+        help="record a ticket as DONE in the operator registry, then exit",
+    )
     args = parser.parse_args()
 
     os.chdir(PROJECT_ROOT)
+    if args.complete_ticket:
+        return record_completed_ticket(args.complete_ticket)
     if args.record:
         return record(args.gate)
     return verify(args.gate)
