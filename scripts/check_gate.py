@@ -112,34 +112,130 @@ G7C_YES_FIELDS = (
 )
 
 
-def validate_g7c_decision_file() -> list[str]:
-    """G7-C (docs/gates.md §5.2): the decision file must carry an explicit
-    YES/NO/INCONCLUSIVE status and, when YES, all eleven §8.5 fields.
-    An empty or status-less file can never yield a PASS."""
+def _count_dev_records(dir_path: Path) -> int | None:
+    """Deterministic dev record count from an archived evaluation artifact.
+
+    Counts non-empty lines of ``*.jsonl`` files, or reads a sample count
+    from ``metrics.json``. Returns ``None`` when nothing parseable exists.
+    """
+
+    if not dir_path.is_dir():
+        return None
+    jsonl_lines = 0
+    has_jsonl = False
+    for jsonl in sorted(dir_path.glob("*.jsonl")):
+        has_jsonl = True
+        jsonl_lines += sum(1 for line in jsonl.read_text(encoding="utf-8").splitlines() if line.strip())
+    if has_jsonl:
+        return jsonl_lines
+    metrics = dir_path / "metrics.json"
+    if metrics.is_file():
+        try:
+            data = json.loads(metrics.read_text(encoding="utf-8"))
+            for key in ("sample_count", "n", "count", "records"):
+                if isinstance(data.get(key), int):
+                    return data[key]
+        except (json.JSONDecodeError, AttributeError):
+            return None
+    return None
+
+
+def _check_g7c_artifact_concordance(
+    baseline_dir: Path | None = None, ft_dir: Path | None = None
+) -> list[str]:
+    """Concordance of dev counts with archived evaluation artifacts (§5.2).
+
+    The G7-C recompute output must exist; when both the baseline run and the
+    recompute expose a parseable dev record count, they must be equal.
+    """
 
     problems: list[str] = []
-    path = PROJECT_ROOT / "docs" / "fine_tuning_decision.md"
+    ft_dir = ft_dir or PROJECT_ROOT / "runs" / "eval" / "dev_for_ft_decision"
+    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "dev_baseline"
+
+    if not ft_dir.is_dir() or not any(ft_dir.iterdir()):
+        return [
+            "missing archived recompute artifact runs/eval/dev_for_ft_decision "
+            "(output of the G7-C evaluate.py --mode recompute command)"
+        ]
+
+    base_count = _count_dev_records(baseline_dir)
+    ft_count = _count_dev_records(ft_dir)
+    if base_count is not None and ft_count is not None and base_count != ft_count:
+        problems.append(
+            f"dev record count mismatch between archived artifacts: "
+            f"dev_baseline={base_count} vs dev_for_ft_decision={ft_count}"
+        )
+    return problems
+
+
+def validate_g7c_decision_file(
+    path: Path | None = None,
+    baseline_dir: Path | None = None,
+    ft_dir: Path | None = None,
+) -> list[str]:
+    """G7-C (docs/gates.md §5.2): the decision file must carry an explicit
+    YES/NO/INCONCLUSIVE status; when YES, all eleven §8.5 fields must be
+    present with a NON-EMPTY value (UNKNOWN is acceptable where the spec
+    allows it), and the dev counts/references must be concordant with the
+    archived evaluation artifacts. An empty or status-less file, or a YES
+    with placeholder-only fields, can never yield a PASS."""
+
+    problems: list[str] = []
+    path = path or PROJECT_ROOT / "docs" / "fine_tuning_decision.md"
     if not path.is_file():
         return ["docs/fine_tuning_decision.md missing"]
     text = path.read_text(encoding="utf-8")
     if not text.strip():
         return ["docs/fine_tuning_decision.md is empty"]
 
-    m = re.search(r"(?i)fine[-_ ]?tune[^\n]*?(YES|NO|INCONCLUSIVE)", text)
+    m = re.search(r"(?i)\bfine[-_ ]?tun\w*[^\n]*?\b(YES|NO|INCONCLUSIVE)\b", text)
     decision = m.group(1).upper() if m else None
     if decision is None:
         problems.append("no explicit decision status YES|NO|INCONCLUSIVE found")
         return problems
 
     if decision == "YES":
+        # Locate every field and take its value as the text up to the next
+        # field (or EOF), so heading/list/code-fence layouts are all accepted.
+        positions: list[tuple[int, str]] = []
+        for field in G7C_YES_FIELDS:
+            fm = re.search(rf"(?im)^[#*\-\s]*{re.escape(field)}\b", text)
+            if fm:
+                positions.append((fm.start(), field))
+        positions.sort()
+        for i, (start, field) in enumerate(positions):
+            end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+            segment = text[start:end]
+            # Value = same-line remainder after the field name, plus any
+            # following lines, excluding the field-name line itself.
+            lines = segment.splitlines()
+            rest: list[str] | None = None
+            for j, line in enumerate(lines):
+                if re.search(rf"(?i)\b{re.escape(field)}\b", line):
+                    rest = [line.split(field, 1)[1], *lines[j + 1:]]
+                    break
+            value = "\n".join(rest) if rest is not None else segment
+            value = value.strip().strip("#*:-` \n\t")
+            if not value:
+                problems.append(
+                    f"YES decision but §8.5 field has no value: {field} "
+                    "(UNKNOWN is acceptable where the spec allows it)"
+                )
         for field in G7C_YES_FIELDS:
             if not re.search(rf"(?im)^[#*\-\s]*{re.escape(field)}\b", text):
                 problems.append(f"YES decision but §8.5 field missing: {field}")
+        problems.extend(_check_g7c_artifact_concordance(baseline_dir, ft_dir))
     return problems
 
 REQUIRED_TESTS: dict[str, dict[str, int]] = {
     "G0": {"min_collected": 1, "failures": 0, "skipped": 0, "xfailed": 0},
 }
+
+#: docs/gates.md §5.2 rule applied GENERICALLY to every gate that runs pytest:
+#: at least one test collected, zero failed/skipped/xfailed. A pytest exit 0
+#: made only of skipped tests must never allow a PASS.
+PYTEST_PASS_RULE = {"min_collected": 1, "failures": 0, "skipped": 0, "xfailed": 0}
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -180,16 +276,29 @@ def expurgate(text: str) -> str:
 
 
 def worktree_fingerprint() -> str:
-    """Fingerprint of the tracked worktree (git commit or tree hash)."""
+    """Deterministic fingerprint of HEAD **and** the tracked worktree/index.
 
+    Any tracked modification (staged or unstaged) changes the hash, so a
+    recorded receipt can never stay valid after the code it validated moved.
+    Untracked files do not participate.
+    """
+
+    import hashlib
     import subprocess as sp
 
     try:
-        commit = sp.run(
+        head = sp.run(
             ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, shell=False,
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        return f"commit:{commit}"
+        # Covers tracked staged + unstaged changes relative to HEAD.
+        diff = sp.run(
+            ["git", "diff", "HEAD", "--", "."], cwd=PROJECT_ROOT, shell=False,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        digest = hashlib.sha256((head + "\x00" + diff).encode("utf-8")).hexdigest()
+        state = "clean" if not diff else "dirty"
+        return f"commit:{head};tree:{state}:{digest[:16]}"
     except Exception:
         return "commit:unavailable"
 
@@ -282,19 +391,23 @@ def record(gate: str) -> int:
             all_ok = False
 
     tests: dict[str, int] = {}
+    pytest_ran = False
     for entry in commands:
         log_file = PROJECT_ROOT / str(entry["log"])
         if log_file.is_file() and "pytest" in str(entry["command"]):
             summary = parse_pytest_summary(log_file.read_text(encoding="utf-8"))
-            tests = summary
+            if summary.get("collected", 0) > 0 or summary.get("passed", 0) > 0:
+                tests = summary
+                pytest_ran = True
             break
 
-    required = REQUIRED_TESTS.get(gate)
-    if required and tests:
-        if tests.get("collected", 0) < required["min_collected"]:
+    # Generic pytest rule (docs/gates.md §5.2): applied to every gate with
+    # pytest commands, not only G0. Skipped/xfailed tests never allow PASS.
+    if pytest_ran:
+        if tests.get("collected", 0) < PYTEST_PASS_RULE["min_collected"]:
             all_ok = False
         for key in ("failures", "skipped", "xfailed"):
-            if tests.get(key, 0) > required[key]:
+            if tests.get(key, 0) > PYTEST_PASS_RULE[key]:
                 all_ok = False
 
     # Ticket completion is NEVER inferred from command success (docs/gates.md

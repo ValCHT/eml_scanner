@@ -284,6 +284,140 @@ def test_gate_result_decision_mandatory() -> None:
         GateResult()  # decision is mandatory, never null
 
 
+def test_gate_result_rule_hits_exact_keys() -> None:
+    """rule_hits accepts exactly R1/R2/R3 — incomplete or extra keys rejected."""
+
+    from src.state import GateResult
+
+    # incomplete: missing R3
+    with pytest.raises(ValidationError):
+        GateResult(decision="simple", rule_hits={"R1": False, "R2": True})
+    # incomplete: only R1
+    with pytest.raises(ValidationError):
+        GateResult(decision="complex", rule_hits={"R1": True})
+    # extra key alongside the three required ones
+    with pytest.raises(ValidationError):
+        GateResult(
+            decision="simple",
+            rule_hits={"R1": False, "R2": False, "R3": False, "R4": True},
+        )
+    # empty mapping
+    with pytest.raises(ValidationError):
+        GateResult(decision="simple", rule_hits={})
+
+
+# ---------------------------------------------------------------------------
+# check_gate.py internals (G0 tooling): fingerprint, pytest rule, G7-C file
+# ---------------------------------------------------------------------------
+
+
+def test_worktree_fingerprint_detects_tracked_changes() -> None:
+    """Any tracked staged/unstaged change must alter the fingerprint."""
+
+    import subprocess as sp
+
+    from scripts.check_gate import PROJECT_ROOT, worktree_fingerprint
+
+    clean_fp = worktree_fingerprint()
+    marker = PROJECT_ROOT / "src" / "__init__.py"
+    original = marker.read_text(encoding="utf-8")
+    try:
+        marker.write_text(original + "\n# fingerprint probe\n", encoding="utf-8")
+        dirty_fp = worktree_fingerprint()
+        assert dirty_fp != clean_fp, "unstaged tracked change must invalidate fingerprint"
+        marker.write_text(original + "\n# second probe\n", encoding="utf-8")
+        second_fp = worktree_fingerprint()
+        assert second_fp != dirty_fp != clean_fp, "each tracked change gives a distinct fingerprint"
+    finally:
+        marker.write_text(original, encoding="utf-8")
+        sp.run(["git", "checkout", "--", str(marker)], cwd=PROJECT_ROOT, shell=False, check=False)
+    assert worktree_fingerprint() == clean_fp
+
+
+def test_pytest_pass_rule_rejects_skip_only_run() -> None:
+    """A pytest run made only of skipped tests must never allow a PASS."""
+
+    from scripts.check_gate import PYTEST_PASS_RULE, parse_pytest_summary
+
+    skipped_output = "===== 5 skipped in 0.10s ====="
+    counts = parse_pytest_summary(skipped_output)
+    ok = (
+        counts["collected"] >= PYTEST_PASS_RULE["min_collected"]
+        and all(counts[k] <= PYTEST_PASS_RULE[k] for k in ("failures", "skipped", "xfailed"))
+    )
+    assert ok is False, "skip-only pytest run must fail the generic rule"
+    healthy = parse_pytest_summary("===== 10 passed in 0.30s =====")
+    ok_healthy = (
+        healthy["collected"] >= PYTEST_PASS_RULE["min_collected"]
+        and all(healthy[k] <= PYTEST_PASS_RULE[k] for k in ("failures", "skipped", "xfailed"))
+    )
+    assert ok_healthy is True
+
+
+def test_g7c_decision_file_validation(tmp_path: Path) -> None:
+    """G7-C validator: empty/status-less/placeholder files never pass; a
+    complete YES file with UNKNOWN-allowed placeholders and concordant
+    artifacts passes."""
+
+    from scripts.check_gate import G7C_YES_FIELDS, validate_g7c_decision_file
+
+    # missing file
+    assert validate_g7c_decision_file(tmp_path / "absent.md") != []
+
+    # empty file
+    empty = tmp_path / "d.md"
+    empty.write_text("", encoding="utf-8")
+    assert validate_g7c_decision_file(empty) == ["docs/fine_tuning_decision.md is empty"]
+
+    # status-less file
+    nostatus = tmp_path / "d.md"
+    nostatus.write_text("# decision\nsome prose without status\n", encoding="utf-8")
+    assert any("no explicit decision" in p for p in validate_g7c_decision_file(nostatus))
+
+    # YES with field names only (no values) -> rejected
+    yes_placeholder = tmp_path / "d.md"
+    yes_placeholder.write_text(
+        "# fine-tuning decision: YES\n\n"
+        + "\n".join(f"## {f}\n\n" for f in G7C_YES_FIELDS),
+        encoding="utf-8",
+    )
+    problems = validate_g7c_decision_file(
+        yes_placeholder, baseline_dir=tmp_path / "no_base", ft_dir=tmp_path / "no_ft"
+    )
+    assert any("no value" in p for p in problems)
+
+    # YES complete with UNKNOWN allowed, but missing archived artifacts -> rejected
+    yes_unknown = tmp_path / "d.md"
+    yes_unknown.write_text(
+        "# fine-tuning decision: YES\n\n"
+        + "\n".join(f"## {f}\n\nUNKNOWN\n" for f in G7C_YES_FIELDS),
+        encoding="utf-8",
+    )
+    problems = validate_g7c_decision_file(
+        yes_unknown, baseline_dir=tmp_path / "no_base", ft_dir=tmp_path / "no_ft"
+    )
+    assert any("dev_for_ft_decision" in p for p in problems)
+
+    # YES complete + concordant archived artifacts -> valid
+    ft_dir = tmp_path / "ft"
+    ft_dir.mkdir()
+    (ft_dir / "samples.jsonl").write_text('{"a":1}\n{"b":2}\n', encoding="utf-8")
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "samples.jsonl").write_text('{"a":1}\n{"b":2}\n', encoding="utf-8")
+    assert validate_g7c_decision_file(yes_unknown, baseline_dir=base_dir, ft_dir=ft_dir) == []
+
+    # concordance failure: mismatched counts
+    (base_dir / "samples.jsonl").write_text('{"a":1}\n', encoding="utf-8")
+    problems = validate_g7c_decision_file(yes_unknown, baseline_dir=base_dir, ft_dir=ft_dir)
+    assert any("mismatch" in p for p in problems)
+
+    # NO decision needs no §8.5 fields
+    no_decision = tmp_path / "d.md"
+    no_decision.write_text("# fine-tuning decision: NO\nquality sufficient\n", encoding="utf-8")
+    assert validate_g7c_decision_file(no_decision, baseline_dir=base_dir, ft_dir=ft_dir) == []
+
+
 def test_assessment_defaults_not_shared() -> None:
     a1, a2 = make_assessment(), make_assessment()
     a1.observations.append("ev_1")

@@ -57,7 +57,9 @@ Start a fresh OpenCode session for every ticket. Do not reuse the previous ticke
 2. Connect the **OpenCode Go** provider with `/connect`.
 3. Use `/models` and select the current Go model you intend to use (GLM-5.3-Flash is available in the Go catalogue as of 18/09/2026).
 4. Do **not** run `/init`: this repository already contains the reviewed `AGENTS.md`.
-5. In a fresh session, run `/ticket 01`.
+5. In a fresh session, execute the next pending ticket — see
+   [Next implementation step](#next-implementation-step); never re-run an
+   already-DONE ticket.
 6. Review the diff and validation output before committing.
 
 See `ops/OPENCODE_GO_RUNBOOK.md` for the full sequence.
