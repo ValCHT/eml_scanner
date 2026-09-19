@@ -12,6 +12,8 @@ dependencies = [
     "pydantic-settings>=2.2,<3",
     "PyYAML>=6.0,<7",
     "vt-py>=0.22,<0.23",
+    "pycti>=7.260914,<8",
+    "requests>=2.33,<3",
 ]
 
 [project.optional-dependencies]

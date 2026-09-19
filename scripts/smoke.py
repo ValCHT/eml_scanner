@@ -47,7 +47,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import Settings, ToolsConfig, load_settings, load_yaml_config  # noqa: E402
+from src.config import (  # noqa: E402
+    EgressConfig,
+    Settings,
+    ToolsConfig,
+    load_settings,
+    load_yaml_config,
+)
 from src.llm import LunaClient, expurgate  # noqa: E402
 
 #: Minimal smoke schema required by TICKET-02 (small {ok:boolean} contract).
@@ -369,6 +375,346 @@ def _fail_smoke(
     return 1
 
 
+# ---------------------------------------------------------------------------
+# TICKET-07 — OpenCTI real read-only CTI smoke (no mutation, no upload)
+# ---------------------------------------------------------------------------
+
+#: Closed unavailable-cause vocabulary (architecture §1.6); a result may
+#: exit 0 only with a real result or one of these causes.
+_CTI_CAUSES = (
+    "not_configured",
+    "timeout",
+    "rate_limited",
+    "auth_error",
+    "api_error",
+    "malformed_response",
+    "deadline",
+)
+
+
+def _near_miss_value(value: str) -> str:
+    """A value one character away from the configured known observable."""
+
+    return value[:-1] + ("m" if value.endswith("n") else "x")
+
+
+def _smoke_approved_egress(tools_config: ToolsConfig) -> EgressConfig:
+    """Egress with the OpenCTI service explicitly operator-approved.
+
+    Used ONLY for this smoke's own context against the operator-selected
+    public OpenCTI demo. ``configs/tools.yaml`` is deliberately not changed:
+    the default ``approved_services=[]`` remains safe-by-default.
+    """
+
+    approved = sorted(
+        {service.lower() for service in tools_config.egress.approved_services} | {"opencti"}
+    )
+    return tools_config.egress.model_copy(update={"approved_services": approved})
+
+
+def _fail_smoke_opencti(
+    capture_dir: Path,
+    message: str,
+    *,
+    payload_results: list[dict[str, object]],
+    limitations: list[str],
+) -> int:
+    """Explicit OpenCTI smoke failure: non-zero exit, nothing simulated."""
+
+    payload = {
+        "smoke": "opencti",
+        "status": "live_failed",
+        "error": message,
+        "cti_exact_match_validated": False,
+        "no_match_validated": False,
+        "results": payload_results,
+        "limitations": limitations,
+        "mutations_sent": 0,
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"smoke opencti: FAILED ({message})", file=sys.stderr)
+    return 1
+
+
+def smoke_opencti(if_configured: bool = False, require_configured: bool = False) -> int:
+    """Real OpenCTI read-only smoke; GraphQL query only, no mutation.
+
+    The smoke context explicitly approves the OpenCTI service for the
+    operator-selected public demo instance; ``configs/tools.yaml`` is NOT
+    changed (the default ``approved_services=[]`` stays safe-by-default).
+
+    Behavior (docs/tickets/TICKET-07.md, docs/gates.md §5.2):
+
+    - Without a token: the REAL adapter is exercised and returns an explicit
+      ``unavailable/not_configured`` with ZERO requests. ``--require-configured``
+      fails non-zero; ``--if-configured`` records the limitation and exits 0.
+    - With a token: captures the observed platform version/schema, then runs
+      REAL read-only lookups — the operator-verified known observable
+      (``LIVE_CTI_KNOWN_VALUE``/``LIVE_CTI_KNOWN_TYPE``) must yield a
+      locally-verified EXACT match, one deterministic unknown SHA-256 probe
+      must be ``not_found``, and a near-miss value must never become an exact
+      match. Nothing is fabricated: a missing known observable, a failed
+      exact match or a bad status is an explicit non-zero failure.
+    """
+
+    from src.state import Observable
+    from src.tools import ToolContext
+    from src.tools.opencti import OpenCTIAdapter
+
+    settings: Settings = load_settings(None)
+    capture_dir = PROJECT_ROOT / "runs" / "gates" / "G4" / "opencti"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    tools_config: ToolsConfig = load_yaml_config(
+        PROJECT_ROOT / "configs" / "tools.yaml", ToolsConfig
+    )
+    adapter = OpenCTIAdapter(settings, tools_config.opencti)
+
+    def _context() -> ToolContext:
+        return ToolContext(
+            run_id=str(uuid.uuid4()),
+            source_profile="fixture",
+            deadline=time.monotonic() + tools_config.opencti.phase_timeout_s,
+            egress=_smoke_approved_egress(tools_config),
+            capture_dir=capture_dir,
+            mode="live",
+        )
+
+    if settings.OPENCTI_API_KEY is None:
+        result = adapter.lookup(
+            Observable(
+                id="smoke_unconfigured_probe",
+                value="ticket07-smoke-unconfigured-probe.org",
+                normalized_value="ticket07-smoke-unconfigured-probe.org",
+                type="domain",
+                roles=["link_target"],
+                provenance="INTERNE",
+                source_ref="smoke:unconfigured",
+            ),
+            _context(),
+        )
+        results = [result.model_dump(mode="json")]
+        if result.status != "unavailable" or result.requests_sent != 0:
+            return _fail_smoke_opencti(
+                capture_dir,
+                f"unconfigured adapter returned {result.status!r} with "
+                f"{result.requests_sent} request(s)",
+                payload_results=results,
+                limitations=[],
+            )
+        if require_configured:
+            return _fail_smoke_opencti(
+                capture_dir,
+                "OPENCTI_API_KEY absent: --require-configured demands real "
+                "credentials; nothing simulated",
+                payload_results=results,
+                limitations=[],
+            )
+        payload = {
+            "smoke": "opencti",
+            "status": "unavailable_not_configured",
+            "cti_exact_match_validated": False,
+            "no_match_validated": False,
+            "results": results,
+            "limitations": [
+                "OPENCTI_API_KEY absent: the real adapter was exercised and returned "
+                "an explicit unavailable with zero requests; no nominal CTI validation"
+            ],
+            "requests_sent_total": 0,
+            "mutations_sent": 0,
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("smoke opencti: unavailable_not_configured")
+        return 0
+
+    results: list[dict[str, object]] = []
+    limitations: list[str] = []
+    try:
+        context = _context()
+        observation = adapter.observe_version_and_schema(context)
+        if observation.get("status") != "ok":
+            return _fail_smoke_opencti(
+                capture_dir,
+                f"version/schema observation failed: {observation}",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if observation.get("revoked_on_stix_cyber_observable") is False:
+            limitations.append(
+                "observed StixCyberObservable schema has no 'revoked' field: "
+                "cti_revoked cannot be produced for cyber observables"
+            )
+        known = settings.LIVE_CTI_KNOWN_VALUE
+        known_type = settings.LIVE_CTI_KNOWN_TYPE
+        if not known or not known_type:
+            return _fail_smoke_opencti(
+                capture_dir,
+                "LIVE_CTI_KNOWN_VALUE/LIVE_CTI_KNOWN_TYPE not configured: no real "
+                "exact-match validation is possible; nothing fabricated",
+                payload_results=results,
+                limitations=limitations,
+            )
+
+        known_query = Observable(
+            id="smoke_known_observable",
+            value=known,
+            normalized_value=known,
+            type=known_type,
+            roles=["link_target"],
+            provenance="INTERNE",
+            source_ref="smoke:known_observable",
+        )
+        known_result = adapter.lookup(known_query, context)
+        results.append(known_result.model_dump(mode="json"))
+        exact_evidence = [
+            evidence
+            for evidence in known_result.evidence
+            if evidence.predicate == "cti_exact_match"
+            and evidence.match_level == "EXACT"
+            and evidence.value is True
+        ]
+        if known_result.status != "ok" or len(exact_evidence) != 1:
+            return _fail_smoke_opencti(
+                capture_dir,
+                f"known observable lookup: status={known_result.status!r} "
+                f"reason={known_result.reason!r} exact_evidence={len(exact_evidence)}; "
+                "no local exact verification",
+                payload_results=results,
+                limitations=limitations,
+            )
+
+        near = _near_miss_value(known)
+        near_result = adapter.lookup(
+            Observable(
+                id="smoke_near_miss",
+                value=near,
+                normalized_value=near,
+                type=known_type,
+                roles=["link_target"],
+                provenance="INTERNE",
+                source_ref="smoke:near_miss",
+            ),
+            context,
+        )
+        results.append(near_result.model_dump(mode="json"))
+        if near_result.status not in ("ok", "not_found"):
+            return _fail_smoke_opencti(
+                capture_dir,
+                f"near-miss lookup returned unexpected status {near_result.status!r}",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if near_result.status == "not_found" and near_result.evidence:
+            return _fail_smoke_opencti(
+                capture_dir,
+                "near-miss lookup is not_found yet carries evidence",
+                payload_results=results,
+                limitations=limitations,
+            )
+
+        unknown = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+        unknown_result = adapter.lookup(
+            Observable(
+                id="smoke_unknown_sha256",
+                value=unknown,
+                normalized_value=unknown,
+                type="sha256",
+                roles=["attachment"],
+                provenance="INTERNE",
+                source_ref="smoke:unknown_probe",
+            ),
+            context,
+        )
+        results.append(unknown_result.model_dump(mode="json"))
+        if unknown_result.status != "not_found" or unknown_result.evidence:
+            return _fail_smoke_opencti(
+                capture_dir,
+                f"no-match probe returned status={unknown_result.status!r} with "
+                f"{len(unknown_result.evidence)} evidence item(s)",
+                payload_results=results,
+                limitations=limitations,
+            )
+    except Exception as exc:  # noqa: BLE001 — any unexpected failure is REAL
+        return _fail_smoke_opencti(
+            capture_dir,
+            f"unexpected exception: {expurgate(f'{type(exc).__name__}: {exc}')}",
+            payload_results=results,
+            limitations=limitations,
+        )
+
+    # Every result must be a real outcome or an explicit unavailable/skip
+    # carrying its closed-vocabulary cause. A causeless status is a FAIL.
+    for entry in results:
+        status = entry.get("status")
+        reason = entry.get("reason")
+        if status in ("ok", "not_found"):
+            continue
+        if status == "unavailable":
+            cause = str(reason or "").split(":", 1)[0].strip()
+            if cause not in _CTI_CAUSES:
+                return _fail_smoke_opencti(
+                    capture_dir,
+                    f"unavailable result without a valid cause: {reason!r}",
+                    payload_results=results,
+                    limitations=limitations,
+                )
+        elif status == "skipped":
+            if not str(reason or "").strip():
+                return _fail_smoke_opencti(
+                    capture_dir,
+                    "skipped result without its reason",
+                    payload_results=results,
+                    limitations=limitations,
+                )
+        else:  # pragma: no cover - ToolResult status is closed vocabulary
+            return _fail_smoke_opencti(
+                capture_dir,
+                f"unexpected result status {status!r}",
+                payload_results=results,
+                limitations=limitations,
+            )
+
+    payload = {
+        "smoke": "opencti",
+        "status": "live_ok",
+        "cti_exact_match_validated": True,
+        "no_match_validated": True,
+        "platform_version": observation.get("version"),
+        "schema_observation": {
+            "revoked_on_stix_cyber_observable": observation.get(
+                "revoked_on_stix_cyber_observable"
+            ),
+            "hashes_on_stix_file": observation.get("hashes_on_stix_file"),
+            "requests_sent": observation.get("requests_sent"),
+            "archived": observation.get("archived"),
+        },
+        "results": results,
+        "limitations": limitations,
+        "requests_sent_total": sum(
+            int(entry.get("requests_sent") or 0) for entry in results
+        ),
+        "mutations_sent": 0,
+        "egress_note": (
+            "OpenCTI service explicitly approved for this smoke context only "
+            "(configs/tools.yaml unchanged; default approved_services=[] stays "
+            "safe-by-default)"
+        ),
+        "transport_invariant": (
+            "read-only GraphQL query only via pycti "
+            "stix_cyber_observable.list(search, first=10, getAll=False); "
+            "no mutation/create/update path exists in the adapter"
+        ),
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(
+        "smoke opencti: live_ok (cti_exact_match_validated=True, "
+        f"no_match_validated=True, platform={payload['platform_version']})"
+    )
+    return 0
+
+
 def smoke_luna(if_configured: bool = False, require_configured: bool = False) -> int:
     """Real runtime smoke; distinguishes pending from failure.
 
@@ -605,7 +951,7 @@ def probe_luna_efforts() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Real smoke tests (no mock mode)")
     parser.add_argument(
-        "target", choices=["luna", "luna-efforts", "virustotal"], help="smoke target"
+        "target", choices=["luna", "luna-efforts", "virustotal", "opencti"], help="smoke target"
     )
     parser.add_argument(
         "--if-configured",
@@ -631,6 +977,11 @@ def main() -> int:
         )
     if args.target == "virustotal":
         return smoke_virustotal(if_configured=args.if_configured)
+    if args.target == "opencti":
+        return smoke_opencti(
+            if_configured=args.if_configured,
+            require_configured=args.require_configured,
+        )
     return probe_luna_efforts()
 
 
