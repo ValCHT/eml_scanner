@@ -37,10 +37,8 @@ def test_settings_load_without_any_key(clean_env: None) -> None:
 
 def test_settings_defaults_clean_env(clean_env: None) -> None:
     settings = load_settings(None)
-    # Canonical V1.2 defaults: the claude-haiku-4-5 derogation is scoped to
-    # the Genspark sandbox environment, never a universal default.
-    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    assert settings.LITELLM_CHAT_URL == "https://api.akashml.com/v1/chat/completions"
+    assert settings.LITELLM_MODEL == "Qwen/Qwen3.8-27B"
     assert settings.OPENCTI_URL == "https://demo.opencti.io"
     assert settings.VT_ACCESS_AUTHORIZED is False
     assert settings.MODEL_SUPPORTS_VISION is False
@@ -62,12 +60,30 @@ def test_settings_defaults_clean_env(clean_env: None) -> None:
 def test_public_dump_has_no_secret_value(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     """A configured secret never leaks into the public dump or repr."""
 
-    monkeypatch.setenv("LITELLM_API_KEY", "super-secret-value-123")
+    canary = "akml-synthetic-public-dump-canary"
+    monkeypatch.setenv("LITELLM_API_KEY", canary)
     settings = load_settings(None)
     dumped = settings.public_dump()
     assert dumped["LITELLM_API_KEY"] is None
-    assert "super-secret-value-123" not in repr(settings)
-    assert "super-secret-value-123" not in str(dumped)
+    assert canary not in repr(settings)
+    assert canary not in str(dumped)
+
+
+@pytest.mark.parametrize("opaque_key", ["akml-synthetic-canary", "opaque-no-prefix-canary"])
+def test_llm_api_key_is_opaque_not_prefix_validated(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch, opaque_key: str
+) -> None:
+    """Both Akash-shaped and arbitrary Bearer credentials are accepted.
+
+    Settings deliberately imposes no ``sk-*`` prefix requirement and never
+    rewrites the supplied credential.
+    """
+
+    monkeypatch.setenv("LITELLM_API_KEY", opaque_key)
+    settings = load_settings(None)
+    assert settings.LITELLM_API_KEY is not None
+    assert settings.LITELLM_API_KEY.get_secret_value() == opaque_key
+    assert opaque_key not in str(settings.public_dump())
 
 
 def test_env_file_missing_key_accepted(tmp_path: Path, clean_env: None) -> None:
@@ -122,100 +138,36 @@ def test_new_state_rejects_relative_path(clean_env: None) -> None:
         new_state(Path("relative.eml"), "fixture", "0" * 64)
 
 
-def test_sandbox_credential_mapping(
+def test_provider_specific_environment_never_maps_to_runtime(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Injected Genspark OPENAI_* variables map onto canonical LITELLM_* fields.
-
-    The key value is never displayed — only its presence is asserted.
-    """
+    """Ambient Genspark/OpenAI/Akash variables cannot select the runtime."""
 
     monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-canary")
+    monkeypatch.setenv("AKASHML_API_KEY", "akml-synthetic-ambient-canary")
     settings = load_settings(None)
-    assert settings.LITELLM_CHAT_URL == "https://www.genspark.ai/api/llm_proxy/v1/chat/completions"
-    assert settings.LITELLM_MODEL == "claude-haiku-4-5"
-    assert settings.secret_presence()["LITELLM_API_KEY"] is True
-    # the value never leaks into dumps or repr
-    assert "mapped-secret-value-456" not in str(settings.public_dump())
-    assert "mapped-secret-value-456" not in repr(settings)
-
-
-def test_mapping_refused_for_foreign_openai_endpoint(
-    clean_env: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Injected OPENAI_* pointing elsewhere than the Genspark proxy map nothing.
-
-    The canonical V1.2 Luna defaults apply and no secret is carried over.
-    """
-
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example/api/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "foreign-secret-value-789")
-    settings = load_settings(None)
-    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    assert settings.LITELLM_CHAT_URL == "https://api.akashml.com/v1/chat/completions"
+    assert settings.LITELLM_MODEL == "Qwen/Qwen3.8-27B"
     assert settings.secret_presence()["LITELLM_API_KEY"] is False
 
 
-def test_canonical_env_wins_over_sandbox_mapping(
+def test_explicit_litellm_configuration_is_authoritative(
     clean_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Explicit canonical LITELLM_* config: NO OPENAI_* field is mapped.
-
-    Atomicity rule: explicit canonical configuration and injected sandbox
-    credentials are never combined.
-    """
+    """The same generic settings can later target Orange without code edits."""
 
     monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
-    monkeypatch.setenv("LITELLM_CHAT_URL", "https://luna.example/chat/completions")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-canary")
+    monkeypatch.setenv("AKASHML_API_KEY", "akml-synthetic-ambient-canary")
+    monkeypatch.setenv("LITELLM_CHAT_URL", "https://orange.example/chat/completions")
+    monkeypatch.setenv("LITELLM_MODEL", "orange/future-model")
+    monkeypatch.setenv("LITELLM_API_KEY", "opaque-orange-canary")
     settings = load_settings(None)
-    assert settings.LITELLM_CHAT_URL == "https://luna.example/chat/completions"
-    # canonical V1.2 default model (no model override mapped)
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
-    # the injected key is NOT carried over: mapping refused as a whole
-    assert settings.secret_presence()["LITELLM_API_KEY"] is False
-
-
-def test_canonical_env_file_blocks_mapping(
-    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A canonical LITELLM_* provided via env_file also blocks the mapping."""
-
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
-    env_file = tmp_path / ".env"
-    env_file.write_text("LITELLM_MODEL=openai/gpt-5.6-luna\n", encoding="utf-8")
-    settings = load_settings(env_file)
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
-    # canonical Luna URL default (nothing mapped)
-    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
-    assert settings.secret_presence()["LITELLM_API_KEY"] is False
-
-
-def test_atomic_mapping_no_partial_mix(
-    clean_env: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A single canonical LITELLM_* field forbids every OPENAI_* mapping."""
-
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://www.genspark.ai/api/llm_proxy/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "mapped-secret-value-456")
-    monkeypatch.setenv("LITELLM_MODEL", "openai/gpt-5.6-luna")  # only one canonical field
-    settings = load_settings(None)
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
-    assert settings.LITELLM_CHAT_URL == "https://management.llmproxy.ai.orange/chat/completions"
-    assert settings.secret_presence()["LITELLM_API_KEY"] is False
-
-
-def test_atomic_mapping_requires_genspark_base_for_key(
-    clean_env: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without an injected Genspark base URL, an OPENAI_API_KEY maps nothing."""
-
-    monkeypatch.setenv("OPENAI_API_KEY", "orphan-secret-value-999")
-    settings = load_settings(None)
-    assert settings.secret_presence()["LITELLM_API_KEY"] is False
-    assert settings.LITELLM_MODEL == "openai/gpt-5.6-luna"
+    assert settings.LITELLM_CHAT_URL == "https://orange.example/chat/completions"
+    assert settings.LITELLM_MODEL == "orange/future-model"
+    assert settings.LITELLM_API_KEY is not None
+    assert settings.LITELLM_API_KEY.get_secret_value() == "opaque-orange-canary"
 
 
 def test_conftest_import_independent_of_cwd(project_root: Path) -> None:

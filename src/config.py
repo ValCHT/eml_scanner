@@ -1,16 +1,10 @@
 """Configuration (docs/contracts.md §2.7).
 
-``Settings`` mirrors the canonical environment variable names and defaults.
-All secrets are ``SecretStr | None`` and are excluded from the public dump
-(``Settings.public_dump``). No secret value is ever printed or logged.
-
-Sandbox-only derogation (TICKET-01, user request): inside the Genspark
-sandbox the injected OpenAI-compatible credentials (``OPENAI_API_KEY`` /
-``OPENAI_BASE_URL`` pointing at the Genspark LLM proxy) are mapped onto the
-canonical ``LITELLM_*`` fields when the latter are absent, and the model is
-``claude-haiku-4-5`` there. This is strictly an environment-scoped mapping:
-the universal project defaults remain the V1.2 Luna values so behavior on
-macOS/Linux/Windows and the G2/G6 experiments are never silently altered.
+``Settings`` mirrors the canonical environment variable names and current
+POC defaults. All secrets are ``SecretStr | None`` and are excluded from the
+public dump (``Settings.public_dump``). No secret value is ever printed or
+logged. Explicit ``LITELLM_*`` settings are authoritative; credentials from
+other provider-specific environment variables are never mapped implicitly.
 """
 
 from __future__ import annotations
@@ -47,13 +41,6 @@ SourceProfile = Literal["fixture", "public_corpus", "private_authorized"]
 #: Secret-bearing fields; never exposed in the public dump.
 _SECRET_FIELDS = ("LITELLM_API_KEY", "VT_API_KEY", "OPENCTI_API_KEY", "URLSCAN_API_KEY")
 
-#: Hosts identifying the Genspark LLM proxy injected in the sandbox. The
-#: ``OPENAI_*`` -> ``LITELLM_*`` mapping only applies for these hosts, so the
-#: derogation is scoped to the Genspark environment and never becomes a
-#: universal default.
-_GENSPARK_LLM_HOSTS = ("www.genspark.ai", "genspark.ai")
-
-
 class Settings(BaseSettings):
     """Canonical settings; secrets are ``SecretStr | None`` (§2.7)."""
 
@@ -63,9 +50,9 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
-    # --- Luna / LLM proxy (canonical V1.2 defaults) --------------------------
-    LITELLM_CHAT_URL: str = "https://management.llmproxy.ai.orange/chat/completions"
-    LITELLM_MODEL: str = "openai/gpt-5.6-luna"
+    # --- Generic OpenAI-compatible runtime (current POC defaults) ------------
+    LITELLM_CHAT_URL: str = "https://api.akashml.com/v1/chat/completions"
+    LITELLM_MODEL: str = "Qwen/Qwen3.8-27B"
     LITELLM_API_KEY: SecretStr | None = None
 
     # --- Tools credentials / switches ---------------------------------------
@@ -151,57 +138,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
     ``env_file`` may be ``None`` (environment only) or a path to a dotenv
     file. Secrets stay ``None`` when absent; no fallback value is invented.
 
-    Sandbox credential mapping (environment-scoped ATOMIC derogation):
-    if any canonical ``LITELLM_CHAT_URL`` / ``LITELLM_MODEL`` /
-    ``LITELLM_API_KEY`` is provided — via environment variables or via
-    ``env_file`` — no ``OPENAI_*`` field is mapped at all (explicit
-    configuration and injected credentials are never combined). Otherwise,
-    only when the injected ``OPENAI_BASE_URL`` points at the Genspark LLM
-    proxy, the sandbox mapping applies as a whole: URL + model
-    ``claude-haiku-4-5`` + key. The key value is only carried inside
-    ``SecretStr`` and never logged. Outside that environment, the canonical
-    V1.2 Luna defaults always apply.
+    Only canonical ``LITELLM_*`` fields configure the OpenAI-compatible LLM
+    runtime. Provider-specific variables such as ``OPENAI_*`` or
+    ``AKASHML_API_KEY`` are deliberately not copied: operators must set
+    ``LITELLM_API_KEY`` explicitly, preventing ambient credentials from
+    silently selecting a provider or model.
     """
 
-    import os
-    from urllib.parse import urlparse
-
-    env_file_keys: set[str] = set()
-    if env_file is not None:
-        path = Path(env_file)
-        if path.is_file():
-            for raw_line in path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                env_file_keys.add(line.partition("=")[0].strip())
-
-    canonical_provided = any(
-        os.environ.get(name) is not None or name in env_file_keys
-        for name in ("LITELLM_CHAT_URL", "LITELLM_MODEL", "LITELLM_API_KEY")
-    )
-    injected_base = os.environ.get("OPENAI_BASE_URL", "")
-    injected_host = urlparse(injected_base).hostname if injected_base else None
-    sandbox_eligible = bool(injected_base) and injected_host in _GENSPARK_LLM_HOSTS
-
-    if canonical_provided or not sandbox_eligible:
-        # Explicit canonical configuration, or not the sanctioned Genspark
-        # sandbox: nothing is mapped; canonical V1.2 Luna defaults apply.
-        return Settings(_env_file=env_file, _env_file_encoding="utf-8")
-
-    # Atomic sandbox mapping: URL + model + key applied together, never a
-    # partial mix of canonical and injected values.
-    base = injected_base.rstrip("/")
-    overrides: dict[str, str] = {
-        "LITELLM_CHAT_URL": (
-            base if base.endswith("/chat/completions") else base + "/chat/completions"
-        ),
-        "LITELLM_MODEL": "claude-haiku-4-5",
-    }
-    if os.environ.get("OPENAI_API_KEY"):
-        overrides["LITELLM_API_KEY"] = os.environ["OPENAI_API_KEY"]
-
-    return Settings(_env_file=env_file, _env_file_encoding="utf-8", **overrides)
+    return Settings(_env_file=env_file, _env_file_encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -318,4 +262,3 @@ def load_yaml_config(path: Path, model: type[_YamlStrict]) -> _YamlStrict:
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: expected a mapping at top level")
     return model.model_validate(raw)
-

@@ -57,10 +57,9 @@ HARNESS_ONLY_KEYS = (
     "constraints",
 )
 
-#: Sandbox runtime identity (TICKET-04 binding decision): the Genspark
-#: OpenAI-compatible proxy serves claude-haiku-4-5; silent substitution is
-#: refused by the client itself.
-EXPECTED_RUNTIME_MODEL = "claude-haiku-4-5"
+#: Current official POC runtime identity. Cheap GPT-OSS compatibility calls
+#: never execute this official G2 matrix or write its measurement artifacts.
+EXPECTED_RUNTIME_MODEL = "Qwen/Qwen3.8-27B"
 
 
 @pytest.fixture(autouse=True)
@@ -739,9 +738,18 @@ def _run_live_matrix() -> dict[str, Any]:
     capture directories). Real failures are archived, never simulated."""
 
     settings = load_settings(None)
+    # Fail closed BEFORE creating/deleting any G2 path or constructing a
+    # client. GPT-OSS is authorized for compatibility probes only and must
+    # never overwrite the official Qwen3.8 measurement consumed by TICKET-05.
+    if settings.LITELLM_MODEL != EXPECTED_RUNTIME_MODEL:
+        pytest.fail(
+            "official G2 requires LITELLM_MODEL="
+            f"{EXPECTED_RUNTIME_MODEL!r}; got {settings.LITELLM_MODEL!r}. "
+            "Refusing before artifact mutation or network access."
+        )
     if settings.LITELLM_API_KEY is None:
         pytest.fail(
-            "LITELLM_API_KEY absent: G2 requires real Luna calls "
+            "LITELLM_API_KEY absent: G2 requires real official-runtime calls "
             "(BLOCKED — no simulation possible)"
         )
 
@@ -873,6 +881,46 @@ def _run_live_matrix() -> dict[str, Any]:
     return {"performance": performance, "accepted": accepted}
 
 
+def test_live_matrix_wrong_model_fails_before_network_or_artifact_mutation(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cheap-test model cannot destroy or replace official G2 evidence."""
+
+    monkeypatch.setenv("LITELLM_API_KEY", "akml-synthetic-g2-guard-canary")
+    monkeypatch.setenv("LITELLM_CHAT_URL", "https://api.akashml.com/v1/chat/completions")
+    monkeypatch.setenv("LITELLM_MODEL", "openai/gpt-oss-20b")
+
+    g2 = tmp_path / "G2"
+    stale_run = g2 / "runs" / "official_qwen_sentinel"
+    stale_run.mkdir(parents=True)
+    (stale_run / "response.json").write_bytes(b"official-qwen-response")
+    (g2 / "assessments.jsonl").write_bytes(b"official-qwen-assessment\n")
+    (g2 / "fixture_performance.jsonl").write_bytes(b"official-qwen-performance\n")
+
+    def _snapshot() -> dict[str, bytes | None]:
+        return {
+            str(path.relative_to(g2)): path.read_bytes() if path.is_file() else None
+            for path in sorted(g2.rglob("*"))
+        }
+
+    before = _snapshot()
+    calls = 0
+
+    def _network_forbidden(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("wrong-model G2 guard allowed a network call")
+
+    monkeypatch.setattr(LunaClient, "complete_json", _network_forbidden)
+    monkeypatch.setitem(globals(), "_g2_dir", lambda: g2)
+
+    with pytest.raises(pytest.fail.Exception, match="official G2 requires"):
+        _run_live_matrix()
+
+    assert calls == 0
+    assert _snapshot() == before
+
+
 @pytest.fixture(scope="session")
 def live_matrix() -> dict[str, Any]:
     """Session-scoped live matrix; runs once for all live tests."""
@@ -886,7 +934,7 @@ class TestLiveInternalMatrix:
         self, live_matrix: dict[str, Any]
     ) -> None:
         """>= 16 real INTERNAL runs; the model contract is real: the
-        requested model is always claude-haiku-4-5, and every SUCCESSFUL
+        requested model is always Qwen/Qwen3.8-27B, and every SUCCESSFUL
         structured response reports returned == requested (silent
         substitution is refused by the client itself). Failed attempts
         legitimately carry returned_model=None: no success is invented."""

@@ -75,9 +75,9 @@ La provenance de l'existence d'un hash calculé sur l'email reste INTERNE après
 
 **RAG public uniquement :** RagCase porte `public_source_url`, `dataset`, `record_sha256`, `validated_label`, `analyst_validation_ref`, `duplicate_group`, `family_group`, `campaign_id`, `embedding_model_id`, `is_public=true`, `split=rag_reference`. Une annotation humaine d'un exemple public est permise ; aucun historique SOC, email privé ou prediction non validée dans l'index. Les cas RAG ne rejoignent jamais le registre des observables du message courant. Leur emploi par Luna est une INFERENCE d'analogie ; ce n'est pas une cinquième provenance et ce n'est pas OSINT sur l'artefact exact.
 
-## 2.5 Assessment : ce que Luna produit réellement
+## 2.5 Assessment : ce que le LLM runtime produit réellement
 
-Luna produit uniquement : six probabilités ; `observations` (IDs de preuves existantes) ; au plus six `inferences` courtes (code, texte ≤240 caractères, IDs de support) ; propositions de catégorie sur IDs d'observables existants ; `needs_enrichment` ; `missing_information` ; au plus trois `decisive_evidence_ids`.
+Le LLM runtime produit uniquement : six probabilités ; `observations` (IDs de preuves existantes) ; au plus six `inferences` courtes (code, texte ≤240 caractères, IDs de support) ; propositions de catégorie sur IDs d'observables existants ; `needs_enrichment` ; `missing_information` ; au plus trois `decisive_evidence_ids`.
 
 Pas de copie de compteur VT, de nouvel IOC, de timestamp ou de statut outil dans la sortie LLM. Les faits destinés au rapport sont rendus à partir des preuves référencées. Les inferences sont explicitement étiquetées INFERENCE dans le rendu. Ce contrat réduit ce que le vérificateur doit prouver ; il ne prétend pas rendre le jugement sémantique déterministe.
 
@@ -129,7 +129,7 @@ Champs supplémentaires obligatoires pour FINAL :
 | `rag_case_count_sent` | nombre de cas effectivement inclus dans `RAG_CONTEXT` |
 | `visual_count_sent` | nombre de blocs image/pixels effectivement joints à l'appel FINAL ; les seules métadonnées visuelles ne comptent pas |
 
-`C(x) = json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')`, sans newline. Les compteurs mesurent des caractères Unicode, pas des bytes, du contenu utile seulement : ni ponctuation JSON ni longueur d'un ID/hash ne remplace un body. Le message utilisateur conserve la forme existante ; en multimodal, lire son premier bloc texte JSON. Les mesures et chemins d'audit ne sont jamais ajoutés à l'enveloppe Luna.
+`C(x) = json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')`, sans newline. Les compteurs mesurent des caractères Unicode, pas des bytes, du contenu utile seulement : ni ponctuation JSON ni longueur d'un ID/hash ne remplace un body. Le message utilisateur conserve la forme existante ; en multimodal, lire son premier bloc texte JSON. Les mesures et chemins d'audit ne sont jamais ajoutés à l'enveloppe LLM.
 
 Pour les fixtures, la capture exacte et les hashes sont recalculables localement à partir du même fichier request ; le test vérifie aussi que ces bytes sont ceux remis au transport HTTP, sans serveur ni réponse simulés. Pour `public_corpus` et `private_authorized`, le même code sérialise une seule fois, calcule hashes/compteurs sur ces bytes en mémoire, puis transmet ces mêmes bytes sans écrire de fichier request : un test unitaire/fixture démontre cette identité de chemin de code. Conserver les preuves de toutes les tentatives, y compris refus/timeouts/JSON invalide ; une tentative non envoyée est explicitement identifiée et ne compte jamais comme appel réel. `CallRecord.request_sha256` garde son champ existant : hash du dernier payload effectivement envoyé dans la phase, null si aucun. Les audits par tentative portent les autres mesures ; aucune extension du schema Assessment/TriageReport ni de `complete_json`/`assess_internal`/`assess_final` n'est nécessaire.
 
@@ -144,10 +144,12 @@ Les payloads exacts éventuellement archivés pour les fixtures sont des donnée
 
 Noms d'environnement canoniques et valeurs par défaut ; tous les secrets sont SecretStr | None et ne figurent jamais dans model_dump public.
 
+Pour un run officiel, `LITELLM_MODEL` vaut explicitement `Qwen/Qwen3.8-27B`. La seule dérogation est un test technique identifié avec `openai/gpt-oss-20b`, archivé hors des artefacts de mesure G2/G5/G6. `AKASHML_API_KEY` n'est pas un alias applicatif automatique : l'opérateur injecte explicitement la même credential opaque dans `LITELLM_API_KEY`. Une future configuration Orange réutilise exactement ces champs.
+
 | Champ Settings / variable | Type | Défaut |
 |---|---|---|
-| LITELLM_CHAT_URL | str URL HTTPS | https://management.llmproxy.ai.orange/chat/completions |
-| LITELLM_MODEL | str | openai/gpt-5.6-luna |
+| LITELLM_CHAT_URL | str URL HTTPS | https://api.akashml.com/v1/chat/completions |
+| LITELLM_MODEL | str | Qwen/Qwen3.8-27B |
 | LITELLM_API_KEY | SecretStr? | null |
 | VT_API_KEY | SecretStr? | null |
 | VT_ACCESS_AUTHORIZED | bool | false |
@@ -180,7 +182,7 @@ RAG : enabled piloté par RAG_ENABLED, max_cases=150 initialement, k=3, max_dist
 
 Egress : `allow_real_urls=false`, `approved_services=[]`, `approved_exact_url_hosts=[]`, `trusted_authserv_ids=[]`, `shared_hosts=[]`, `trusted_cti_sources=[]`. Les services et hôtes autorisés sont une décision de configuration de l'opérateur, issue des autorisations applicables ; aucune inference LLM ne peut les ajouter. Pour les scans de smoke, l'URL configurée et son caractère bénin/public doivent être revus avant activation. Les `.test` ne sont jamais soumis même si un flag est activé. Les secrets détectés restent refusés. Un domaine approuvé ne certifie pas à lui seul l'innocuité d'une URL à jeton.
 
-`Services` contient `settings:Settings`, `luna:LunaClient`, `vt:VirusTotalAdapter`, `cti:OpenCTIAdapter`, `urlscan:UrlscanAdapter`, `rag:RagAdapter|None`, `clock:Callable[[],float]`. `LunaClient(settings)` expose `complete_json(messages, schema, effort, max_output_tokens, deadline) -> (dict | None, CallRecord)`. POST réel à l'endpoint exact de Settings (`LITELLM_CHAT_URL`), headers d'authentification construits par le client hors messages, jamais archivés. Structured output `response_format=json_schema` strict ; aucun fallback de modèle, de fournisseur ou de structured outputs : refus, timeout, `finish_reason` anormal, JSON invalide, schema invalide ou type inattendu produisent une erreur explicite et `result=None`. Captures : usage, modèle réellement retourné, hashes de payload/réponse ; jamais de request header ni de valeur de clé. `ToolContext` contient `run_id:str`, `source_profile`, `deadline:float` monotone, `egress:EgressConfig`, `capture_dir:Path`, `mode:live|recorded`, et n'est jamais sérialisé dans l'état. Les credentials restent dans les instances des clients. `normalize_response(query:Observable, body:Mapping[str,object], metadata:ResponseMetadata)->ToolResult` est propre à chaque adaptateur ; ResponseMetadata contient origin/HTTP status/date/empreinte/référence locale, sans en-tête de clé.
+`Services` contient `settings:Settings`, `luna:LunaClient`, `vt:VirusTotalAdapter`, `cti:OpenCTIAdapter`, `urlscan:UrlscanAdapter`, `rag:RagAdapter|None`, `clock:Callable[[],float]`. Le nom `LunaClient` est conservé comme interface historique ; il désigne le client OpenAI-compatible générique et ne sélectionne aucun fournisseur. `LunaClient(settings)` expose `complete_json(messages, schema, effort, max_output_tokens, deadline) -> (dict | None, CallRecord)`. POST réel à l'endpoint exact de Settings (`LITELLM_CHAT_URL`), headers d'authentification construits par le client hors messages, jamais archivés. La clé est une credential Bearer opaque, sans validation ou conversion de préfixe. Structured output `response_format=json_schema` strict ; aucun fallback de modèle, de fournisseur ou de structured outputs : refus, timeout, `finish_reason` anormal, JSON invalide, schema invalide ou type inattendu produisent une erreur explicite et `result=None`. Captures : usage, modèle réellement retourné, hashes de payload/réponse ; jamais de request header ni de valeur de clé. `ToolContext` contient `run_id:str`, `source_profile`, `deadline:float` monotone, `egress:EgressConfig`, `capture_dir:Path`, `mode:live|recorded`, et n'est jamais sérialisé dans l'état. Les credentials restent dans les instances des clients. `normalize_response(query:Observable, body:Mapping[str,object], metadata:ResponseMetadata)->ToolResult` est propre à chaque adaptateur ; ResponseMetadata contient origin/HTTP status/date/empreinte/référence locale, sans en-tête de clé.
 
 ## 2.8 Entrées d'évaluation et partitions
 

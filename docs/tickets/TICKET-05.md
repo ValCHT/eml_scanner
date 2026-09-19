@@ -10,7 +10,7 @@ Rendre le choix simple/complex testable et explicite.
 
 ## PRECONDITIONS / DÉPENDANCES
 
-PASS G2 et réponses Luna réelles archivées.
+PASS G2 et réponses réelles du runtime G2 officiel `Qwen/Qwen3.8-27B` archivées.
 
 ## IN SCOPE
 
@@ -34,7 +34,7 @@ Configuration BASELINE V0 provisoire et non calibrée : aucun réglage avant pre
 
 ## TESTS REQUIRED
 
-Chaque règle isolée, toutes combinaisons, frontières 0.899999/0.90 et 0.199999/0.20, None, image essentielle, tracking, absence de lien ; répétabilité bit à bit ; entrées déterministes couvrant SIMPLE et COMPLEX ; toutes les réponses Luna G2 réelles repassées dans le gate sans modifier leurs scores.
+Chaque règle isolée, toutes combinaisons, frontières 0.899999/0.90 et 0.199999/0.20, None, image essentielle, tracking, absence de lien ; répétabilité bit à bit ; entrées déterministes couvrant SIMPLE et COMPLEX ; toutes les réponses réelles du runtime G2 officiel Qwen3.8 repassées dans le gate sans modifier leurs scores.
 
 ## VALIDATION COMMANDS
 
@@ -50,7 +50,7 @@ Exit 0 ; toutes raisons et branches déterministes conformes ; distribution des 
 
 ## SECURITY INVARIANTS
 
-Aucune réponse Luna/VT/OpenCTI/urlscan simulée. Fixtures = données d’entrée seulement. Aucun secret dans code, prompts, état ou logs ; aucune pièce jointe exécutée/uploadée ; aucun accès Internet libre au LLM ; tiers via adaptateurs typés et règles de sortie ; RAG exclusivement public, validé et disjoint de gold ; test non accessible aux agents de build.
+Aucune réponse LLM/VT/OpenCTI/urlscan simulée. Fixtures = données d’entrée seulement. Aucun secret dans code, prompts, état ou logs ; aucune pièce jointe exécutée/uploadée ; aucun accès Internet libre au LLM ; tiers via adaptateurs typés et règles de sortie ; RAG exclusivement public, validé et disjoint de gold ; test non accessible aux agents de build.
 
 ## ACCEPTANCE CRITERIA
 
