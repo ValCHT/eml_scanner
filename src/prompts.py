@@ -1,0 +1,459 @@
+"""INTERNAL prompt projection (TICKET-04, docs/prompt_integration.md §3).
+
+Builds the deterministic INTERNAL user envelope from a ``ParsedEmail``:
+
+- ``UNTRUSTED_EMAIL``: only the business-useful fields of the parsed email
+  (subject, selected headers, text/HTML parts, links, attachments metadata,
+  authentication as reported, image METADATA — never pixels, never an
+  invented visual description);
+- ``EVIDENCE_REGISTRY`` / ``OBSERVABLE_REGISTRY``: parser-produced registries
+  (provenance INTERNE only by construction);
+- ``SUPPLIED_VISUAL_IDS``: always empty in this POC unless actual pixels are
+  supplied to the model — G2 supplies none.
+
+Harness-only manifest data (fixture filename, scenario, design_label,
+content_anchors, part_expectations, constraints, gold metadata, historical
+X-Spam decisions) is never part of a ``ParsedEmail`` and therefore can never
+enter the envelope: the projection is built exclusively from the parser
+output (docs/fixtures.md, docs/contracts.md §2.8).
+
+Context limits (docs/prompt_integration.md §3), enforced deterministically:
+
+- body useful chars <= 24,000
+- selected headers <= 8,000
+- URLs/observables <= 16,000 (shared by links and extra observables)
+- evidence <= 24,000
+- total user text payload outside system <= 100,000 chars
+
+Reduction is deterministic (documented order below); any truncation is
+recorded in ``UNTRUSTED_EMAIL.content_limits`` and never leaves a dangling
+reference: whole evidence entries are dropped, never partially quoted, and
+observables referenced by kept evidence are always included.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from .state import ParsedEmail
+
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+#: Budgets frozen by docs/prompt_integration.md §3.
+BODY_CHARS_LIMIT = 24_000
+HEADERS_CHARS_LIMIT = 8_000
+URLS_OBSERVABLES_CHARS_LIMIT = 16_000
+EVIDENCE_CHARS_LIMIT = 24_000
+TOTAL_USER_CHARS_LIMIT = 100_000
+
+#: INTERNAL phase call parameters (docs/architecture.md §1.4; TICKET-04).
+INTERNAL_EFFORT = "medium"
+INTERNAL_MAX_OUTPUT_TOKENS = 8_192
+INTERNAL_PHASE_SECONDS = 60.0
+
+
+class ContextLimits(BaseModel):
+    """Deterministic projection budgets (docs/prompt_integration.md §3).
+
+    The last two fields carry the INTERNAL call parameters so the frozen
+    ``assess_internal(parsed, client, limits)`` interface needs no Settings.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    body_chars: int = BODY_CHARS_LIMIT
+    headers_chars: int = HEADERS_CHARS_LIMIT
+    urls_observables_chars: int = URLS_OBSERVABLES_CHARS_LIMIT
+    evidence_chars: int = EVIDENCE_CHARS_LIMIT
+    total_user_chars: int = TOTAL_USER_CHARS_LIMIT
+    internal_max_output_tokens: int = INTERNAL_MAX_OUTPUT_TOKENS
+    internal_phase_seconds: float = INTERNAL_PHASE_SECONDS
+
+
+def load_internal_prompt() -> str:
+    """Load the complete delivered system prompt, unchanged (V1.2)."""
+
+    return (PROMPTS_DIR / "internal_assessment.txt").read_text(encoding="utf-8")
+
+
+def canonical_bytes(value: Any) -> bytes:
+    """C(x) exactly as defined in docs/contracts.md §2.6.1 (no newline)."""
+
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Deterministic section selection under budgets
+# ---------------------------------------------------------------------------
+
+
+def _select_headers(parsed: ParsedEmail, budget: int) -> tuple[list[dict[str, str]], bool]:
+    """Headers in original order, whole-header greedy selection, ≤ budget.
+
+    Cost of a header = len(name) + len(decoded_value) (§2.6.1 counter rule).
+    Selection stops at the first header that would exceed the budget, so the
+    result is a deterministic prefix of the ordered header list.
+    """
+
+    selected: list[dict[str, str]] = []
+    used = 0
+    truncated = False
+    for header in parsed.headers:
+        cost = len(header.name) + len(header.decoded_value)
+        if used + cost > budget:
+            truncated = True
+            break
+        selected.append({"name": header.name, "decoded_value": header.decoded_value})
+        used += cost
+    return selected, truncated
+
+
+def _select_parts(parts: list[Any], budget: int) -> tuple[list[dict[str, Any]], bool]:
+    """Text/HTML parts in order; a part is truncated to the remaining budget.
+
+    A part whose text is cut, or dropped because no budget remains, is never
+    silently replaced by an empty stub: it is either included with its exact
+    (possibly truncated) text or absent, and the gap is flagged by the
+    caller in ``content_limits``.
+    """
+
+    selected: list[dict[str, Any]] = []
+    remaining = budget
+    truncated = False
+    for part in parts:
+        if remaining <= 0:
+            truncated = truncated or bool(part.text)
+            continue
+        text = part.text
+        if len(text) > remaining:
+            text = text[:remaining]
+            truncated = True
+        selected.append(
+            {"part_id": part.part_id, "mime_type": part.mime_type, "text": text}
+        )
+        remaining -= len(text)
+    return selected, truncated
+
+
+def _select_links(parsed: ParsedEmail, budget: int) -> tuple[list[dict[str, Any]], int, bool]:
+    """Links in order under the shared URLs/observables budget.
+
+    Returns ``(links, used_chars, truncated)``; cost of a link is the length
+    of its canonical JSON serialization (Unicode chars, §2.6.1).
+    """
+
+    selected: list[dict[str, Any]] = []
+    used = 0
+    truncated = False
+    for link in parsed.links:
+        entry = {
+            "id": link.id,
+            "part_id": link.part_id,
+            "role": link.role,
+            "raw_value": link.raw_value,
+            "normalized_value": link.normalized_value,
+            "display_text": link.display_text,
+            "display_url": link.display_url,
+            "href_display_mismatch": link.href_display_mismatch,
+        }
+        cost = len(canonical_bytes(entry).decode("utf-8"))
+        if used + cost > budget:
+            truncated = True
+            break
+        selected.append(entry)
+        used += cost
+    return selected, used, truncated
+
+
+def _evidence_entries(parsed: ParsedEmail) -> list[dict[str, Any]]:
+    """Parser evidence as registry entries (INTERNE provenance by contract)."""
+
+    return [
+        {
+            "id": ev.id,
+            "provenance": ev.provenance,
+            "source_kind": ev.source_kind,
+            "predicate": ev.predicate,
+            "value": ev.value,
+            "source_ref": ev.source_ref,
+            "observable_id": ev.observable_id,
+        }
+        for ev in parsed.evidence
+    ]
+
+
+def _observable_entries(parsed: ParsedEmail) -> dict[str, dict[str, Any]]:
+    """Parser observables keyed by id (registry form sent to the model)."""
+
+    return {
+        obs.id: {
+            "id": obs.id,
+            "type": obs.type,
+            "value": obs.value,
+            "normalized_value": obs.normalized_value,
+            "roles": list(obs.roles),
+            "provenance": obs.provenance,
+        }
+        for obs in parsed.observables
+    }
+
+
+def _select_evidence(
+    entries: list[dict[str, Any]], budget: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Whole-entry greedy selection in parser order (no partial evidence)."""
+
+    selected: list[dict[str, Any]] = []
+    used = 0
+    truncated = False
+    for entry in entries:
+        cost = len(canonical_bytes(entry).decode("utf-8"))
+        if used + cost > budget:
+            truncated = True
+            break
+        selected.append(entry)
+        used += cost
+    return selected, truncated
+
+
+def _select_observables(
+    all_observables: dict[str, dict[str, Any]],
+    kept_evidence: list[dict[str, Any]],
+    budget: int,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], bool]:
+    """Observables under the shared budget, evidence kept reference-consistent.
+
+    Returns ``(selected_observables, kept_evidence, truncated)``:
+
+    - observables referenced by kept evidence are mandatory but still
+      budget-bound (the 16k URLs/observables limit applies to them too);
+    - an evidence entry whose observable no longer fits the budget is
+      DROPPED, so the sent payload never carries a reference to an
+      observable that is not in the registry (no dangling reference);
+    - the remaining observables follow in registry order while the budget
+      allows.
+    """
+
+    selected: dict[str, dict[str, Any]] = {}
+    used = 0
+    truncated = False
+    mandatory_ids = {
+        entry["observable_id"]
+        for entry in kept_evidence
+        if entry.get("observable_id") is not None
+    }
+    for obs_id in sorted(mandatory_ids):
+        if obs_id not in all_observables:
+            continue
+        entry = all_observables[obs_id]
+        cost = len(canonical_bytes(entry).decode("utf-8"))
+        if used + cost > budget:
+            truncated = True
+            continue  # excluded: its evidence entries are dropped below
+        selected[obs_id] = entry
+        used += cost
+    # Reference consistency: drop evidence entries whose observable was
+    # excluded by the budget (never send a dangling observable_id).
+    kept_evidence = [
+        entry
+        for entry in kept_evidence
+        if entry.get("observable_id") is None or entry["observable_id"] in selected
+    ]
+    for obs_id, entry in all_observables.items():
+        if obs_id in selected:
+            continue
+        cost = len(canonical_bytes(entry).decode("utf-8"))
+        if used + cost > budget:
+            truncated = True
+            break
+        selected[obs_id] = entry
+        used += cost
+    return selected, kept_evidence, truncated
+
+
+# ---------------------------------------------------------------------------
+# Envelope construction
+# ---------------------------------------------------------------------------
+
+
+def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[str, Any]:
+    """Deterministic INTERNAL user envelope (docs/prompt_integration.md §3).
+
+    Returns the four conceptual fields exactly:
+    ``UNTRUSTED_EMAIL``, ``EVIDENCE_REGISTRY``, ``OBSERVABLE_REGISTRY``,
+    ``SUPPLIED_VISUAL_IDS``. ``SUPPLIED_VISUAL_IDS`` is empty: G2 supplies no
+    pixels, and an image metadata record never becomes a visual description.
+
+    Section budgets are enforced in the frozen order headers → body →
+    links/observables → evidence; every truncation is flagged in
+    ``UNTRUSTED_EMAIL.content_limits``. The section budgets are mutually
+    consistent with the total user payload limit, which is asserted.
+    """
+
+    headers, headers_trunc = _select_headers(parsed, limits.headers_chars)
+    # Text and HTML parts share the single body budget (docs/prompt_integration.md
+    # §3: 24,000 useful body characters overall, not per MIME type). The
+    # truncation flag of EACH section is kept: a text/plain cut must be
+    # flagged in content_limits exactly like an HTML cut.
+    text_parts, text_trunc = _select_parts(parsed.text_parts, limits.body_chars)
+    text_chars_used = sum(len(part["text"]) for part in text_parts)
+    html_parts, html_trunc = _select_parts(
+        parsed.html_parts, max(0, limits.body_chars - text_chars_used)
+    )
+    body_trunc = text_trunc or html_trunc
+
+    links, links_used, links_trunc = _select_links(parsed, limits.urls_observables_chars)
+
+    evidence_entries = _evidence_entries(parsed)
+    kept_evidence, evidence_trunc = _select_evidence(evidence_entries, limits.evidence_chars)
+
+    all_observables = _observable_entries(parsed)
+    remaining_obs_budget = max(0, limits.urls_observables_chars - links_used)
+    # Mandatory observables (referenced by kept evidence) are budget-bound
+    # too: one that no longer fits is excluded and the evidence entries
+    # referencing it are dropped, so no dangling reference ever remains
+    # (docs/prompt_integration.md §3: aucune preuve tronquée ne reste
+    # référençable).
+    observables, kept_evidence, obs_trunc = _select_observables(
+        all_observables, kept_evidence, remaining_obs_budget
+    )
+
+    content_limits = list(parsed.content_limits)
+    for flag, hit in (
+        ("body_truncated", body_trunc),
+        ("headers_truncated", headers_trunc),
+        ("urls_truncated", links_trunc or obs_trunc),
+        ("evidence_truncated", evidence_trunc),
+    ):
+        if hit and flag not in content_limits:
+            content_limits.append(flag)
+
+    untrusted_email = {
+        "subject": parsed.subject,
+        "actors": {
+            "from": list(parsed.from_addresses),
+            "to": list(parsed.to_addresses),
+            "cc": list(parsed.cc_addresses),
+            "reply_to": list(parsed.reply_to),
+            "return_path": list(parsed.return_path),
+        },
+        "date_raw": parsed.date_raw,
+        "message_id": parsed.message_id,
+        "headers": headers,
+        "text_parts": text_parts,
+        "html_parts": html_parts,
+        "links": links,
+        "attachments": [
+            {
+                "part_id": att.part_id,
+                "filename": att.filename,
+                "mime_type": att.mime_type,
+                "disposition": att.disposition,
+                "decoded_size_bytes": att.decoded_size_bytes,
+                "sha256": att.sha256,
+                "decode_status": att.decode_status,
+                "is_inline": att.is_inline,
+            }
+            for att in parsed.attachments
+        ],
+        "authentication": [
+            {
+                "mechanism": auth.mechanism,
+                "result": auth.result,
+                "domain": auth.domain,
+                "trust": auth.trust,
+            }
+            for auth in parsed.authentication
+        ],
+        # Image METADATA only: no pixels are supplied in this POC, and a
+        # metadata record must never become an invented visual description.
+        # local_ref (a filesystem path) is deliberately excluded.
+        "images": [
+            {
+                "sha256": img.sha256,
+                "mime_type": img.mime_type,
+                "status": img.status,
+                "content_id": img.content_id,
+                "part_id": img.part_id,
+            }
+            for img in parsed.images
+        ],
+        "defects": list(parsed.defects),
+        "content_limits": content_limits,
+        "essential_visual_content": parsed.essential_visual_content,
+    }
+
+    envelope = {
+        "UNTRUSTED_EMAIL": untrusted_email,
+        "EVIDENCE_REGISTRY": {entry["id"]: entry for entry in kept_evidence},
+        "OBSERVABLE_REGISTRY": observables,
+        # No pixels are supplied by this phase: always empty for G2.
+        "SUPPLIED_VISUAL_IDS": [],
+    }
+
+    user_chars = len(canonical_bytes(envelope).decode("utf-8"))
+    if user_chars > limits.total_user_chars:
+        # Cannot happen while the section budgets hold (24k + 8k + 16k + 24k
+        # + fixed keys < 100k), but the invariant stays explicit and checked.
+        raise ValueError(
+            f"INTERNAL user payload {user_chars} exceeds total budget "
+            f"{limits.total_user_chars}; reduce section budgets deterministically"
+        )
+    return envelope
+
+
+def envelope_has_useful_content(envelope: dict[str, Any]) -> bool:
+    """False when the envelope would transmit an empty/substituted email.
+
+    A textual fixture must always carry either useful body text or at least
+    the expected headers; an envelope without any of them is rejected before
+    any call (docs/gates.md §5.1.1 check 2).
+    """
+
+    untrusted = envelope["UNTRUSTED_EMAIL"]
+    has_text = any(part["text"].strip() for part in untrusted["text_parts"]) or any(
+        part["text"].strip() for part in untrusted["html_parts"]
+    )
+    has_headers = any(header["decoded_value"].strip() for header in untrusted["headers"])
+    has_actors = any(
+        any(address for address in addresses if address and address.strip())
+        for addresses in untrusted["actors"].values()
+    )
+    return bool(has_text or has_headers or has_actors)
+
+
+def build_internal_messages(parsed: ParsedEmail, limits: ContextLimits) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """System prompt (delivered file, unchanged) + user JSON envelope.
+
+    Returns ``(messages, envelope)`` so the caller can validate references
+    against the registries ACTUALLY sent (never a rebuild).
+    """
+
+    envelope = build_internal_envelope(parsed, limits)
+    return _messages_from_envelope(envelope), envelope
+
+
+def _messages_from_envelope(envelope: dict[str, Any]) -> list[dict[str, str]]:
+    user_payload = json.dumps(
+        envelope, ensure_ascii=False, sort_keys=True, allow_nan=False
+    )
+    return [
+        {"role": "system", "content": load_internal_prompt()},
+        {"role": "user", "content": user_payload},
+    ]
+
+
+__all__ = [
+    "ContextLimits",
+    "build_internal_envelope",
+    "build_internal_messages",
+    "canonical_bytes",
+    "envelope_has_useful_content",
+    "load_internal_prompt",
+]

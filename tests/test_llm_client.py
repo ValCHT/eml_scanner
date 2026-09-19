@@ -641,8 +641,288 @@ def test_real_transport_timeout_converts_to_llm_timeout(
 
 
 # ---------------------------------------------------------------------------
-# CLI errors are readable (no tracebacks, no secrets)
+# TICKET-04: exact-bytes input audit (docs/contracts.md §2.6.1)
 # ---------------------------------------------------------------------------
+
+
+def test_input_audit_fields_computed_from_exact_transport_bytes(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.6.1: the audit is computed from the SAME bytes handed to transport
+    (serialized once), and the per-attempt audit file is archived."""
+
+    import hashlib
+    import time as _time
+
+    client = _client(monkeypatch, tmp_path)
+    raw = _response_bytes('{"ok": true}')
+    captured: dict[str, bytes] = {}
+
+    def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        captured["body"] = body
+        return 200, raw
+
+    client._post_bytes = _post  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result == {"ok": True} and record.status == "ok"
+    captures = tmp_path / "captures"
+    audit_path = captures / "internal_attempt_1.input_audit.json"
+    assert audit_path.is_file()
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert set(audit.keys()) == {
+        "phase",
+        "input_payload_sha256",
+        "untrusted_email_sha256",
+        "body_chars_sent",
+        "headers_chars_sent",
+        "evidence_count_sent",
+        "observable_count_sent",
+    }
+    # The audit payload hash is the SHA-256 of the EXACT bytes sent:
+    assert audit["input_payload_sha256"] == hashlib.sha256(captured["body"]).hexdigest()
+    assert record.request_sha256 == audit["input_payload_sha256"]
+    # This smoke-shaped call carries no INTERNAL envelope: envelope fields
+    # are truthfully zero/absent — never fabricated.
+    assert audit["untrusted_email_sha256"] is None
+    assert audit["body_chars_sent"] == 0 and audit["headers_chars_sent"] == 0
+    assert audit["evidence_count_sent"] == 0 and audit["observable_count_sent"] == 0
+
+
+def test_audit_covers_each_emitted_attempt(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two real attempts (first fails at transport, second succeeds) produce
+    one audit file per emitted attempt."""
+
+    import time as _time
+
+    client = _client(monkeypatch, tmp_path)
+    from src.llm import LLMTransportError
+
+    state = {"n": 0}
+    raw = _response_bytes('{"ok": true}')
+
+    def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        state["n"] += 1
+        if state["n"] == 1:
+            raise LLMTransportError("transient")
+        return 200, raw
+
+    client._post_bytes = _post  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result == {"ok": True} and record.attempts == 2
+    captures = tmp_path / "captures"
+    assert (captures / "internal_attempt_1.input_audit.json").is_file()
+    assert (captures / "internal_attempt_2.input_audit.json").is_file()
+
+
+def test_request_body_persisted_only_when_explicitly_allowed(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.6.1 minimization: default = NO request body on disk (the
+    public_corpus/private_authorized path); persist_request_body=True (the
+    fixture profile) archives the EXACT transport bytes."""
+
+    import time as _time
+
+    raw = _response_bytes('{"ok": true}')
+
+    # Default (minimization): audit yes, request body never.
+    client = _client(monkeypatch, tmp_path)
+    captured: dict[str, bytes] = {}
+
+    def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        captured["body"] = body
+        return 200, raw
+
+    client._post_bytes = _post  # type: ignore[method-assign]
+    client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    captures = tmp_path / "captures"
+    assert (captures / "internal_attempt_1.input_audit.json").is_file()
+    assert not list(captures.glob("*_attempt_*.request.json"))
+
+    # Fixture profile: the archived request IS the exact transport payload.
+    persist_dir = tmp_path / "captures_fixture"
+    client_fixture = LunaClient(
+        client._settings, phase="internal", capture_dir=persist_dir,
+        persist_request_body=True,
+    )
+    client_fixture._post_bytes = _post  # type: ignore[method-assign]
+    client_fixture.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="low",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    request_path = persist_dir / "internal_attempt_1.request.json"
+    assert request_path.is_file()
+    assert request_path.read_bytes() == captured["body"]
+
+
+def test_input_audit_envelope_fields_from_internal_payload(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For a real INTERNAL envelope the audit counters derive from the
+    user message inside the exact transport bytes (not from pre-projection
+    objects)."""
+
+    import hashlib
+    import time as _time
+
+    from src.prompts import ContextLimits, canonical_bytes
+
+    from src.parsing import ParseLimits, parse_email
+    from src.state import ParsedEmail
+
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "spam_promo.eml"
+    parsed = parse_email(fixture_path, ParseLimits())
+    assert isinstance(parsed, ParsedEmail)
+
+    from src.prompts import build_internal_messages
+
+    messages, envelope = build_internal_messages(parsed, ContextLimits())
+    client = _client(monkeypatch, tmp_path)
+    captured: dict[str, bytes] = {}
+
+    def _post(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        captured["body"] = body
+        return 200, _response_bytes('{"ok": true}')
+
+    client._post_bytes = _post  # type: ignore[method-assign]
+    client.complete_json(
+        messages=messages,
+        schema=OK_SCHEMA,
+        effort="medium",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    audit = json.loads(
+        (tmp_path / "captures" / "internal_attempt_1.input_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    # Recompute everything from the exact transport bytes:
+    sent = json.loads(captured["body"].decode("utf-8"))
+    sent_envelope = json.loads(sent["messages"][1]["content"])
+    untrusted = sent_envelope["UNTRUSTED_EMAIL"]
+    assert audit["untrusted_email_sha256"] == hashlib.sha256(
+        canonical_bytes(untrusted)
+    ).hexdigest()
+    assert audit["body_chars_sent"] == sum(
+        len(p["text"]) for p in untrusted["text_parts"] + untrusted["html_parts"]
+    )
+    assert audit["headers_chars_sent"] == sum(
+        len(h["name"]) + len(h["decoded_value"]) for h in untrusted["headers"]
+    )
+    assert audit["evidence_count_sent"] == len(sent_envelope["EVIDENCE_REGISTRY"])
+    assert audit["observable_count_sent"] == len(sent_envelope["OBSERVABLE_REGISTRY"])
+
+
+def ParsedEmail_prototype() -> object:  # pragma: no cover - typing shim
+    from src.state import ParsedEmail
+
+    return ParsedEmail
+
+
+# ---------------------------------------------------------------------------
+# TICKET-04: smoke --require-configured semantics
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_require_configured_fails_without_credentials(
+    clean_env: None, project_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--require-configured with no credentials: explicit failure, non-zero
+    exit, no live_pending allowance (G2 lifts the G0 exception)."""
+
+    import os
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/smoke.py", "luna", "--require-configured"],
+        cwd=project_root, shell=False, capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(project_root)},
+    )
+    assert proc.returncode != 0
+    assert '"status": "live_failed"' in proc.stdout
+    # The STATUS is never live_pending (the reason text may reference the
+    # lifted G0 allowance, but no live_pending status is claimed).
+    assert '"status": "live_pending"' not in proc.stdout
+    assert "--require-configured" in proc.stdout + proc.stderr
+
+
+def test_smoke_if_configured_keeps_g0_semantics(
+    clean_env: None, project_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: --if-configured without credentials stays exit 0
+    with an explicit live_pending (G0 permissive behavior unchanged)."""
+
+    import os
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/smoke.py", "luna", "--if-configured"],
+        cwd=project_root, shell=False, capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(project_root)},
+    )
+    assert proc.returncode == 0
+    assert '"status": "live_pending"' in proc.stdout
+
+
+def test_smoke_flags_are_mutually_exclusive(
+    clean_env: None, project_root: Path
+) -> None:
+    """Both flags together is a CLI usage error, never an ambiguous run."""
+
+    import os
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/smoke.py", "luna", "--if-configured",
+         "--require-configured"],
+        cwd=project_root, shell=False, capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(project_root)},
+    )
+    assert proc.returncode != 0
+    assert "mutually exclusive" in proc.stderr
+
+
+@pytest.mark.live
+def test_smoke_require_configured_succeeds_with_credentials(
+    clean_env: None, project_root: Path
+) -> None:
+    """--require-configured with credentials + real successful structured
+    call => exit 0 (real endpoint, never simulated)."""
+
+    import os
+
+    settings = load_settings(None)
+    if settings.LITELLM_API_KEY is None:
+        pytest.skip("LITELLM_API_KEY absent: live proof impossible (never simulated)")
+    proc = subprocess.run(
+        [sys.executable, "scripts/smoke.py", "luna", "--require-configured"],
+        cwd=project_root, shell=False, capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(project_root)},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert '"status": "live_ok"' in proc.stdout
+
 
 
 def test_smoke_cli_error_readable_without_key(
