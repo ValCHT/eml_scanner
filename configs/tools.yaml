@@ -14,8 +14,12 @@ opencti:
 urlscan:
   enabled: true
   max_urls: 1
+  # Visibility is driven by the SOURCE PROFILE (authoritative, TICKET-08):
+  # fixture/public_corpus -> visibility_fixture (unlisted),
+  # private_authorized -> visibility_real (private). Never "public", never a
+  # fallback; a provider response that does not confirm it is unavailable.
   visibility_real: private
-  visibility_fixture: private
+  visibility_fixture: unlisted
   first_poll_s: 10
   poll_interval_s: 5
   phase_timeout_s: 45
