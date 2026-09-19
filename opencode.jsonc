@@ -29,7 +29,7 @@
     { "action": "shell", "resource": "git rev-parse *", "effect": "allow" },
     { "action": "shell", "resource": "git ls-files *", "effect": "allow" },
     { "action": "shell", "resource": "git check-ignore *", "effect": "allow" },
-    { "action": "shell", "resource": "git push *", "effect": "deny" },
+    { "action": "shell", "resource": "git push *", "effect": "ask" },
     { "action": "shell", "resource": "git reset --hard *", "effect": "deny" },
     { "action": "shell", "resource": "git clean *", "effect": "deny" },
     { "action": "shell", "resource": "rm -rf *", "effect": "deny" }
