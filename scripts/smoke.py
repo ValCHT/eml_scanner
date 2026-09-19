@@ -43,6 +43,8 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -715,11 +717,449 @@ def smoke_opencti(if_configured: bool = False, require_configured: bool = False)
     return 0
 
 
+# ---------------------------------------------------------------------------
+# TICKET-08 — urlscan real scan smoke (private/unlisted per source_profile)
+# ---------------------------------------------------------------------------
+
+#: Closed unavailable-cause vocabulary (architecture §1.6); a result may
+#: exit 0 only with a real result or one of these causes.
+_URLSCAN_CAUSES = (
+    "not_configured",
+    "access_not_authorized",
+    "timeout",
+    "rate_limited",
+    "auth_error",
+    "api_error",
+    "malformed_response",
+    "deadline",
+)
+
+
+def _smoke_urlscan_egress(tools_config: ToolsConfig, urls: list[str]) -> EgressConfig:
+    """Temporary explicit egress for the urlscan smoke ONLY.
+
+    Approves the urlscan service and the exact hosts of the
+    operator-authorized URLs (TICKET-08 amendment). ``configs/tools.yaml``
+    is deliberately NOT changed: it stays safe-by-default
+    (``allow_real_urls=false``, ``approved_services=[]``,
+    ``approved_exact_url_hosts=[]``).
+    """
+
+    hosts = {
+        (urlparse(url).hostname or "").lower().rstrip(".")
+        for url in urls
+        if url
+    }
+    approved_services = sorted(
+        {service.lower() for service in tools_config.egress.approved_services} | {"urlscan"}
+    )
+    approved_hosts = sorted(
+        {host.lower() for host in tools_config.egress.approved_exact_url_hosts} | hosts
+    )
+    return tools_config.egress.model_copy(
+        update={
+            "allow_real_urls": True,
+            "approved_services": approved_services,
+            "approved_exact_url_hosts": approved_hosts,
+        }
+    )
+
+
+def _fail_smoke_urlscan(
+    capture_dir: Path,
+    message: str,
+    *,
+    payload_results: list[dict[str, object]],
+    limitations: list[str],
+    status: str = "live_failed",
+) -> int:
+    payload = {
+        "smoke": "urlscan",
+        "status": status,
+        "error": message,
+        "urlscan_nominal_validated": False,
+        "redirect_capture_validated": False,
+        "results": payload_results,
+        "limitations": limitations,
+        "requests_sent_total": sum(
+            int(entry.get("requests_sent") or 0) for entry in payload_results
+        ),
+        "screenshot_requests": 0,
+        "visibility_values": sorted(
+            {
+                str(entry.get("visibility"))
+                for entry in payload_results
+                if entry.get("visibility")
+            }
+        ),
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"smoke urlscan: FAILED ({message})", file=sys.stderr)
+    return 1
+
+
+def _urlscan_evidence_value(result: object, predicate: str) -> str | None:
+    for evidence in getattr(result, "evidence", []):
+        if getattr(evidence, "predicate", None) == predicate:
+            value = getattr(evidence, "value", None)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def smoke_urlscan(if_configured: bool = False, require_configured: bool = False) -> int:
+    """Real urlscan smoke: unlisted public-fixture scans of the
+    operator-authorized URLs (source_profile=fixture is authoritative).
+
+    Behavior (docs/tickets/TICKET-08.md operator amendment, docs/gates.md §5.2):
+
+    - Without a key: the REAL adapter is exercised and MUST return an
+      explicit ``unavailable/not_configured`` with ZERO requests;
+      ``--require-configured`` fails non-zero, ``--if-configured`` records
+      the limitation and exits 0.
+    - With a key: the operator URLs are mandatory (``LIVE_BENIGN_URL``,
+      ``LIVE_REDIRECT_URL``) — without them nothing is fabricated and the
+      smoke fails explicitly. One REAL ``unlisted`` scan of the benign URL
+      and one REAL ``unlisted`` scan of the redirect URL are performed; the
+      observed final URL, the demonstrable redirect chain and the archived
+      exact bytes are validated. A failure is a non-zero exit; success is
+      never simulated.
+    """
+
+    from src.state import Observable
+    from src.tools import ToolContext
+    from src.tools.urlscan import UrlscanAdapter
+
+    settings: Settings = load_settings(None)
+    capture_dir = PROJECT_ROOT / "runs" / "gates" / "G4" / "urlscan"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    tools_config: ToolsConfig = load_yaml_config(
+        PROJECT_ROOT / "configs" / "tools.yaml", ToolsConfig
+    )
+    adapter = UrlscanAdapter(settings, tools_config.urlscan)
+
+    def _context(profile: str, url: str) -> ToolContext:
+        return ToolContext(
+            run_id=str(uuid.uuid4()),
+            source_profile=profile,  # type: ignore[arg-type]
+            deadline=time.monotonic() + tools_config.urlscan.phase_timeout_s,
+            egress=_smoke_urlscan_egress(tools_config, [url]),
+            capture_dir=capture_dir,
+            mode="live",
+        )
+
+    def _query(url: str) -> Any:
+        return Observable(
+            id="smoke_urlscan_" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:12],
+            value=url,
+            normalized_value=url,
+            type="url",
+            roles=["link_target"],
+            provenance="INTERNE",
+            source_ref="smoke:authorized_url",
+        )
+
+    if settings.URLSCAN_API_KEY is None:
+        probe = settings.LIVE_BENIGN_URL or "https://urlscan-smoke-unconfigured-probe.example/"
+        result = adapter.scan(_query(probe), _context("fixture", probe))
+        results = [result.model_dump(mode="json")]
+        if result.status != "unavailable" or result.requests_sent != 0:
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"unconfigured adapter returned {result.status!r} with "
+                f"{result.requests_sent} request(s)",
+                payload_results=results,
+                limitations=[],
+            )
+        if require_configured:
+            return _fail_smoke_urlscan(
+                capture_dir,
+                "URLSCAN_API_KEY absent: --require-configured demands real "
+                "credentials; nothing simulated",
+                payload_results=results,
+                limitations=[],
+            )
+        payload = {
+            "smoke": "urlscan",
+            "status": "unavailable_not_configured",
+            "urlscan_nominal_validated": False,
+            "redirect_capture_validated": False,
+            "results": results,
+            "limitations": [
+                "URLSCAN_API_KEY absent: the real adapter was exercised and returned "
+                "an explicit unavailable with zero requests; no nominal scan validation"
+            ],
+            "requests_sent_total": 0,
+            "screenshot_requests": 0,
+            "visibility_values": [],
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("smoke urlscan: unavailable_not_configured")
+        return 0
+
+    benign_url = settings.LIVE_BENIGN_URL
+    redirect_url = settings.LIVE_REDIRECT_URL
+    if not benign_url or not redirect_url:
+        return _fail_smoke_urlscan(
+            capture_dir,
+            "LIVE_BENIGN_URL/LIVE_REDIRECT_URL not configured: no real scan is "
+            "possible; nothing fabricated",
+            payload_results=[],
+            limitations=[],
+        )
+
+    results = []
+    limitations: list[str] = []
+    try:
+        # 1) REAL unlisted public-fixture scan of the benign URL.
+        benign = adapter.scan(_query(benign_url), _context("fixture", benign_url))
+        results.append(benign.model_dump(mode="json"))
+        if benign.status != "ok":
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"benign scan returned {benign.status!r} ({benign.reason!r})",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if benign.visibility != "unlisted":
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"fixture scan visibility is {benign.visibility!r}, expected 'unlisted'",
+                payload_results=results,
+                limitations=limitations,
+            )
+        benign_final = _urlscan_evidence_value(benign, "sandbox_final_url")
+        if benign_final != benign_url:
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"observed final URL {benign_final!r} does not match the authorized "
+                f"benign URL {benign_url!r}",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if _urlscan_evidence_value(benign, "sandbox_dom_excerpt") is None:
+            limitations.append(
+                "benign scan produced no inert-DOM excerpt (DOM 404 or budget); "
+                "the result JSON stayed valid"
+            )
+
+        # 2) REAL unlisted public-fixture scan of the redirect URL.
+        declared_target = parse_qs(urlparse(redirect_url).query).get("url", [None])[0]
+        redirect_result = adapter.scan(
+            _query(redirect_url), _context("fixture", redirect_url)
+        )
+        results.append(redirect_result.model_dump(mode="json"))
+        if redirect_result.status != "ok":
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"redirect scan returned {redirect_result.status!r} "
+                f"({redirect_result.reason!r})",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if redirect_result.visibility != "unlisted":
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"fixture redirect scan visibility is {redirect_result.visibility!r}, "
+                "expected 'unlisted'",
+                payload_results=results,
+                limitations=limitations,
+            )
+        redirect_values = [
+            str(evidence.value)
+            for evidence in redirect_result.evidence
+            if evidence.predicate == "sandbox_redirect"
+        ]
+        redirect_final = _urlscan_evidence_value(redirect_result, "sandbox_final_url")
+        if not redirect_values:
+            return _fail_smoke_urlscan(
+                capture_dir,
+                "no demonstrable redirect step in the real capture",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if declared_target and declared_target not in redirect_values:
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"redirect chain {redirect_values!r} does not contain the declared "
+                f"target {declared_target!r}",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if declared_target and redirect_final != declared_target:
+            return _fail_smoke_urlscan(
+                capture_dir,
+                f"observed final URL {redirect_final!r} does not match the declared "
+                f"target {declared_target!r}",
+                payload_results=results,
+                limitations=limitations,
+            )
+        if _urlscan_evidence_value(redirect_result, "sandbox_dom_excerpt") is None:
+            limitations.append(
+                "redirect scan produced no inert-DOM excerpt (DOM 404 or budget); "
+                "the result JSON stayed valid"
+            )
+    except Exception as exc:  # noqa: BLE001 — any unexpected failure is REAL
+        return _fail_smoke_urlscan(
+            capture_dir,
+            f"unexpected exception: {expurgate(f'{type(exc).__name__}: {exc}')}",
+            payload_results=results,
+            limitations=limitations,
+        )
+
+    payload = {
+        "smoke": "urlscan",
+        "status": "live_ok",
+        "urlscan_nominal_validated": True,
+        "redirect_capture_validated": True,
+        "redirect_chain_observed": redirect_values,
+        "declared_target": declared_target,
+        "results": results,
+        "limitations": limitations,
+        "requests_sent_total": sum(
+            int(entry.get("requests_sent") or 0) for entry in results
+        ),
+        "screenshot_requests": 0,
+        "visibility_values": sorted(
+            {
+                str(entry.get("visibility"))
+                for entry in results
+                if entry.get("visibility")
+            }
+        ),
+        "egress_note": (
+            "urlscan service + exact operator-authorized hosts approved for this "
+            "smoke context only (TICKET-08 amendment); configs/tools.yaml unchanged "
+            "(safe-by-default), visibility driven by source_profile (fixture -> unlisted)"
+        ),
+        "transport_invariant": (
+            "one POST /api/v1/scan/ per run, bounded poll, same-origin only, "
+            "inert DOM; no upload/execution path exists in the adapter"
+        ),
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(
+        "smoke urlscan: live_ok (urlscan_nominal_validated=True, "
+        f"redirect_capture_validated=True, requests={payload['requests_sent_total']})"
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# TICKET-08 — integrated tools smoke (docs/gates.md §5.2 --require-all rule)
+# ---------------------------------------------------------------------------
+
+
+def _read_smoke_receipt(path: Path) -> dict[str, object] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def smoke_tools(require_all: bool = True) -> int:
+    """Integrated real smoke of the THREE adapters (docs/gates.md §5.2).
+
+    Rule applied WITHOUT a new mode:
+
+    - OpenCTI: configured token mandatory; the real exact-match and
+      no-match validation must succeed (G4 mandatory live evidence);
+    - urlscan: configured key mandatory; the real unlisted public-fixture
+      benign scan and the real redirect capture must succeed (G4 mandatory
+      live evidence);
+    - VirusTotal: a real result OR an explicit controlled unavailable with
+      its cause (``VT_ACCESS_AUTHORIZED=false`` is an allowed, intentional
+      state); ``vt_nominal_validated=false`` is then explicit, never
+      presented as availability.
+    """
+
+    capture_dir = PROJECT_ROOT / "runs" / "gates" / "G4"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    limitations: list[str] = []
+
+    vt_code = smoke_virustotal(if_configured=True)
+    cti_code = smoke_opencti(require_configured=require_all)
+    urlscan_code = smoke_urlscan(require_configured=require_all)
+
+    vt = _read_smoke_receipt(capture_dir / "virustotal" / "smoke_result.json") or {}
+    cti = _read_smoke_receipt(capture_dir / "opencti" / "smoke_result.json") or {}
+    us = _read_smoke_receipt(capture_dir / "urlscan" / "smoke_result.json") or {}
+
+    vt_ok = vt_code == 0 and bool(vt) and (
+        vt.get("status") == "live_ok"
+        or (
+            str(vt.get("status", "")).startswith("unavailable_")
+            and vt.get("results")
+        )
+    )
+    if vt.get("status") != "live_ok":
+        limitations.append(
+            "VT unavailable contract respected: "
+            f"status={vt.get('status')!r}, reason-based unavailable with zero "
+            "requests; vt_nominal_validated=false (no nominal coverage claimed)"
+        )
+    cti_ok = cti_code == 0 and cti.get("status") == "live_ok" and (
+        cti.get("cti_exact_match_validated") is True
+    )
+    us_ok = urlscan_code == 0 and us.get("status") == "live_ok" and (
+        us.get("urlscan_nominal_validated") is True
+        and us.get("redirect_capture_validated") is True
+    )
+    if urlscan_code == 0 and us.get("status") == "live_ok":
+        limitations.extend(list(us.get("limitations") or []))
+
+    ok = vt_ok and cti_ok and us_ok
+    payload = {
+        "smoke": "tools",
+        "require_all": require_all,
+        "status": "live_ok" if ok else "live_failed",
+        "components": {
+            "virustotal": {
+                "exit_code": vt_code,
+                "status": vt.get("status"),
+                "vt_nominal_validated": vt.get("vt_nominal_validated"),
+                "receipt": "runs/gates/G4/virustotal/smoke_result.json",
+            },
+            "opencti": {
+                "exit_code": cti_code,
+                "status": cti.get("status"),
+                "cti_exact_match_validated": cti.get("cti_exact_match_validated"),
+                "receipt": "runs/gates/G4/opencti/smoke_result.json",
+            },
+            "urlscan": {
+                "exit_code": urlscan_code,
+                "status": us.get("status"),
+                "urlscan_nominal_validated": us.get("urlscan_nominal_validated"),
+                "redirect_capture_validated": us.get("redirect_capture_validated"),
+                "receipt": "runs/gates/G4/urlscan/smoke_result.json",
+            },
+        },
+        "limitations": limitations,
+        "rule": (
+            "docs/gates.md §5.2: three adapters verified; CTI + urlscan live evidence "
+            "mandatory; VT real OR explicit controlled unavailable with its cause. "
+            "Exit 0 only when this contract holds; unhandled exception, causeless "
+            "status, upload or fake success => non-zero. No mock/test/real mode."
+        ),
+    }
+    _write_receipt(capture_dir / "tools_smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if ok:
+        print(
+            "smoke tools: live_ok (all three adapters verified; "
+            f"vt_nominal_validated={vt.get('vt_nominal_validated')})"
+        )
+        return 0
+    print("smoke tools: FAILED (--require-all contract not met)", file=sys.stderr)
+    return 1
+
+
 def smoke_luna(if_configured: bool = False, require_configured: bool = False) -> int:
     """Real runtime smoke; distinguishes pending from failure.
-
-    ``complete_json`` never raises (frozen public contract): every failure
-    comes back as ``(None, record)`` with ``record.status="error"``.
 
     Modes (mutually exclusive at the CLI level):
 
@@ -951,7 +1391,9 @@ def probe_luna_efforts() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Real smoke tests (no mock mode)")
     parser.add_argument(
-        "target", choices=["luna", "luna-efforts", "virustotal", "opencti"], help="smoke target"
+        "target",
+        choices=["luna", "luna-efforts", "virustotal", "opencti", "urlscan", "tools"],
+        help="smoke target",
     )
     parser.add_argument(
         "--if-configured",
@@ -964,6 +1406,14 @@ def main() -> int:
         help=(
             "TICKET-04/G2: credentials mandatory - absent => explicit failure "
             "(non-zero); real structured call must succeed => exit 0"
+        ),
+    )
+    parser.add_argument(
+        "--require-all",
+        action="store_true",
+        help=(
+            "TICKET-08/G4 tools target: all three adapters verified; CTI + urlscan "
+            "live evidence mandatory, VT real or explicit controlled unavailable"
         ),
     )
     args = parser.parse_args()
@@ -982,6 +1432,16 @@ def main() -> int:
             if_configured=args.if_configured,
             require_configured=args.require_configured,
         )
+    if args.target == "urlscan":
+        return smoke_urlscan(
+            if_configured=args.if_configured,
+            require_configured=args.require_configured,
+        )
+    if args.target == "tools":
+        # The tools target always applies the full --require-all contract
+        # (docs/gates.md §5.2); the explicit flag is accepted for the frozen
+        # gate command and there is no weaker mode.
+        return smoke_tools(require_all=True)
     return probe_luna_efforts()
 
 

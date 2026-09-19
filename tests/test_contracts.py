@@ -231,7 +231,10 @@ def test_tools_config_exact_sections(configs_dir: Path) -> None:
     assert tools.opencti.first == 10
     assert tools.urlscan.max_urls == 1
     assert tools.urlscan.visibility_real == "private"
-    assert tools.urlscan.visibility_fixture == "private"
+    # TICKET-08 operator amendment (docs/contracts.md §2.7): source_profile is
+    # authoritative; fixture/public_corpus -> visibility_fixture=unlisted,
+    # private_authorized -> visibility_real=private. Never public.
+    assert tools.urlscan.visibility_fixture == "unlisted"
     assert tools.urlscan.first_poll_s == 10
     assert tools.urlscan.poll_interval_s == 5
     assert tools.urlscan.phase_timeout_s == 45
