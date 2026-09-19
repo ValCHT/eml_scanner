@@ -128,3 +128,19 @@ Package Python 3.11 recommandé ; Windows PowerShell ou Linux. Dépendances base
 Environnement : `.env.example` sans valeurs secrètes ; Settings utilise SecretStr, extra=forbid pour les YAML, configuration validée au démarrage. `MODEL_SUPPORTS_VISION=false`, `RAG_ENABLED=false`, `QR_DECODE_ENABLED=false`, `LIVE_INTEGRATION=0`, `VT_ACCESS_AUTHORIZED=false` par défaut. Les flags activent des composants validés, jamais un contournement des gates.
 
 Les logs ordinaires contiennent IDs, statuts, durées et nombres, pas bodies, URLs à jetons, en-têtes HTTP ni clés. Les réponses brutes gardées pour audit sont séparées et ne sont pas jointes aux prompts de coding. Autoriser uniquement le proxy et les adaptateurs réseau du runtime ; full access Codex concerne la construction, pas les droits confiés au modèle d'analyse.
+
+## 1.8 État d'implémentation (TICKET-11, 19/09/2026)
+
+Le paragraphe §1.2 est implémenté tel quel par `src/graph.py` :
+
+- `build_graph(services) -> CompiledStateGraph` compile exactement les douze nœuds de §1.3 et les liens de §1.2. Un seul `add_conditional_edges` existe, sur `complexity_gate`, avec le mapping figé `simple: verify` / `complex: virustotal` ; tous les autres liens sont des `add_edge`. Aucun cycle, fan-out ou sous-graphe.
+- Un `InMemorySaver` neuf est créé par graphe compilé ; `run_email` compile un graphe par email avec `configurable.thread_id = run_id`. Le saver est libéré avec le graphe local : aucun registre de module ne le retient et les checkpoints d'un run ne survivent pas au processus (aucune reprise durable promise).
+- Aucun client, secret, deadline ou bytes MIME n'entre dans l'état checkpointé. Les erreurs récupérables (parsing, LLM, indisponibilité fournisseur, refus de merge) deviennent des données d'état typées et n'ajoutent aucun edge ; une écriture de rapport refusée lève immédiatement.
+- `Services` est le conteneur par run hors état : Settings, configs YAML validées, adaptateurs réels VT/OpenCTI/urlscan, `egress`, `run_dir`/`capture_dir`, horloge monotone + deadline email, et deux clients phase-bound (`luna` INTERNAL, `luna_final` FINAL) car `LunaClient` appartient à une phase unique. Aucun client n'est reconstruit par un nœud.
+- Sans `LITELLM_API_KEY`, les nœuds INTERNAL/FINAL refusent la phase sans émettre de requête (erreur explicite) : rien n'est simulé.
+- `rag_lookup` est un no-op documenté avant G7-A (aucun contexte inventé) ; un adaptateur RAG injecté est refusé par une erreur typée au lieu d'être ignoré silencieusement.
+- Plans d'observables déterministes bornés (≤ `max_targets` VT/OpenCTI, ≤ `max_urls` urlscan) : SHA-256 de pièce, URLs href/visible/form/QR avec mismatch d'abord puis ordre MIME, domaines expéditeur/reply-to, IP publiques ; les ressources distantes décoratives ne sont jamais envoyées et les destinataires jamais des cibles.
+- `run_email(path, settings, source_profile=...)` crée l'état, exécute le graphe et ne retourne le rapport qu'une fois `report.json` réellement écrit et relu depuis le disque.
+- Persistance par run : `RUNS_DIR/<run_id>/report.json`, `summary.txt`, `events.jsonl` (une ligne par nœud, ordre figé), `responses/`. Écriture atomique (fichier temporaire + `os.replace`), refus explicite d'écraser un artefact existant. Le résumé français ≤ 100 mots est rendu par templates déterministes (aucun troisième appel Luna), échappé et défangé ; les valeurs exactes restent dans le JSON restreint.
+- Batch (`run_batch.py`) séquentiel, entrées triées par chemin : `results.jsonl` (une ligne par entrée, ligne d'erreur explicite en cas d'échec), `metrics.json`, `run_manifest.json`, rapports sous `reports/<run_id>/`. Un email défaillant n'arrête pas le batch ; l'exit est non nul si au moins une entrée n'a pas produit de rapport.
+- `total_ms` est mesuré de l'entrée du run à la projection du rapport (immédiatement avant l'écriture atomique), jamais obtenu en additionnant des arrondis ; `report_ms` mesure la construction du rapport.
