@@ -85,6 +85,8 @@ Probabilités p : toutes finies, 0≤p≤1, somme à 1 ±0,000001. Ne pas renorm
 
 `internal` ne référence que des preuves INTERNE et les visuels de l'email réellement fournis. `final` peut référencer INTERNE/OSINT/SANDBOX, jamais une prétendue evidence provenant de l'analogie RAG. Les propriétés inconnues sont refusées. Les défauts d'Assessment ne sont jamais utilisés pour créer un faux succès : si Luna manque, Assessment=null.
 
+**Remarque TICKET-09 — énumérations explicites dans le prompt final (écart documenté).** Comme pour l'INTERNAL en TICKET-04, le proxy réel n'applique pas `response_format=json_schema` au modèle : `prompts/final_assessment.txt` énumère désormais mot pour mot les listes fermées de `code` (inference), `reason_code` et `missing_information`, telles que définies par le schema. Le schema, la taxonomie, les règles métier et le message utilisateur final restent inchangés ; aucun label, seuil ou fixture n'a été ajusté.
+
 ## 2.6 Rapport, validité et résumés
 
 Le rapport reprend tous les champs minimum demandés. Ajouts nécessaires : version, run_status, final_source, evidence IDs, erreurs typées, usage/coûts, empreintes de reproduction. `decisive_evidence` est une liste de phrases générées par le code à partir de `decisive_evidence_ids`, pas des affirmations libres du modèle. `unsupported_claims` recense les violations de support, pas toutes les inférences légitimes ; les inférences soutenues ont leur propre liste.

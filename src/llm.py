@@ -385,6 +385,24 @@ class LunaClient:
     # -- exact-bytes input audit (docs/contracts.md §2.6.1) ---------------------
 
     @staticmethod
+    def _count_visual_blocks(user_content: Any) -> int:
+        """Number of image/pixel blocks actually attached to the call.
+
+        Multimodal form: the user content is a list of parts; only
+        ``image_url`` / ``input_image`` parts are pixel blocks. In text form
+        (G2/G5) the count is truthfully zero — visual METADATA does not
+        count (docs/contracts.md §2.6.1).
+        """
+
+        if not isinstance(user_content, list):
+            return 0
+        return sum(
+            1
+            for part in user_content
+            if isinstance(part, dict) and part.get("type") in ("image_url", "input_image")
+        )
+
+    @staticmethod
     def compute_input_audit(body: bytes, phase: str) -> dict[str, Any]:
         """Audit fields computed from the EXACT bytes handed to transport.
 
@@ -401,22 +419,45 @@ class LunaClient:
           counters of the useful content actually included;
         - ``evidence_count_sent`` / ``observable_count_sent``: registry
           entry counts actually included.
+
+        FINAL-phase calls additionally carry (§2.6.1, TICKET-09):
+
+        - ``internal_evidence_count_sent`` / ``external_evidence_count_sent``:
+          EVIDENCE_REGISTRY entries of provenance INTERNE vs OSINT/SANDBOX
+          actually included;
+        - ``tool_status_digest``: SHA-256 of ``C(TOOL_STATUS)`` exactly as
+          included (``None`` only when no envelope was transmitted at all,
+          e.g. a phase probe);
+        - ``rag_case_count_sent``: RAG_CONTEXT cases actually included;
+        - ``visual_count_sent``: image blocks actually attached (0 in text
+          mode; image metadata never counts).
         """
 
         payload = json.loads(body.decode("utf-8"))
         messages = payload.get("messages") if isinstance(payload, dict) else None
-        user_content: Any = None
+        raw_user_content: Any = None
         if isinstance(messages, list):
             for message in messages:
                 if isinstance(message, dict) and message.get("role") == "user":
-                    user_content = message.get("content")
+                    raw_user_content = message.get("content")
         # Multimodal form: read the first text block of the content parts.
+        user_content = raw_user_content
         if isinstance(user_content, list):
             first_text = next(
                 (part.get("text") for part in user_content if isinstance(part, dict) and part.get("type") == "text"),
                 None,
             )
             user_content = first_text
+
+        final_fields: dict[str, Any] = {
+            "internal_evidence_count_sent": 0,
+            "external_evidence_count_sent": 0,
+            "tool_status_digest": None,
+            "rag_case_count_sent": 0,
+            "visual_count_sent": LunaClient._count_visual_blocks(raw_user_content),
+        }
+        if phase != "final":
+            final_fields = {}
 
         envelope: dict[str, Any] | None = None
         if isinstance(user_content, str):
@@ -439,6 +480,7 @@ class LunaClient:
                 "headers_chars_sent": 0,
                 "evidence_count_sent": 0,
                 "observable_count_sent": 0,
+                **final_fields,
             }
 
         untrusted = envelope["UNTRUSTED_EMAIL"]
@@ -457,7 +499,7 @@ class LunaClient:
         )
         evidence_registry = envelope.get("EVIDENCE_REGISTRY")
         observable_registry = envelope.get("OBSERVABLE_REGISTRY")
-        return {
+        audit = {
             "phase": phase,
             "input_payload_sha256": hashlib.sha256(body).hexdigest(),
             "untrusted_email_sha256": hashlib.sha256(
@@ -472,6 +514,40 @@ class LunaClient:
                 len(observable_registry) if isinstance(observable_registry, dict) else 0
             ),
         }
+        if phase == "final":
+            internal_count = 0
+            external_count = 0
+            if isinstance(evidence_registry, dict):
+                for entry in evidence_registry.values():
+                    if not isinstance(entry, dict):
+                        continue
+                    provenance = entry.get("provenance")
+                    if provenance == "INTERNE":
+                        internal_count += 1
+                    elif provenance in ("OSINT", "SANDBOX"):
+                        external_count += 1
+            tool_status = envelope.get("TOOL_STATUS")
+            audit.update(
+                {
+                    "internal_evidence_count_sent": internal_count,
+                    "external_evidence_count_sent": external_count,
+                    # Digest of what was ACTUALLY included: the key exists in
+                    # every FINAL envelope; a missing key stays None instead of
+                    # claiming an empty TOOL_STATUS was sent.
+                    "tool_status_digest": (
+                        hashlib.sha256(canonical_bytes(tool_status)).hexdigest()
+                        if "TOOL_STATUS" in envelope
+                        else None
+                    ),
+                    "rag_case_count_sent": (
+                        len(envelope["RAG_CONTEXT"])
+                        if isinstance(envelope.get("RAG_CONTEXT"), list)
+                        else 0
+                    ),
+                    "visual_count_sent": LunaClient._count_visual_blocks(raw_user_content),
+                }
+            )
+        return audit
 
     def _capture_attempt_input(
         self, attempt: int, body: bytes, audit: dict[str, Any]
