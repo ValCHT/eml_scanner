@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.2,<3",
     "PyYAML>=6.0,<7",
+    "vt-py>=0.22,<0.23",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +20,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["src"]
+packages = ["src", "src.tools"]
 
 [tool.pytest.ini_options]
 markers = [

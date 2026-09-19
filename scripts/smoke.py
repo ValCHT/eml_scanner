@@ -36,16 +36,18 @@ condition of the ticket.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import Settings, load_settings  # noqa: E402
+from src.config import Settings, ToolsConfig, load_settings, load_yaml_config  # noqa: E402
 from src.llm import LunaClient, expurgate  # noqa: E402
 
 #: Minimal smoke schema required by TICKET-02 (small {ok:boolean} contract).
@@ -135,6 +137,236 @@ def _public_payload(result: object, record: object, capture_dir: Path) -> dict[s
 def _write_receipt(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# TICKET-06 — VirusTotal real GET-lookup smoke (no upload, no POST)
+# ---------------------------------------------------------------------------
+
+#: Deterministic "unknown artifact" probe seed; the probed SHA-256 is derived
+#: from the run identity so one run always probes one value, which is
+#: practically guaranteed absent from VirusTotal. Pure GET lookup of a hash
+#: string: never a file upload.
+_UNKNOWN_HASH_SEED = "soc-email-triage/virustotal-smoke/unknown-artifact/"
+
+#: Closed unavailable-cause vocabulary (architecture §1.6); a result may exit
+#: 0 only with a real result or one of these causes.
+_VT_CAUSES = (
+    "not_configured",
+    "access_not_authorized",
+    "timeout",
+    "rate_limited",
+    "auth_error",
+    "api_error",
+    "malformed_response",
+    "deadline",
+)
+
+
+def smoke_virustotal(if_configured: bool = False) -> int:
+    """Real VirusTotal adapter smoke; GET lookups only, no upload.
+
+    Behavior (docs/tickets/TICKET-06.md, docs/gates.md §5.2):
+
+    - Without key or authorization: the REAL adapter is exercised and MUST
+      return an explicit ``unavailable`` with its cause and ZERO requests.
+      Exit 0 (a contractual unavailable is not a skipped test); the receipt
+      records ``vt_nominal_validated=false`` with the exact limitation.
+    - With key + authorization: real GET lookups — the configured public
+      known hash (``LIVE_VT_KNOWN_SHA256``) when set, plus one deterministic
+      unknown-hash probe expected ``not_found`` (real endpoint reach).
+      ``vt_nominal_validated`` is true ONLY when a real known-hash ``ok``
+      response was observed.
+    - Any unexpected exception, or a result without its cause, exits
+      non-zero. A fabricated answer is impossible by construction (the
+      adapter has no mock mode) and would be a FAIL condition.
+    """
+
+    from src.state import Observable
+    from src.tools import ToolContext
+    from src.tools.virustotal import VirusTotalAdapter
+
+    settings: Settings = load_settings(None)
+    capture_dir = PROJECT_ROOT / "runs" / "gates" / "G4" / "virustotal"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    tools_config: ToolsConfig = load_yaml_config(
+        PROJECT_ROOT / "configs" / "tools.yaml", ToolsConfig
+    )
+    adapter = VirusTotalAdapter(settings, tools_config.virustotal)
+
+    run_id = str(uuid.uuid4())
+    context = ToolContext(
+        run_id=run_id,
+        source_profile="fixture",
+        deadline=time.monotonic() + tools_config.virustotal.phase_timeout_s,
+        egress=tools_config.egress,
+        capture_dir=capture_dir,
+        mode="live",
+    )
+
+    results: list[dict[str, object]] = []
+    limitations: list[str] = []
+    vt_nominal_validated = False
+    error: str | None = None
+
+    try:
+        # 1) Real unknown-hash probe (deterministic per run): a REAL exchange
+        #    proving the endpoint is reachable, expected not_found.
+        unknown = hashlib.sha256((_UNKNOWN_HASH_SEED + run_id).encode("utf-8")).hexdigest()
+        result = adapter.lookup(
+            Observable(
+                id="smoke_unknown_sha256",
+                value=unknown,
+                normalized_value=unknown,
+                type="sha256",
+                roles=["attachment"],
+                provenance="INTERNE",
+                source_ref="smoke:unknown_probe",
+            ),
+            context,
+        )
+        results.append(result.model_dump(mode="json"))
+
+        # 2) Real known-hash probe when the operator configured one.
+        known = settings.LIVE_VT_KNOWN_SHA256
+        if known:
+            result = adapter.lookup(
+                Observable(
+                    id="smoke_known_sha256",
+                    value=known,
+                    normalized_value=known,
+                    type="sha256",
+                    roles=["attachment"],
+                    provenance="INTERNE",
+                    source_ref="smoke:configured_known_hash",
+                ),
+                context,
+            )
+            results.append(result.model_dump(mode="json"))
+            vt_nominal_validated = result.status == "ok"
+            if not vt_nominal_validated:
+                limitations.append(
+                    f"known-hash lookup returned {result.status} ({result.reason!r}); "
+                    "vt_nominal_validated stays false"
+                )
+        else:
+            limitations.append(
+                "LIVE_VT_KNOWN_SHA256 not configured: no nominal (known-hash) real "
+                "response could be observed; vt_nominal_validated=false"
+            )
+    except Exception as exc:  # noqa: BLE001 — any unexpected failure is REAL
+        error = expurgate(f"{type(exc).__name__}: {exc}")
+
+    if error is not None:
+        payload = {
+            "smoke": "virustotal",
+            "status": "live_failed",
+            "error": error,
+            "vt_nominal_validated": False,
+            "results": results,
+            "limitations": limitations,
+            "requests_sent_total": sum(
+                int(entry.get("requests_sent") or 0) for entry in results
+            ),
+            "post_requests_sent": 0,
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("smoke virustotal: FAILED (unexpected exception)", file=sys.stderr)
+        return 1
+
+    # Every result must be a real outcome or an explicit unavailable/skip
+    # carrying its closed-vocabulary cause. A causeless status is a FAIL.
+    for entry in results:
+        status = entry.get("status")
+        reason = entry.get("reason")
+        if status in ("ok", "not_found"):
+            continue
+        if status == "unavailable":
+            cause = str(reason or "").split(":", 1)[0].strip()
+            if cause not in _VT_CAUSES:
+                return _fail_smoke(
+                    capture_dir,
+                    f"unavailable result without a valid cause: {reason!r}",
+                    payload_results=results,
+                    limitations=limitations,
+                )
+        elif status == "skipped":
+            if not str(reason or "").strip():
+                return _fail_smoke(
+                    capture_dir,
+                    "skipped result without its reason",
+                    payload_results=results,
+                    limitations=limitations,
+                )
+        else:  # pragma: no cover - ToolResult status is closed vocabulary
+            return _fail_smoke(
+                capture_dir,
+                f"unexpected result status {status!r}",
+                payload_results=results,
+                limitations=limitations,
+            )
+
+    configured = settings.VT_API_KEY is not None and settings.VT_ACCESS_AUTHORIZED
+    if not configured:
+        status = (
+            "unavailable_access_not_authorized"
+            if settings.VT_API_KEY is not None
+            else "unavailable_not_configured"
+        )
+        limitations.append(
+            "VT key/rights absent: the real adapter was exercised and returned an "
+            "explicit unavailable with zero requests; vt_nominal_validated=false "
+            "(nominal availability is not claimed)"
+        )
+    else:
+        status = "live_ok"
+
+    payload = {
+        "smoke": "virustotal",
+        "status": status,
+        "vt_nominal_validated": vt_nominal_validated,
+        "results": results,
+        "limitations": limitations,
+        "requests_sent_total": sum(
+            int(entry.get("requests_sent") or 0) for entry in results
+        ),
+        "post_requests_sent": 0,
+        "transport_invariant": (
+            "GET only (vt-py get_async); no scan/upload/download path exists in the adapter"
+        ),
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(
+        f"smoke virustotal: {status} (vt_nominal_validated={vt_nominal_validated}, "
+        f"requests_sent={payload['requests_sent_total']}, post=0)"
+    )
+    return 0
+
+
+def _fail_smoke(
+    capture_dir: Path,
+    message: str,
+    *,
+    payload_results: list[dict[str, object]],
+    limitations: list[str],
+) -> int:
+    """Explicit smoke failure: non-zero exit, no fake success possible."""
+
+    payload = {
+        "smoke": "virustotal",
+        "status": "live_failed",
+        "error": message,
+        "vt_nominal_validated": False,
+        "results": payload_results,
+        "limitations": limitations,
+        "post_requests_sent": 0,
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"smoke virustotal: FAILED ({message})", file=sys.stderr)
+    return 1
 
 
 def smoke_luna(if_configured: bool = False, require_configured: bool = False) -> int:
@@ -372,7 +604,9 @@ def probe_luna_efforts() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Real smoke tests (no mock mode)")
-    parser.add_argument("target", choices=["luna", "luna-efforts"], help="smoke target")
+    parser.add_argument(
+        "target", choices=["luna", "luna-efforts", "virustotal"], help="smoke target"
+    )
     parser.add_argument(
         "--if-configured",
         action="store_true",
@@ -395,6 +629,8 @@ def main() -> int:
             if_configured=args.if_configured,
             require_configured=args.require_configured,
         )
+    if args.target == "virustotal":
+        return smoke_virustotal(if_configured=args.if_configured)
     return probe_luna_efforts()
 
 
