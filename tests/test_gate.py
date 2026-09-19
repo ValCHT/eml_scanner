@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -838,3 +840,205 @@ def test_authentic_g2_replay_writes_deterministic_artifact() -> None:
     out_path = G3_DIR / "complexity_replay.json"
     out_path.write_text(payload_first, encoding="utf-8")
     assert out_path.read_text(encoding="utf-8") == payload_first
+
+
+# ---------------------------------------------------------------------------
+# G3 receipt limitation propagation (scripts/check_gate.py regression)
+# ---------------------------------------------------------------------------
+
+
+def _load_check_gate():
+    """Load scripts/check_gate.py as an isolated module (no CLI side effects)."""
+
+    import importlib.util
+
+    path = PROJECT_ROOT / "scripts" / "check_gate.py"
+    spec = importlib.util.spec_from_file_location("check_gate_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _record_in_tmp_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gate: str,
+    required_ticket: str,
+    write_artifact: Callable[[Path], None],
+) -> tuple[int, dict]:
+    """Run the real ``record()`` against a temp root and return (code, receipt).
+
+    The gate command is replaced by a harmless command so no test re-enters
+    pytest; everything else (limitation derivation, receipt build, fail-closed
+    rules) is the production code path.
+    """
+
+    check_gate = _load_check_gate()
+    root = tmp_path / "project"
+    (root / "runs" / "gates").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("[project]\nname = 'tmp'\n", encoding="utf-8")
+    completed = root / "runs" / "gates" / "completed_tickets.json"
+    completed.write_text(
+        json.dumps({"completed_tickets": [required_ticket]}), encoding="utf-8"
+    )
+    write_artifact(root / "runs" / "gates" / gate / "complexity_replay.json")
+
+    monkeypatch.setattr(check_gate, "PROJECT_ROOT", root)
+    monkeypatch.setattr(check_gate, "COMPLETED_TICKETS_FILE", completed)
+    monkeypatch.setattr(
+        check_gate,
+        "GATE_COMMANDS",
+        {gate: [[sys.executable, "-c", "print('ok')"]]},
+    )
+    code = check_gate.record(gate)
+    receipt = json.loads(
+        (root / "runs" / "gates" / gate / "gate.json").read_text(encoding="utf-8")
+    )
+    return code, receipt
+
+
+def _write_replay_flag(value: object) -> Callable[[Path], None]:
+    """Write a minimal artifact shaped like the authentic one (nested flag)."""
+
+    def _write(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"distribution": {"simple_path_live_observed": value}}),
+            encoding="utf-8",
+        )
+
+    return _write
+
+
+def test_g3_receipt_limitation_reads_the_authentic_replay_artifact() -> None:
+    """The real deterministic artifact is the source of the receipt value."""
+
+    G3_DIR.mkdir(parents=True, exist_ok=True)
+    artifact_path = G3_DIR / "complexity_replay.json"
+    artifact_path.write_text(_serialize_artifact(_replay_authentic_g2()), encoding="utf-8")
+    data = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+    check_gate = _load_check_gate()
+    limitations, problems = check_gate.g3_replay_limitations()
+    assert problems == []
+    flag = data.get(
+        "simple_path_live_observed",
+        data.get("distribution", {}).get("simple_path_live_observed"),
+    )
+    assert isinstance(flag, bool)
+    if flag:
+        assert limitations == []
+    else:
+        assert limitations == [NO_SIMPLE_LIMITATION]
+        assert limitations.count(NO_SIMPLE_LIMITATION) == 1
+
+
+def test_g3_receipt_limitation_false_flag_is_exact(tmp_path: Path) -> None:
+    check_gate = _load_check_gate()
+    artifact = tmp_path / "complexity_replay.json"
+    artifact.write_text(json.dumps({"simple_path_live_observed": False}), encoding="utf-8")
+    assert check_gate.g3_replay_limitations(artifact) == ([NO_SIMPLE_LIMITATION], [])
+
+
+def test_g3_receipt_limitation_true_flag_adds_nothing(tmp_path: Path) -> None:
+    check_gate = _load_check_gate()
+    artifact = tmp_path / "complexity_replay.json"
+    artifact.write_text(json.dumps({"simple_path_live_observed": True}), encoding="utf-8")
+    assert check_gate.g3_replay_limitations(artifact) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,  # missing file
+        "{not json",  # malformed JSON
+        '["not", "an", "object"]',  # not a JSON object
+        '{"distribution": {}}',  # missing simple_path_live_observed
+        '{"simple_path_live_observed": "false"}',  # string is not a boolean
+        '{"simple_path_live_observed": 0}',  # int is not a boolean
+        '{"simple_path_live_observed": null}',  # null is not a boolean
+        '{"distribution": {"simple_path_live_observed": "false"}}',  # nested non-bool
+    ],
+)
+def test_g3_receipt_limitation_fails_closed(tmp_path: Path, content: str | None) -> None:
+    check_gate = _load_check_gate()
+    artifact = tmp_path / "complexity_replay.json"
+    if content is not None:
+        artifact.write_text(content, encoding="utf-8")
+    limitations, problems = check_gate.g3_replay_limitations(artifact)
+    assert limitations == []
+    assert problems, "an invalid G3 replay artifact must produce a problem"
+
+
+def test_g3_record_receipt_carries_the_exact_limitation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, receipt = _record_in_tmp_root(
+        tmp_path, monkeypatch, gate="G3", required_ticket="TICKET-05",
+        write_artifact=_write_replay_flag(False),
+    )
+    assert code == 0
+    assert receipt["status"] == "PASS"
+    assert receipt["limitations"] == [NO_SIMPLE_LIMITATION]
+    assert receipt["limitations"].count(NO_SIMPLE_LIMITATION) == 1
+    assert receipt["g3_replay_problems"] == []
+
+
+def test_g3_record_receipt_omits_limitation_when_live_simple_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, receipt = _record_in_tmp_root(
+        tmp_path, monkeypatch, gate="G3", required_ticket="TICKET-05",
+        write_artifact=_write_replay_flag(True),
+    )
+    assert code == 0
+    assert receipt["status"] == "PASS"
+    assert receipt["limitations"] == []
+    assert receipt["g3_replay_problems"] == []
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "missing_key", "non_boolean"])
+def test_g3_record_fails_closed_without_a_valid_indicator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    def _write(path: Path) -> None:
+        if damage == "missing":
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if damage == "malformed":
+            path.write_text("{not json", encoding="utf-8")
+        elif damage == "missing_key":
+            path.write_text(json.dumps({"distribution": {}}), encoding="utf-8")
+        else:
+            path.write_text(
+                json.dumps({"simple_path_live_observed": "false"}), encoding="utf-8"
+            )
+
+    code, receipt = _record_in_tmp_root(
+        tmp_path, monkeypatch, gate="G3", required_ticket="TICKET-05", write_artifact=_write
+    )
+    assert code == 1
+    assert receipt["status"] == "FAIL"
+    assert receipt["limitations"] == []
+    assert receipt["g3_replay_problems"]
+
+
+def test_non_g3_record_receipt_behavior_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another gate ignores the G3 artifact entirely (no limitation, no problem)."""
+
+    def _no_g3_artifact(path: Path) -> None:
+        # The G3 artifact is deliberately absent: G1 must not read it.
+        return
+
+    code, receipt = _record_in_tmp_root(
+        tmp_path, monkeypatch, gate="G1", required_ticket="TICKET-03",
+        write_artifact=_no_g3_artifact,
+    )
+    assert code == 0
+    assert receipt["status"] == "PASS"
+    assert receipt["limitations"] == []
+    assert receipt["g3_replay_problems"] == []

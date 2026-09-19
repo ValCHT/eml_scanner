@@ -257,6 +257,47 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #: The gate controller never infers ticket completion from command success.
 COMPLETED_TICKETS_FILE = PROJECT_ROOT / "runs" / "gates" / "completed_tickets.json"
 
+#: G3 (docs/tickets/TICKET-05.md): the deterministic replay artifact is the
+#: source of the no-live-SIMPLE limitation recorded in the receipt. The
+#: controller never re-infers SIMPLE/COMPLEX itself.
+G3_REPLAY_RELPATH = Path("runs") / "gates" / "G3" / "complexity_replay.json"
+G3_NO_SIMPLE_LIMITATION = "No live G2 sample satisfied BASELINE V0 SIMPLE criteria"
+
+
+def g3_replay_limitations(path: Path | None = None) -> tuple[list[str], list[str]]:
+    """Receipt limitations/problems derived from the G3 replay artifact.
+
+    The deterministic artifact records ``simple_path_live_observed`` (top
+    level or inside ``distribution``). ``false`` yields exactly the documented
+    limitation; ``true`` yields none. Every failure mode fails CLOSED — a
+    missing, unreadable or malformed artifact, a missing key or a non-boolean
+    value returns a problem so G3 can never silently PASS. SIMPLE/COMPLEX is
+    never re-inferred here.
+    """
+
+    artifact = path or (PROJECT_ROOT / G3_REPLAY_RELPATH)
+    try:
+        data = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [], [f"G3 replay artifact unreadable ({artifact}): {exc}"]
+    if not isinstance(data, dict):
+        return [], [f"G3 replay artifact is not a JSON object: {artifact}"]
+    distribution = data.get("distribution")
+    if "simple_path_live_observed" in data:
+        container = data
+    elif isinstance(distribution, dict) and "simple_path_live_observed" in distribution:
+        container = distribution
+    else:
+        return [], [f"G3 replay artifact missing simple_path_live_observed: {artifact}"]
+    observed = container["simple_path_live_observed"]
+    if not isinstance(observed, bool):
+        return [], [
+            f"G3 replay artifact simple_path_live_observed is not a boolean: {observed!r}"
+        ]
+    if observed:
+        return [], []
+    return [G3_NO_SIMPLE_LIMITATION], []
+
 
 def load_completed_tickets() -> list[str]:
     if not COMPLETED_TICKETS_FILE.is_file():
@@ -450,6 +491,16 @@ def record(gate: str) -> int:
             all_ok = False
             limitations.append("missing smoke receipt runs/gates/G0/smoke_luna/smoke_result.json")
 
+    # G3 (docs/tickets/TICKET-05.md): the receipt carries the limitation
+    # exactly when the deterministic replay artifact reports no live SIMPLE.
+    # A missing/malformed indicator fails closed (never a silent PASS).
+    g3_replay_problems: list[str] = []
+    if gate == "G3":
+        g3_limitations, g3_replay_problems = g3_replay_limitations()
+        limitations.extend(g3_limitations)
+        if g3_replay_problems:
+            all_ok = False
+
     # Ticket completion is NEVER inferred from command success (docs/gates.md
     # §5.2). The gate may only reach PASS once its required tickets have been
     # recorded DONE in the operator registry.
@@ -474,6 +525,7 @@ def record(gate: str) -> int:
         "completed_tickets": completed,
         "missing_tickets": missing_tickets,
         "g7c_validation_problems": g7c_problems,
+        "g3_replay_problems": g3_replay_problems,
         "tested_commit": worktree_fingerprint(),
         "validated_scope_hashes": {},
         "commands": commands,
@@ -493,6 +545,9 @@ def record(gate: str) -> int:
     if g7c_problems:
         for problem in g7c_problems:
             print(f"  G7-C validation problem: {problem}")
+    if g3_replay_problems:
+        for problem in g3_replay_problems:
+            print(f"  G3 replay problem: {problem}")
     for entry in commands:
         print(f"  exit={entry['exit_code']} {entry['command']}")
     return 0 if all_ok else 1
