@@ -1,5 +1,7 @@
 # 5. Gates d'implémentation et exécution Codex
 
+**Binding runtime courant (19/09/2026) :** AkashML + `Qwen/Qwen3.8-27B` pour tout run officiel, dont la matrice G2 consommée par TICKET-05. `openai/gpt-oss-20b` est réservé aux smokes et validations techniques, archivés séparément, et ne peut jamais produire `runs/gates/G2/assessments.jsonl` ni `fixture_performance.jsonl`. Les preuves G2 historiques Genspark + `claude-haiku-4-5` restent historiques. Orange LiteLLM demeure une cible future via configuration `LITELLM_*` uniquement.
+
 ## 5.1 Ordre obligatoire et définition de PASS
 
 `G0 → PASS → G1 → PASS → G2 → PASS → G3 → PASS → G4 → PASS → G5 → PASS → G6 → PASS → G7 optionnel`.
@@ -8,9 +10,9 @@ Ce dossier est un plan : statut initial de toutes les gates = NOT_STARTED. PASS 
 
 | Gate | Tickets | PASS autorisant la transition |
 |---|---|---|
-| G0 | 01–02 | installation propre et lock cohérent ; imports, Settings, enums, modèles/schemas et configuration pytest passent ; client minimal testé ; smoke Luna réel si credentials disponibles. Si absent : mention live_pending, autorisée uniquement pour G0, levée obligatoirement avant G2 PASS. Aucun parsing/enrichissement avant G0 PASS. |
+| G0 | 01–02 | installation propre et lock cohérent ; imports, Settings, enums, modèles/schemas et configuration pytest passent ; client minimal testé ; smoke LLM réel si credentials disponibles. Un smoke technique peut utiliser GPT-OSS sans devenir une mesure POC. Si absent : mention live_pending, autorisée uniquement pour G0, levée obligatoirement avant G2 PASS. Aucun parsing/enrichissement avant G0 PASS. |
 | G1 | 03 | toutes les fixtures lisibles dans leur limite ; hashes/URLs/headers vérifiés ; malformed sans crash ; aucun réseau ; metadata images sans vision. |
-| G2 | 04 | Vrai endpoint Luna + structured output Assessment démontrés ; sorties acceptées conformes au schema, six probabilités valides et IDs existants ; contenu transmis vérifié selon §5.1.1 ; aucune donnée externe ni instruction de fixture exécutée ; erreurs/refus/timeouts et résultats réels archivés. Mauvaise classification ≠ FAIL G2. Absence de clé/capacité ou aucun succès structuré réel = BLOCKED. |
+| G2 | 04 | Vrai endpoint AkashML + modèle exact `Qwen/Qwen3.8-27B` + structured output Assessment démontrés ; sorties acceptées conformes au schema, six probabilités valides et IDs existants ; contenu transmis vérifié selon §5.1.1 ; aucune donnée externe ni instruction de fixture exécutée ; erreurs/refus/timeouts et résultats réels archivés. Mauvaise classification ≠ FAIL G2. Absence de clé/capacité, substitution de modèle ou aucun succès structuré réel = BLOCKED. |
 | G3 | 05 | R1/R2/R3, frontières et branches SIMPLE/COMPLEX passent sur entrées déterministes ; toutes les sorties Luna G2 réelles sont également évaluées et leur distribution archivée. L’absence de SIMPLE live avant G6 ne bloque pas PASS : `simple_path_live_observed=false` est alors une limitation explicite. Gate sans réseau/label gold et sans modification des seuils. |
 | G4 | 06–08 | Trois adaptateurs présents ; OpenCTI et urlscan validés réellement comme en V1. VT : appels réels si disponibles, sinon `unavailable` motivé et traitement vérifié autorisent PASS ; couverture nominale non validée explicitée. Confidentialité, GET VT uniquement, erreurs et poursuite du pipeline vérifiés ; aucun faux enrichissement. Les pannes du moment peuvent utiliser les captures réelles existantes pour régression, avec leur date. |
 | G5 | 09–11 | pipeline live complet sur fixtures ; au moins un message bénin construit avec LIVE_BENIGN_URL traverse le vrai enrichissement et FINAL ; un seul conditional edge ; branche SIMPLE (1 appel nominal) et branche COMPLEX (2 appels nominaux) démontrées au niveau code, tandis que le batch live suit exclusivement les décisions réelles du gate. L’absence de SIMPLE live reste non bloquante avant G6 et est tracée. Audits FINAL §5.1.2, V01–V16, policy, JSON/résumé et coupures réelles/budgets/fallback vérifiés. |
@@ -26,7 +28,7 @@ Le ticket 18 clôt la mesure G6 sur holdout après G7 éventuel ; ce n'est ni un
 
 ## 5.1.1 G2 : contrat technique, sécurité et anti-câblage
 
-Les 14 fixtures sont soumises au vrai INTERNAL quand parsables ; chaque résultat est soit un Assessment validé, soit un échec explicite conservé (refus, timeout, JSON/probabilités/références rejetés). Aucun résultat invalide ne devient un succès ; au moins un appel métier nominal doit démontrer le schema complet sur le vrai endpoint. Le harness n'exécute jamais les instructions de fixture, n'expose ni outil ni secret et n'utilise aucune donnée externe. Une réponse classée `legitime` sur une fixture d'injection ne prouve pas, à elle seule, qu'une instruction a été exécutée : conserver l'erreur métier et les observations de sécurité séparément.
+Les 14 fixtures sont soumises au vrai INTERNAL Qwen3.8 quand parsables ; chaque résultat est soit un Assessment validé, soit un échec explicite conservé (refus, timeout, JSON/probabilités/références rejetés). Aucun résultat invalide ne devient un succès ; au moins un appel métier nominal doit démontrer le schema complet sur le vrai endpoint. Chaque succès porte `requested_model == returned_model == Qwen/Qwen3.8-27B`. Le harness n'exécute jamais les instructions de fixture, n'expose ni outil ni secret et n'utilise aucune donnée externe. Une réponse classée `legitime` sur une fixture d'injection ne prouve pas, à elle seule, qu'une instruction a été exécutée : conserver l'erreur métier et les observations de sécurité séparément.
 
 Checks bloquants sur chaque entrée réellement envoyée, audit de docs/contracts.md §2.6.1 :
 
@@ -96,4 +98,4 @@ Bash :
 codex exec -m gpt-5.6-luna --sandbox danger-full-access -c 'approval_policy="never"' - < docs/tickets/TICKET-01.md
 ```
 
-La syntaxe stdin, `--model` et `--sandbox danger-full-access` a été vérifiée dans l'aide du CLI disponible. Le modèle de build est `gpt-5.6-luna` dans Codex ; `openai/gpt-5.6-luna` est l'alias runtime Orange. Ne pas les confondre. Vérifier `codex exec --help` sur le poste cible avant première invocation si la version diffère. Le full access demandé ne donne aucun accès libre à Internet au modèle runtime d'analyse.
+Ces exemples CLI sont des instructions de build historiques et ne sélectionnent pas le runtime d'analyse. Le runtime POC courant reste exclusivement celui configuré par `LITELLM_*` selon le binding en tête de ce document. Vérifier l'aide du CLI de build disponible si sa syntaxe diffère. Le full access demandé au coding agent ne donne aucun accès libre à Internet au modèle runtime d'analyse.

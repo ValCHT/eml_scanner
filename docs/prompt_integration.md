@@ -2,6 +2,8 @@
 
 Les fichiers `prompts/internal_assessment.txt` et `prompts/final_assessment.txt` contiennent chacun un message système autonome complet. Ils sont normatifs ; ne pas réintroduire le prompt historique de navigation. La première phase utilise medium, la seconde xhigh.
 
+Le binding runtime courant est AkashML + `Qwen/Qwen3.8-27B` pour ces deux phases. La migration a vérifié deux requêtes directes séparées : medium et xhigh sont acceptés avec identité exacte du modèle et des reasoning tokens sont reportés. Les valeurs observées sur deux petits probes ne suffisent pas à prouver une distinction sémantique. `openai/gpt-oss-20b` sert uniquement aux tests techniques ; en particulier, il ne valide jamais xhigh et ne génère aucune Assessment officielle.
+
 Le message utilisateur est un JSON sérialisé par le code, sans interpolation de données dans le message système. Enveloppe internal : `UNTRUSTED_EMAIL`, `EVIDENCE_REGISTRY`, `OBSERVABLE_REGISTRY`, `SUPPLIED_VISUAL_IDS`. Enveloppe final : mêmes champs + `INTERNAL_ASSESSMENT`, `TOOL_STATUS`, `RAG_CONTEXT`. Seuls les champs métier utiles de ParsedEmail sont inclus ; aucun chemin révélant le label du corpus, aucune note analyste de gold, aucun nom de fixture, aucune clé de configuration/secrète.
 
 Les prompts système livrés sont inchangés en V1.2. L'audit par tentative de docs/contracts.md §2.6.1 porte sur les enveloppes INTERNAL et FINAL effectivement envoyées ; l'audit ne fait pas partie des prompts et ne change ni leurs champs ni le schema Assessment.

@@ -34,6 +34,7 @@ SECRET_PATTERNS = [
         r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password)\s*[=:]\s*\S+",
         # Well-known key prefixes
         r"sk-[A-Za-z0-9]{8,}",
+        r"akml-[A-Za-z0-9_-]{4,}",
     )
 ]
 

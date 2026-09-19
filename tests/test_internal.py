@@ -57,10 +57,9 @@ HARNESS_ONLY_KEYS = (
     "constraints",
 )
 
-#: Sandbox runtime identity (TICKET-04 binding decision): the Genspark
-#: OpenAI-compatible proxy serves claude-haiku-4-5; silent substitution is
-#: refused by the client itself.
-EXPECTED_RUNTIME_MODEL = "claude-haiku-4-5"
+#: Current official POC runtime identity. Cheap GPT-OSS compatibility calls
+#: never execute this official G2 matrix or write its measurement artifacts.
+EXPECTED_RUNTIME_MODEL = "Qwen/Qwen3.8-27B"
 
 
 @pytest.fixture(autouse=True)
@@ -741,7 +740,7 @@ def _run_live_matrix() -> dict[str, Any]:
     settings = load_settings(None)
     if settings.LITELLM_API_KEY is None:
         pytest.fail(
-            "LITELLM_API_KEY absent: G2 requires real Luna calls "
+            "LITELLM_API_KEY absent: G2 requires real official-runtime calls "
             "(BLOCKED — no simulation possible)"
         )
 
@@ -886,7 +885,7 @@ class TestLiveInternalMatrix:
         self, live_matrix: dict[str, Any]
     ) -> None:
         """>= 16 real INTERNAL runs; the model contract is real: the
-        requested model is always claude-haiku-4-5, and every SUCCESSFUL
+        requested model is always Qwen/Qwen3.8-27B, and every SUCCESSFUL
         structured response reports returned == requested (silent
         substitution is refused by the client itself). Failed attempts
         legitimately carry returned_model=None: no success is invented."""

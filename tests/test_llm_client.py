@@ -30,6 +30,7 @@ pytestmark = pytest.mark.g0
 
 #: Local canary secret used to prove no secret value reaches logs/artifacts.
 CANARY = "sk-canary-0123456789abcdefDONOTLEAK"
+AKML_CANARY = "akml-synthetic-0123456789abcdefDONOTLEAK"
 
 OK_SCHEMA = {
     "type": "object",
@@ -328,6 +329,53 @@ def test_canary_never_leaks_in_errors_or_captures(
     assert expurgate(f"Bearer {CANARY}") == "[REDACTED]"
     for path in glob.glob(str(tmp_path / "captures" / "*")):
         assert CANARY not in Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def test_akash_canary_is_redacted_from_client_and_gate_artifacts(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Synthetic ``akml-*`` values are opaque credentials and are redacted.
+
+    This exercises both artifact writers that may persist provider errors;
+    the real credential is never used by this local regression.
+    """
+
+    import importlib.util
+
+    from src.llm import LLMTransportError
+
+    monkeypatch.setenv("LITELLM_API_KEY", AKML_CANARY)
+    monkeypatch.setenv("LITELLM_CHAT_URL", "https://endpoint.invalid/chat/completions")
+    monkeypatch.setenv("LITELLM_MODEL", "test/model")
+    client = LunaClient(load_settings(None), capture_dir=tmp_path / "captures")
+
+    def _echoing_error(url: str, body: bytes, timeout_s: float) -> tuple[int, bytes]:
+        raise LLMTransportError(f"provider echoed {AKML_CANARY}")
+
+    client._post_bytes = _echoing_error  # type: ignore[method-assign]
+    result, record = client.complete_json(
+        messages=[{"role": "user", "content": "ping"}],
+        schema=OK_SCHEMA,
+        effort="medium",
+        max_output_tokens=128,
+        deadline=_client_deadline(),
+    )
+    assert result is None and record.status == "error"
+    assert AKML_CANARY not in str(record.model_dump())
+    assert expurgate(AKML_CANARY) == "[REDACTED]"
+    assert expurgate(f"Authorization: Bearer {AKML_CANARY}") == "[REDACTED]"
+    for artifact in (tmp_path / "captures").iterdir():
+        text = artifact.read_text(encoding="utf-8", errors="replace")
+        assert AKML_CANARY not in text
+        assert "Authorization" not in text
+
+    spec = importlib.util.spec_from_file_location(
+        "check_gate_module", Path(__file__).resolve().parent.parent / "scripts" / "check_gate.py"
+    )
+    assert spec and spec.loader
+    check_gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check_gate)
+    assert check_gate.expurgate(AKML_CANARY) == "[REDACTED]"
 
 
 def _client_deadline() -> float:
@@ -901,6 +949,45 @@ def test_smoke_flags_are_mutually_exclusive(
     )
     assert proc.returncode != 0
     assert "mutually exclusive" in proc.stderr
+
+
+def test_effort_probe_refuses_gpt_oss_xhigh_without_network(
+    clean_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GPT-OSS may probe medium, but must never be used to validate xhigh."""
+
+    import importlib.util
+
+    monkeypatch.setenv("LITELLM_API_KEY", AKML_CANARY)
+    monkeypatch.setenv("LITELLM_CHAT_URL", "https://api.akashml.com/v1/chat/completions")
+    monkeypatch.setenv("LITELLM_MODEL", "openai/gpt-oss-20b")
+    settings = load_settings(None)
+    spec = importlib.util.spec_from_file_location(
+        "smoke_effort_guard", Path(__file__).resolve().parent.parent / "scripts" / "smoke.py"
+    )
+    assert spec and spec.loader
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    monkeypatch.setattr(smoke, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(smoke, "load_settings", lambda _env_file: settings)
+
+    def _network_forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("GPT-OSS xhigh guard attempted a network call")
+
+    monkeypatch.setattr(smoke.LunaClient, "complete_json", _network_forbidden)
+    assert smoke.probe_luna_efforts() == 1
+    receipt = json.loads(
+        (
+            tmp_path
+            / "runs"
+            / "runtime-migration"
+            / "compatibility"
+            / "qwen38_effort_probes.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "configuration_error"
+    assert receipt["probed_efforts"] == []
+    assert AKML_CANARY not in json.dumps(receipt)
 
 
 @pytest.mark.live

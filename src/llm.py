@@ -1,4 +1,4 @@
-"""Minimal real LLM client (TICKET-02, docs/contracts.md §2.7, docs/architecture.md §1.4).
+"""Minimal real OpenAI-compatible LLM client.
 
 ``LunaClient.complete_json`` performs a real POST to the exact endpoint
 configured in ``Settings.LITELLM_CHAT_URL`` with structured output
@@ -13,9 +13,9 @@ Security invariants:
   and are never part of ``messages``, never logged and never archived.
 - Captured artifacts contain usage, returned model and hashes only; request
   headers are never persisted.
-- The canonical V1.2 defaults (Orange Luna) come from ``Settings``; the
-  claude-haiku-4-5 mapping is the environment-scoped sandbox derogation of
-  TICKET-01 and is never presented as Luna.
+- Provider and model selection come only from the generic ``LITELLM_*``
+  settings. ``LunaClient`` remains the frozen public class name, not a
+  provider-selection mechanism.
 
 Transport note: the stdlib ``urllib.request`` is used instead of httpx
 because FILES ALLOWED for TICKET-02 does not include the dependency
@@ -65,6 +65,7 @@ _SECRET_PATTERNS = [
         r'"(?:api[_-]?key|access[_-]?token|secret|token|password|authorization)"\s*:\s*"[^"]*"',
         r"\b(api[_-]?key|access[_-]?token|token|secret|password)\s*[=:]\s*\S+",
         r"sk-[A-Za-z0-9\-]{8,}",
+        r"akml-[A-Za-z0-9_\-]{4,}",
     )
 ]
 

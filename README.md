@@ -2,28 +2,27 @@
 
 Implementation repository prepared from the frozen V1.2 specification dated 18/09/2026.
 
-**Implementation status (updated 18/09/2026):** TICKET-01 (G0 skeleton, settings and
-contract models) is merged on `main` via PR #1 (merge commit `bb324e5`).
-TICKET-02 (minimal real LLM client + smoke + G0 closure) is implemented in this
-branch: `src/llm.py` (`LunaClient.complete_json`), `scripts/smoke.py` (real smoke,
-`--if-configured` distinguishes `live_pending` from a real failure),
-`scripts/validate_reports.py`, G0 command list extended in `scripts/check_gate.py`,
-tests in `tests/test_llm_client.py`. Do **not** re-execute TICKET-01; do **not**
-start TICKET-03 before this ticket's review/merge.
+**Implementation status (updated 19/09/2026):** TICKET-01 through TICKET-04 are
+merged on `main` (HEAD `6635ee4182a4497ecdac889b37fc7ed2f7afed14`). The
+current maintenance task migrates the runtime and revalidates G2. TICKET-05 must
+not start until this change and the refreshed G1/G2 receipts receive human review.
 
-## Runtime LLM decision (environment-scoped)
+## Runtime LLM decision
 
-- **Universal defaults (canonical V1.2):** `openai/gpt-5.6-luna` on the Orange proxy
-  (`https://management.llmproxy.ai.orange/chat/completions`), per docs/contracts.md §2.7.
-- **Genspark sandbox derogation (explicit project decision, stable for POC
-  measurements):** inside the Genspark sandbox, the runtime LLM is `claude-haiku-4-5`
-  on the injected OpenAI-compatible endpoint. The mapping in `src/config.py`
-  `load_settings` is **atomic**: it applies (URL + model + key) only when no canonical
-  `LITELLM_*` field is provided (env or env_file) and `OPENAI_BASE_URL` points at an
-  authorized Genspark host (`_GENSPARK_LLM_HOSTS`). It never becomes a global default
-  and never silently alters macOS/Linux/Windows behavior or the G2/G6 experiments.
-- Orange Luna endpoint was unreachable from this sandbox (403 HTML edge block, before
-  the API layer); retest from an Orange-network machine before switching G2 to live.
+- **Current POC provider:** AkashML at
+  `https://api.akashml.com/v1/chat/completions`.
+- **Official POC model:** `Qwen/Qwen3.8-27B` for G2 evidence and all future
+  quantitative POC assessments.
+- **Cheap technical model:** `openai/gpt-oss-20b` for connectivity, transport,
+  parsing, schema and smoke checks only. Its output is never an official result.
+- **Future Orange demo target:** the same generic `LITELLM_CHAT_URL`,
+  `LITELLM_API_KEY` and `LITELLM_MODEL` settings switch provider without code edits.
+- **Historical evidence:** G2 was previously run through Genspark with
+  `claude-haiku-4-5`. Those receipts remain historical and are not relabeled as Qwen.
+
+Only explicit `LITELLM_*` configuration controls the runtime. Akash credentials are
+opaque Bearer values; an `akml-*` key is neither converted nor required to resemble
+an `sk-*` key. No provider-specific credential mapping exists.
 
 ## Repository map
 
@@ -75,6 +74,5 @@ RFC822 `.eml` files are byte-sensitive. `.gitattributes` deliberately disables G
 
 ## Next implementation step
 
-TICKET-01 is DONE and merged (PR #1, commit `bb324e5`).
-TICKET-02 is implemented in `ticket-02-luna-client` (real client, smoke, G0 closure) — pending review.
-Do not start TICKET-03 until TICKET-02 is DONE, reviewed and merged.
+Complete and review the AkashML/Qwen runtime migration and refreshed G1/G2
+evidence. Do not start TICKET-05 in this maintenance session.

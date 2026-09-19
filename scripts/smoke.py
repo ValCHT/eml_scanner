@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real smoke tests (docs/gates.md §5.2, TICKET-02).
+"""Real OpenAI-compatible runtime smoke tests.
 
 ``smoke.py luna --if-configured`` performs a REAL structured-output POST to
 the endpoint configured by ``Settings``:
@@ -23,13 +23,11 @@ MANDATORY —
 
 Success is never simulated.
 
-``smoke.py luna-efforts`` runs REAL structured probes for ``medium`` and
-``xhigh`` reasoning efforts (same tiny ``{ok: boolean}`` schema, no SOC
-content) and archives factual observations per effort: HTTP-level success,
-requested/returned model, usage, schema validity, ``reasoning_tokens``.
-A 200 response never counts as "effort supported": only facts are recorded,
-and an unverifiable/unsupported effort is recorded as an explicit
-limitation, never simulated.
+``smoke.py luna-efforts`` is retained as a backward-compatible command name
+for the two required Qwen3.8 probes. It refuses to run on any other model, so
+the cheap GPT-OSS role can never be used to draw a conclusion about xhigh.
+It archives factual observations under ``runs/runtime-migration``. A 200
+response alone never proves semantic effort enforcement.
 
 There is no mock/recorded/replay mode: a fabricated answer is a FAIL
 condition of the ticket.
@@ -67,8 +65,9 @@ SMOKE_EFFORT = "low"
 SMOKE_MAX_OUTPUT_TOKENS = 128
 SMOKE_DEADLINE_SECONDS = 60.0
 
-#: The exact model the runtime is allowed to observe in this environment.
-EXPECTED_SANDBOX_MODEL = "claude-haiku-4-5"
+#: Runtime roles fixed by the migration decision.
+CHEAP_TECHNICAL_MODEL = "openai/gpt-oss-20b"
+OFFICIAL_POC_MODEL = "Qwen/Qwen3.8-27B"
 
 #: Reasoning efforts probed by ``luna-efforts`` (blocker 4). ``low`` is the
 #: smoke default; the POC protocol (MEDIUM/XHIGH in G2/G6) needs these two.
@@ -118,11 +117,14 @@ def _public_payload(result: object, record: object, capture_dir: Path) -> dict[s
         "response_sha256": (meta or {}).get("response_sha256"),
         "response_bytes": (meta or {}).get("response_bytes"),
         "fence_extracted": (meta or {}).get("fence_extracted"),
-        "note_model_identity": (
-            "sandbox derogation: requested model is claude-haiku-4-5 "
-            "(Genspark environment); it is never presented as Luna."
-            if getattr(record, "requested_model", "") == EXPECTED_SANDBOX_MODEL
-            else "requested model comes from Settings (canonical: openai/gpt-5.6-luna)."
+        "runtime_role": (
+            "cheap_technical_test"
+            if getattr(record, "requested_model", "") == CHEAP_TECHNICAL_MODEL
+            else (
+                "official_poc"
+                if getattr(record, "requested_model", "") == OFFICIAL_POC_MODEL
+                else "explicit_custom_configuration"
+            )
         ),
     }
     if isinstance(result, dict):
@@ -136,7 +138,7 @@ def _write_receipt(path: Path, payload: dict[str, object]) -> None:
 
 
 def smoke_luna(if_configured: bool = False, require_configured: bool = False) -> int:
-    """Real Luna smoke; distinguishes pending (no key) from failure (key present).
+    """Real runtime smoke; distinguishes pending from failure.
 
     ``complete_json`` never raises (frozen public contract): every failure
     comes back as ``(None, record)`` with ``record.status="error"``.
@@ -218,7 +220,7 @@ def smoke_luna(if_configured: bool = False, require_configured: bool = False) ->
 
 
 def probe_luna_efforts() -> int:
-    """Real MEDIUM/XHIGH probes (blocker 4): facts only, never claims.
+    """Real Qwen3.8 MEDIUM/XHIGH probes: facts only, never claims.
 
     For each effort a real structured POST is sent with the same tiny
     ``{ok: boolean}`` schema (no SOC content). Archived per effort:
@@ -241,7 +243,13 @@ def probe_luna_efforts() -> int:
     """
 
     settings: Settings = load_settings(None)
-    out_path = PROJECT_ROOT / "runs" / "gates" / "G0" / "effort_probes.json"
+    out_path = (
+        PROJECT_ROOT
+        / "runs"
+        / "runtime-migration"
+        / "compatibility"
+        / "qwen38_effort_probes.json"
+    )
     if settings.LITELLM_API_KEY is None:
         payload = {
             "status": "live_pending",
@@ -255,10 +263,25 @@ def probe_luna_efforts() -> int:
         print("luna-efforts: live_pending (no credentials) -> exit 1", file=sys.stderr)
         return 1
 
+    if settings.LITELLM_MODEL != OFFICIAL_POC_MODEL:
+        payload = {
+            "status": "configuration_error",
+            "reason": (
+                "medium/xhigh probes require the official Qwen3.8 model; "
+                "GPT-OSS must not be used to validate xhigh"
+            ),
+            "requested_model": settings.LITELLM_MODEL,
+            "required_model": OFFICIAL_POC_MODEL,
+            "probed_efforts": [],
+        }
+        _write_receipt(out_path, payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 1
+
     limitations: list[str] = []
     probes: dict[str, object] = {}
     for effort in PROBED_EFFORTS:
-        capture_dir = PROJECT_ROOT / "runs" / "gates" / "G0" / f"smoke_effort_{effort}"
+        capture_dir = out_path.parent / f"qwen38_effort_{effort}"
         client = LunaClient(settings, phase="internal", capture_dir=capture_dir)
         started = time.monotonic()
         result, record = client.complete_json(
@@ -321,22 +344,30 @@ def probe_luna_efforts() -> int:
     else:
         limitations.append("reasoning_tokens not comparable (probe failure on at least one effort)")
 
+    compatible = all(
+        isinstance(probes.get(effort), dict)
+        and probes[effort].get("http_success") is True  # type: ignore[union-attr]
+        for effort in PROBED_EFFORTS
+    )
     payload = {
-        "status": "probes_executed",
+        "status": "compatible" if compatible else "incompatible",
         "requested_model": settings.LITELLM_MODEL,
         "probed_efforts": list(PROBED_EFFORTS),
         "probes": probes,
         "limitations": limitations,
         "decision_note": (
-            "These facts feed the A/B/C protocol decision: if xhigh was "
-            "rejected or is not verifiable with this runtime, MEDIUM/XHIGH "
-            "cannot be claimed supported and the protocol must adapt."
+            "HTTP acceptance, returned-model identity and reasoning-token "
+            "observations are recorded. Semantic effort distinction is not "
+            "claimed from a successful HTTP response alone."
         ),
     }
     _write_receipt(out_path, payload)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"luna-efforts: probes executed; limitations={len(limitations)}")
-    return 0
+    print(
+        f"luna-efforts: probes executed; compatible={compatible}; "
+        f"limitations={len(limitations)}"
+    )
+    return 0 if compatible else 1
 
 
 def main() -> int:
