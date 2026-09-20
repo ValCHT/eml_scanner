@@ -26,8 +26,6 @@ runs/
 corpus/raw/
 corpus/normalized/
 corpus/private/
-corpus/gold/gold_test.jsonl
-corpus/gold/test_*.jsonl
 
 # IDE / OS
 .DS_Store

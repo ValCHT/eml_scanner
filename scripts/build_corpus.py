@@ -22,6 +22,40 @@ Implements docs/tickets/TICKET-12.md on top of docs/corpus.md §7.3–§7.4:
                   deterministic candidate tie-breaking when a per-record
                   candidate pool is capped.
 
+TICKET-13 (G6, operator-approved Gold-AI amendment, 2026-09-20):
+
+- ``labels``       : deterministic format conversion of the externally produced,
+                     operator-approved AI adjudication (``final_status =
+                     ai_adjudicated``, ``reviewer_ref = astra_gold_ai_v1``,
+                     ``human_validated = false``) onto the canonical review
+                     interface ``corpus/review/labels.jsonl`` (template schema
+                     preserved). This is a format conversion only — never new
+                     semantic labeling by the coding agent — and the source
+                     artefact stays the audit reference. Reference labels for
+                     this exploratory POC are AI-adjudicated (Gold-AI), NOT
+                     human analyst ground truth.
+- ``select``       : deterministic SplitPlan over the operator-approved
+                     protected Gold candidate pool: public RAG reservation
+                     first (families never span splits; pool families are
+                     excluded from RAG), then a label-stratified dev/test
+                     split of the pool by ``family_group`` (seed 42).
+                     Materializes ``corpus/gold/gold_dev.jsonl`` (dev only)
+                     and ``corpus/rag/public_cases.jsonl`` plus the split
+                     plan (test aggregates only).
+- ``freeze``       : materializes ``gold_test.jsonl`` (metadata-only
+                     GoldRecord data) and ``test_seal.json``. POC
+                     simplification (operator amendment 2026-09-20): the
+                     test split is an INTERNAL VALIDATION partition and may
+                     live in the build workspace; it is not an independently
+                     isolated or blinded holdout.
+- ``verify-splits``: re-derives the plan from the same inputs and compares
+                     it with the materialized artifacts (gold_dev, RAG,
+                     gold_test); validates ``test_seal.json`` (schema,
+                     aggregates, and gold_test.jsonl bytes match).
+
+Interfaces (TICKET-13): :func:`select_gold`, :func:`freeze_test`,
+:func:`validate_test_seal`.
+
 Interfaces (TICKET-12): :func:`read_dataset`, :func:`fingerprint`,
 :func:`build_manifest`. No archive is fabricated: sources declared
 ``not_acquired``/``not_provided`` in ``corpus/sources.json`` must stay absent.
@@ -46,6 +80,7 @@ import tarfile
 import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
@@ -1313,6 +1348,1553 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# TICKET-13 (G6): Gold-AI reference partitions — operator-approved amendment
+# (2026-09-20). Reference labels for this exploratory POC are AI-adjudicated
+# (Gold-AI: ChatGPT Silver annotation + GPT-6 Astra independent
+# annotation/adjudication); they are NOT human analyst ground truth and are
+# never described as such. The external adjudication artefact is the audit
+# source; the mapping to the canonical review schema is a deterministic format
+# conversion, not new semantic labeling by the coding agent.
+# ---------------------------------------------------------------------------
+
+LABELS_PATH = Path("corpus/review/labels.jsonl")
+GOLD_DEV_PATH = Path("corpus/gold/gold_dev.jsonl")
+TEST_SEAL_PATH = Path("corpus/gold/test_seal.json")
+PUBLIC_CASES_PATH = Path("corpus/rag/public_cases.jsonl")
+SPLIT_PLAN_PATH = Path("runs/tickets/TICKET-13/split_plan.json")
+
+#: Fixed six-class taxonomy (docs/contracts.md §2.1 Label).
+TAXONOMY_LABELS = (
+    "spear_phishing",
+    "phishing",
+    "fraude",
+    "menace",
+    "spam",
+    "legitime",
+)
+
+#: Real reviewer provenance of the operator-approved Gold-AI protocol. Never
+#: rewritten, never claimed to be a human reviewer.
+GOLD_AI_REVIEWER_REF = "astra_gold_ai_v1"
+GOLD_AI_REVIEW_METHOD = "independent_dual_model_ai_adjudication"
+
+#: Canonical review row (exactly the TICKET-12 review-template schema; closed).
+CANONICAL_LABEL_FIELDS = (
+    "sample_id",
+    "source_dataset",
+    "source_record_id",
+    "raw_sha256",
+    "raw_path",
+    "original_label",
+    "normalized_label",
+    "candidate_label",
+    "label_status",
+    "reviewer_ref",
+    "label_rationale",
+    "duplicate_group",
+    "family_group",
+    "notes",
+)
+
+#: GoldRecord closed field list (docs/contracts.md §2.8). extra='forbid'.
+GOLD_FIELDS = (
+    "sample_id",
+    "raw_sha256",
+    "email_sha256",
+    "raw_path",
+    "source_dataset",
+    "input_format",
+    "normalized_label",
+    "label_status",
+    "reviewer_ref",
+    "label_rationale",
+    "public_source",
+    "is_synthetic",
+    "campaign_id",
+    "duplicate_group",
+    "family_group",
+    "tags",
+    "split",
+)
+
+#: RAG public-case source fields (docs/contracts.md §2.8). ``analyst_*`` names
+#: are legacy V1 names for this Gold-AI POC run and do NOT imply a human
+#: reviewer; provenance is carried by ``analyst_validation_ref`` = reviewer_ref.
+RAG_FIELDS = (
+    "case_id",
+    "public_source_url",
+    "dataset",
+    "record_sha256",
+    "validated_label",
+    "analyst_validation_ref",
+    "campaign_id",
+    "duplicate_group",
+    "family_group",
+    "text_excerpt",
+    "analyst_rationale",
+    "is_public",
+    "split",
+)
+
+#: Content keys refused anywhere inside a GoldRecord/RAG case (recursive,
+#: case-insensitive) — even with an empty or null value.
+GOLD_CONTENT_KEYS = (
+    "body",
+    "html",
+    "headers",
+    "raw",
+    "raw_email",
+    "mime_content",
+    "text_parts",
+    "html_parts",
+    "attachments",
+    "images",
+    "text_excerpt",
+)
+
+#: Indicative six-class targets (docs/corpus.md §7.5); deficits stay visible
+#: and are never filled with fabricated labels.
+GOLD_TARGETS = {
+    "spear_phishing": 30,
+    "phishing": 50,
+    "fraude": 30,
+    "menace": 20,
+    "spam": 30,
+    "legitime": 40,
+}
+
+#: RAG reservation (operator amendment §10): seed 42, family granularity,
+#: class caps first, deterministic fill without any confidence filter.
+RAG_TARGET_TOTAL = 150
+RAG_CLASS_CAPS = (("phishing", 50), ("legitime", 50), ("spam", 50))
+RAG_FILL_CLASS = "fraude"
+RAG_TEXT_EXCERPT_CHARS = 1200
+
+SELECTION_PROTOCOL = (
+    "gold_ai_operator_amendment_2026_09_20: "
+    "RAG families reserved first from the eligible confirmed complement "
+    "(protected operator Gold candidate pool families excluded), then "
+    "label-stratified dev/test split of the protected pool by family_group, "
+    "seed 42; family-granular, one record per family in RAG; no confidence "
+    "value is ever used as a selection or easy-case filter; deficits stay "
+    "visible, never filled."
+)
+
+SEAL_VERSION = "t13-gold-seal-1"
+SEAL_REQUIRED_KEYS = (
+    "version",
+    "split",
+    "record_count",
+    "family_count",
+    "label_support",
+    "seed",
+    "gold_test_sha256",
+    "selection_protocol",
+    "created_at",
+    "reference_method",
+    "reviewer_ref",
+    "human_validated",
+)
+
+
+class GoldValidationError(RuntimeError):
+    """GoldRecord/canonical-label/seal contract violation (fails the gate)."""
+
+
+def _iter_forbidden_hits(
+    obj: object, keys: tuple[str, ...], path: str = "$"
+) -> list[str]:
+    """Recursively find forbidden content keys (case-insensitive), even when
+    the value is empty or null."""
+
+    hits: list[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if str(key).lower() in keys:
+                hits.append(f"{path}.{key}")
+            hits.extend(_iter_forbidden_hits(value, keys, f"{path}.{key}"))
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj):
+            hits.extend(_iter_forbidden_hits(value, keys, f"{path}[{index}]"))
+    return hits
+
+
+def _sha256_of_jsonl_rows(rows: Iterable[Mapping[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(
+            (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        )
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _validate_canonical_label_row(row: Mapping[str, Any], where: str) -> None:
+    """Canonical review row schema + Gold-AI provenance guard (fail-closed).
+
+    - exact closed field set (template schema preserved, no extra keys — the
+      canonical interface structurally cannot carry ``human_validated`` or
+      other non-template keys);
+    - ``label_status`` is ``confirmed`` (with a taxonomy label) or ``ambiguous``
+      (with ``normalized_label`` null);
+    - ``reviewer_ref`` is the real protocol provenance, never rewritten;
+    - ``label_rationale`` must stay content-free (no forbidden content keys).
+    """
+
+    if set(row.keys()) != set(CANONICAL_LABEL_FIELDS):
+        raise GoldValidationError(
+            f"{where}: canonical label row field mismatch "
+            f"(extra={sorted(set(row) - set(CANONICAL_LABEL_FIELDS))}, "
+            f"missing={sorted(set(CANONICAL_LABEL_FIELDS) - set(row))})"
+        )
+    status = str(row["label_status"])
+    if status not in ("confirmed", "ambiguous"):
+        raise GoldValidationError(f"{where}: label_status {status!r} not accepted")
+    label = row["normalized_label"]
+    if status == "confirmed":
+        if label not in TAXONOMY_LABELS:
+            raise GoldValidationError(
+                f"{where}: confirmed row without a taxonomy normalized_label "
+                f"({label!r})"
+            )
+    else:
+        if label is not None:
+            raise GoldValidationError(
+                f"{where}: ambiguous row must keep normalized_label null"
+            )
+    reviewer = str(row["reviewer_ref"] or "")
+    if reviewer != GOLD_AI_REVIEWER_REF:
+        raise GoldValidationError(
+            f"{where}: reviewer_ref must remain {GOLD_AI_REVIEWER_REF!r} "
+            f"(got {reviewer!r}); never claim a human reviewer"
+        )
+    content_hits = _iter_forbidden_hits(row, GOLD_CONTENT_KEYS)
+    if content_hits:
+        raise GoldValidationError(
+            f"{where}: forbidden content key(s) {content_hits[:4]}"
+        )
+
+
+def load_canonical_labels(path: Path) -> dict[str, dict[str, Any]]:
+    """Load the canonical ``corpus/review/labels.jsonl`` (closed schema)."""
+
+    if not path.is_file():
+        raise GoldValidationError(
+            f"canonical labels missing: {path} — run the 'labels' subcommand "
+            "(deterministic conversion of the operator-approved adjudication)"
+        )
+    labels: dict[str, dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            sample_id = str(row.get("sample_id") or "")
+            if not sample_id:
+                raise GoldValidationError(f"{path}:{number}: empty sample_id")
+            if sample_id in labels:
+                raise GoldValidationError(
+                    f"{path}:{number}: duplicate sample_id {sample_id!r}"
+                )
+            _validate_canonical_label_row(row, f"{path}:{number}")
+            labels[sample_id] = row
+    if not labels:
+        raise GoldValidationError(f"{path}: no canonical label rows")
+    return labels
+
+
+def load_adjudication(path: Path) -> dict[str, dict[str, Any]]:
+    """Load the operator-approved AI adjudication artefact (audit source).
+
+    Only rows exactly matching the approved Gold-AI protocol are eligible:
+    ``final_status`` in {ai_adjudicated, ambiguous}, a taxonomy final label
+    for ai_adjudicated rows, ``human_validated`` explicitly false (never
+    rewritten), ``reviewer_ref`` == the real AI reference and
+    ``review_method`` == the recorded dual-model adjudication method.
+    """
+
+    if not path.is_file():
+        raise GoldValidationError(
+            f"operator adjudication artefact missing: {path} "
+            "(never fabricated here)"
+        )
+    adjudication: dict[str, dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            where = f"{path}:{number}"
+            sample_id = str(row.get("sample_id") or "")
+            status = str(row.get("final_status") or "")
+            if not sample_id:
+                raise GoldValidationError(f"{where}: empty sample_id")
+            if sample_id in adjudication:
+                raise GoldValidationError(f"{where}: duplicate sample_id")
+            if status not in ("ai_adjudicated", "ambiguous"):
+                raise GoldValidationError(
+                    f"{where}: final_status {status!r} is outside the "
+                    "operator-approved protocol"
+                )
+            if status == "ai_adjudicated":
+                if str(row.get("final_label")) not in TAXONOMY_LABELS:
+                    raise GoldValidationError(
+                        f"{where}: unsupported final_label "
+                        f"{row.get('final_label')!r}"
+                    )
+                if not str(row.get("raw_sha256") or ""):
+                    raise GoldValidationError(f"{where}: raw_sha256 missing")
+                if not str(row.get("family_group") or ""):
+                    raise GoldValidationError(f"{where}: family_group missing")
+            if row.get("human_validated") is not False:
+                raise GoldValidationError(
+                    f"{where}: human_validated must stay explicitly false "
+                    "(Gold-AI protocol; human validation is never fabricated "
+                    "or simulated)"
+                )
+            if str(row.get("reviewer_ref") or "") != GOLD_AI_REVIEWER_REF:
+                raise GoldValidationError(
+                    f"{where}: reviewer_ref must remain {GOLD_AI_REVIEWER_REF!r}"
+                )
+            if (
+                str(row.get("review_method") or "") != GOLD_AI_REVIEW_METHOD
+            ):
+                raise GoldValidationError(
+                    f"{where}: review_method must remain "
+                    f"{GOLD_AI_REVIEW_METHOD!r}"
+                )
+            adjudication[sample_id] = row
+    if not adjudication:
+        raise GoldValidationError(f"{path}: no adjudication rows")
+    return adjudication
+
+
+def load_gold_candidates(
+    path: Path, adjudication: Mapping[str, Mapping[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Load the operator-selected protected Gold candidate pool.
+
+    The pool is taken exactly as provided (no re-ranking, no easy-case
+    substitution, no class filling): every row must itself match the approved
+    Gold-AI protocol, and — when the full adjudication map is supplied — must
+    exist in it with identical provenance. Sample ids and family_groups must
+    be unique (one record per family).
+    """
+
+    if not path.is_file():
+        raise GoldValidationError(
+            f"operator Gold candidate pool missing: {path} (never fabricated)"
+        )
+    pool: list[dict[str, Any]] = []
+    seen_samples: set[str] = set()
+    seen_families: set[str] = set()
+    with path.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            where = f"{path}:{number}"
+            sample_id = str(row.get("sample_id") or "")
+            family = str(row.get("family_group") or "")
+            if not sample_id or not family:
+                raise GoldValidationError(f"{where}: empty sample_id/family_group")
+            if sample_id in seen_samples:
+                raise GoldValidationError(
+                    f"{where}: duplicate Gold candidate sample {sample_id!r}"
+                )
+            if family in seen_families:
+                raise GoldValidationError(
+                    f"{where}: duplicate Gold candidate family {family!r}"
+                )
+            if str(row.get("final_status") or "") != "ai_adjudicated":
+                raise GoldValidationError(
+                    f"{where}: Gold candidate must be ai_adjudicated"
+                )
+            if str(row.get("final_label") or "") not in TAXONOMY_LABELS:
+                raise GoldValidationError(
+                    f"{where}: unsupported Gold candidate final_label "
+                    f"{row.get('final_label')!r}"
+                )
+            if row.get("human_validated") is not False:
+                raise GoldValidationError(
+                    f"{where}: human_validated must remain explicitly false"
+                )
+            if str(row.get("reviewer_ref") or "") != GOLD_AI_REVIEWER_REF:
+                raise GoldValidationError(
+                    f"{where}: reviewer_ref must remain {GOLD_AI_REVIEWER_REF!r}"
+                )
+            if str(row.get("review_method") or "") != GOLD_AI_REVIEW_METHOD:
+                raise GoldValidationError(
+                    f"{where}: review_method must remain {GOLD_AI_REVIEW_METHOD!r}"
+                )
+            if adjudication is not None:
+                source = adjudication.get(sample_id)
+                if source is None:
+                    raise GoldValidationError(
+                        f"{where}: Gold candidate {sample_id!r} absent from "
+                        "the full adjudication artefact"
+                    )
+                for key in ("raw_sha256", "family_group", "final_label"):
+                    if str(row.get(key)) != str(source.get(key)):
+                        raise GoldValidationError(
+                            f"{where}: {key} disagrees with the adjudication "
+                            f"artefact ({row.get(key)!r} vs {source.get(key)!r})"
+                        )
+            if not str(row.get("raw_sha256") or ""):
+                raise GoldValidationError(f"{where}: raw_sha256 missing")
+            seen_samples.add(sample_id)
+            seen_families.add(family)
+            pool.append(row)
+    if not pool:
+        raise GoldValidationError(f"{path}: empty Gold candidate pool")
+    return pool
+
+
+def _adjudication_rationale(row: Mapping[str, Any], status: str) -> str:
+    """Content-free rationale: protocol provenance only, never message
+    content, never a human-validation claim."""
+
+    origin = (
+        "dual independent AI agreement"
+        if str(row.get("agreement")) == "AGREE"
+        else "Astra adjudication after AI disagreement/ambiguity"
+    )
+    if status == "ai_adjudicated":
+        return (
+            "AI-adjudicated POC reference (Gold-AI); "
+            f"{origin}; provenance retained in TICKET-13 audit artefact."
+        )
+    return (
+        "AI-adjudicated POC reference marked ambiguous; excluded from Gold "
+        "and RAG; provenance retained in TICKET-13 audit artefact."
+    )
+
+
+def build_canonical_labels(
+    adjudication: Mapping[str, Mapping[str, Any]],
+    manifest_records: Iterable[NormalizedRecord],
+    template_rows: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Deterministic format conversion onto the canonical review interface.
+
+    Joins each operator-approved adjudication row onto the TICKET-12 review
+    template/manifest by ``sample_id``, requiring exact equality of
+    ``sample_id``/``raw_sha256``/``family_group`` against BOTH. Template
+    metadata is preserved verbatim; ``normalized_label``/``label_status``/
+    ``reviewer_ref``/``label_rationale`` come from the protocol rules. This is
+    a format conversion only — never new semantic labeling.
+    """
+
+    manifest_rows = list(manifest_records)
+    if not manifest_rows:
+        raise GoldValidationError("empty manifest for canonical conversion")
+    manifest_by_id = {
+        str(record["sample_id"]): record for record in manifest_rows
+    }
+    if len(manifest_by_id) != len(manifest_rows):
+        raise GoldValidationError(
+            "duplicate sample_id in manifest for canonical conversion"
+        )
+    template_by_id = {str(row["sample_id"]): dict(row) for row in template_rows}
+    rows: list[dict[str, Any]] = []
+    mismatches: list[str] = []
+    for sample_id in sorted(adjudication):
+        adjudication_row = adjudication[sample_id]
+        manifest_row = manifest_by_id.get(sample_id)
+        template_row = template_by_id.get(sample_id)
+        if manifest_row is None or template_row is None:
+            mismatches.append(f"{sample_id}: missing from manifest/template")
+            continue
+        for key in ("raw_sha256", "family_group"):
+            for source_name, source in (
+                ("manifest", manifest_row),
+                ("template", template_row),
+            ):
+                actual = str(source[key])
+                if actual != str(adjudication_row[key]):
+                    mismatches.append(
+                        f"{sample_id}: {key} mismatch between adjudication "
+                        f"({adjudication_row[key]!r}) and {source_name} "
+                        f"({actual!r})"
+                    )
+        if mismatches and mismatches[-1].startswith(f"{sample_id}:"):
+            continue
+        status = str(adjudication_row["final_status"])
+        label = (
+            str(adjudication_row["final_label"])
+            if status == "ai_adjudicated"
+            else None
+        )
+        canonical = {
+            "sample_id": str(template_row["sample_id"]),
+            "source_dataset": template_row["source_dataset"],
+            "source_record_id": template_row["source_record_id"],
+            "raw_sha256": template_row["raw_sha256"],
+            "raw_path": template_row["raw_path"],
+            "original_label": template_row["original_label"],
+            "normalized_label": label,
+            "candidate_label": template_row.get("candidate_label"),
+            "label_status": "confirmed" if status == "ai_adjudicated" else "ambiguous",
+            "reviewer_ref": GOLD_AI_REVIEWER_REF,
+            "label_rationale": _adjudication_rationale(adjudication_row, status),
+            "duplicate_group": template_row["duplicate_group"],
+            "family_group": template_row["family_group"],
+            "notes": template_row.get("notes", ""),
+        }
+        rows.append(canonical)
+    if mismatches:
+        raise GoldValidationError(
+            "adjudication/manifest/template join failed (fail-closed, no "
+            f"canonical labels written): {'; '.join(mismatches[:5])}"
+        )
+    rows.sort(key=lambda row: row["sample_id"])
+    confirmed = [row for row in rows if row["label_status"] == "confirmed"]
+    ambiguous = [row for row in rows if row["label_status"] == "ambiguous"]
+    summary = {
+        "total": len(rows),
+        "confirmed": len(confirmed),
+        "ambiguous": len(ambiguous),
+        "confirmed_distribution": {
+            label: sum(1 for row in confirmed if row["normalized_label"] == label)
+            for label in sorted(TAXONOMY_LABELS)
+        },
+        "reviewer_ref": GOLD_AI_REVIEWER_REF,
+        "human_validation_claimed": False,
+        "terminology": (
+            "AI-adjudicated reference labels (Gold-AI), reference-confirmed; "
+            "NOT human ground truth, NOT analyst-validated"
+        ),
+    }
+    return rows, summary
+
+
+def write_labels_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> int:
+    """Write the canonical ``labels.jsonl`` (deterministic, closed schema)."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            )
+            count += 1
+    return count
+
+
+def build_gold_record(
+    manifest_row: NormalizedRecord, label_row: Mapping[str, Any], split: str
+) -> dict[str, Any]:
+    """Closed GoldRecord (docs/contracts.md §2.8): metadata/labels only.
+
+    ``email_sha256`` is the V1 field, obligatorily equal to ``raw_sha256``.
+    Provenance stays truthful: ``reviewer_ref`` carries the real Gold-AI
+    reference; no human validation is claimed anywhere.
+    """
+
+    if label_row["label_status"] != "confirmed":
+        raise GoldValidationError(
+            f"{label_row['sample_id']}: only confirmed rows become GoldRecords"
+        )
+    return {
+        "sample_id": str(manifest_row["sample_id"]),
+        "raw_sha256": str(manifest_row["raw_sha256"]),
+        "email_sha256": str(manifest_row["raw_sha256"]),
+        "raw_path": str(manifest_row["raw_path"]),
+        "source_dataset": str(manifest_row["source_dataset"]),
+        "input_format": str(manifest_row["input_format"]),
+        "normalized_label": label_row["normalized_label"],
+        "label_status": "confirmed",
+        "reviewer_ref": label_row["reviewer_ref"],
+        "label_rationale": label_row["label_rationale"],
+        "public_source": bool(manifest_row["public_source"]),
+        "is_synthetic": manifest_row["is_synthetic"],
+        "campaign_id": manifest_row["campaign_id"],
+        "duplicate_group": str(manifest_row["duplicate_group"]),
+        "family_group": str(manifest_row["family_group"]),
+        "tags": ["gold_ai", "ai_adjudicated", "reference_confirmed"],
+        "split": split,
+    }
+
+
+def build_rag_case(
+    manifest_row: NormalizedRecord,
+    label_row: Mapping[str, Any],
+    text_excerpt: str,
+) -> dict[str, Any]:
+    """Public RAG case source row (docs/contracts.md §2.8). Public only."""
+
+    excerpt = (text_excerpt or "").strip()[:RAG_TEXT_EXCERPT_CHARS]
+    return {
+        "case_id": f"rag_{manifest_row['sample_id']}",
+        "public_source_url": str(manifest_row["source_url"]),
+        "dataset": str(manifest_row["source_dataset"]),
+        "record_sha256": str(manifest_row["raw_sha256"]),
+        "validated_label": label_row["normalized_label"],
+        "analyst_validation_ref": label_row["reviewer_ref"],
+        "campaign_id": manifest_row["campaign_id"],
+        "duplicate_group": str(manifest_row["duplicate_group"]),
+        "family_group": str(manifest_row["family_group"]),
+        "text_excerpt": excerpt,
+        "analyst_rationale": label_row["label_rationale"],
+        "is_public": True,
+        "split": "rag_reference",
+    }
+
+
+def _resolve_checked_raw_path(project_root: Path, raw_path: str) -> Path:
+    """Resolve a manifest ``raw_path`` and refuse anything outside
+    ``corpus/raw/`` (relative to the given project root; symlink resolution
+    included; contracts §2.8)."""
+
+    if not raw_path:
+        raise GoldValidationError("empty raw_path")
+    pure = PurePosixPath(raw_path)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise GoldValidationError(
+            f"raw_path escapes the corpus/raw perimeter: {raw_path!r}"
+        )
+    parts = pure.parts
+    if len(parts) < 3 or parts[0] != "corpus" or parts[1] != "raw":
+        raise GoldValidationError(
+            f"raw_path must live under corpus/raw/**: {raw_path!r}"
+        )
+    root = Path(project_root)
+    archive_ref = raw_path.partition("!")[0]
+    resolved = (root / archive_ref).resolve()
+    raw_root = (root / "corpus" / "raw").resolve()
+    if resolved != raw_root and raw_root not in resolved.parents:
+        raise GoldValidationError(
+            f"raw_path escapes corpus/raw after link resolution: {raw_path!r}"
+        )
+    if not resolved.is_file():
+        raise GoldValidationError(
+            f"raw_path does not resolve to an existing file: {raw_path!r}"
+        )
+    return resolved
+
+
+class _RawLoader:
+    """Root-parameterized raw reader with per-root caches (tar/mbox members
+    are read in place; raw stays immutable)."""
+
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+        self.tar_cache: dict[str, dict[str, bytes]] = {}
+        self.mbox_cache: dict[str, dict[str, bytes]] = {}
+
+    def load(self, raw_path: str, input_format: str) -> bytes:
+        archive_ref, _, member = raw_path.partition("!")
+        archive = _resolve_checked_raw_path(self.project_root, archive_ref)
+        cache_key = str(archive)
+        if not member:
+            return archive.read_bytes()
+        if input_format == "mbox_member":
+            if cache_key not in self.mbox_cache:
+                self.mbox_cache[cache_key] = _read_mbox_members(archive)
+            data = self.mbox_cache[cache_key].get(member, b"")
+        else:
+            if cache_key not in self.tar_cache:
+                self.tar_cache[cache_key] = _read_tar_members(archive)
+            data = self.tar_cache[cache_key].get(member, b"")
+        if not data:
+            raise GoldValidationError(
+                f"raw bytes unresolvable for {raw_path!r} "
+                "(refused/unsafe/oversized member or missing raw file)"
+            )
+        return data
+
+    def verified_bytes(
+        self, sample_id: str, raw_path: str, raw_sha256: str, input_format: str
+    ) -> bytes:
+        data = self.load(raw_path, input_format)
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != raw_sha256:
+            raise GoldValidationError(
+                f"raw_sha256 mismatch for {sample_id}: expected={raw_sha256} "
+                f"actual={actual} ({raw_path}) — fail-closed, no silent sample "
+                "removal"
+            )
+        return data
+
+
+def _body_text_for_excerpt(data: bytes, input_format: str) -> str:
+    """Body text for the public RAG excerpt (headers never included)."""
+
+    parsed = parse_bytes(data, input_format, ParseLimits())
+    if not isinstance(parsed, ParsedEmail):
+        return ""
+    text = "\n".join(part.text for part in parsed.text_parts if part.text)
+    if not text and parsed.html_parts:
+        text = "\n".join(_strip_tags(part.text) for part in parsed.html_parts)
+    return text.strip()
+
+
+def validate_gold_records(
+    rows: Iterable[Mapping[str, Any]], expected_splits: tuple[str, ...]
+) -> None:
+    """Closed-schema + content-key validation of GoldRecords (fail-closed)."""
+
+    for row in rows:
+        where = f"gold[{row.get('sample_id')}]"
+        if set(row.keys()) != set(GOLD_FIELDS):
+            raise GoldValidationError(
+                f"{where}: GoldRecord field mismatch "
+                f"(extra={sorted(set(row) - set(GOLD_FIELDS))}, "
+                f"missing={sorted(set(GOLD_FIELDS) - set(row))})"
+            )
+        content_hits = _iter_forbidden_hits(row, GOLD_CONTENT_KEYS)
+        if content_hits:
+            raise GoldValidationError(
+                f"{where}: forbidden content key(s) {content_hits[:4]}"
+            )
+        if row["label_status"] != "confirmed":
+            raise GoldValidationError(
+                f"{where}: GoldRecord label_status must be confirmed"
+            )
+        if row["normalized_label"] not in TAXONOMY_LABELS:
+            raise GoldValidationError(
+                f"{where}: unsupported normalized_label {row['normalized_label']!r}"
+            )
+        if row["split"] not in expected_splits:
+            raise GoldValidationError(
+                f"{where}: split {row['split']!r} outside {expected_splits}"
+            )
+        if row["email_sha256"] != row["raw_sha256"]:
+            raise GoldValidationError(
+                f"{where}: email_sha256 must equal raw_sha256 (V1 invariant)"
+            )
+        for key in ("raw_sha256", "email_sha256"):
+            value = str(row[key])
+            if len(value) != 64 or value != value.lower():
+                raise GoldValidationError(f"{where}: malformed {key}")
+        if str(row["reviewer_ref"]) != GOLD_AI_REVIEWER_REF:
+            raise GoldValidationError(
+                f"{where}: reviewer_ref must remain {GOLD_AI_REVIEWER_REF!r}"
+            )
+
+
+def validate_rag_cases(rows: Iterable[Mapping[str, Any]]) -> None:
+    """Closed-schema validation of public RAG cases (public only)."""
+
+    for row in rows:
+        case_id = str(row.get("case_id"))
+        where = f"rag[{case_id}]"
+        if set(row.keys()) != set(RAG_FIELDS):
+            raise GoldValidationError(
+                f"{where}: RAG case field mismatch "
+                f"(extra={sorted(set(row) - set(RAG_FIELDS))}, "
+                f"missing={sorted(set(RAG_FIELDS) - set(row))})"
+            )
+        if row["is_public"] is not True:
+            raise GoldValidationError(f"{where}: private_source refused from RAG")
+        if row["split"] != "rag_reference":
+            raise GoldValidationError(f"{where}: split must be rag_reference")
+        if row["validated_label"] not in TAXONOMY_LABELS:
+            raise GoldValidationError(
+                f"{where}: unsupported validated_label {row['validated_label']!r}"
+            )
+        content_hits = [
+            hit
+            for hit in _iter_forbidden_hits(row, GOLD_CONTENT_KEYS)
+            if hit != "$.text_excerpt"
+        ]
+        if content_hits:
+            raise GoldValidationError(
+                f"{where}: forbidden content key(s) {content_hits[:4]}"
+            )
+        if len(str(row["text_excerpt"])) > RAG_TEXT_EXCERPT_CHARS:
+            raise GoldValidationError(f"{where}: text_excerpt exceeds bound")
+
+
+def _class_support(rows: Iterable[Mapping[str, Any]], label_key: str) -> dict[str, int]:
+    counter: dict[str, int] = {label: 0 for label in TAXONOMY_LABELS}
+    for row in rows:
+        label = str(row[label_key])
+        if label in counter:
+            counter[label] += 1
+    return counter
+
+
+def select_gold(
+    manifest_records: Iterable[NormalizedRecord],
+    label_rows: Iterable[Mapping[str, Any]],
+    gold_candidates: Iterable[Mapping[str, Any]],
+    seed: int = 42,
+    project_root: Path | None = None,
+    rag_total: int = RAG_TARGET_TOTAL,
+) -> dict[str, Any]:
+    """Deterministic TICKET-13 SplitPlan over the operator-approved Gold pool.
+
+    Preconditions enforced (fail-closed, before anything is written):
+    - every Gold candidate exists in the canonical labels with
+      ``label_status=confirmed`` and the same ``family_group``/label;
+    - candidate families and sample ids are unique;
+    - raw_path resolves under ``corpus/raw/**`` and ``raw_sha256`` matches the
+      local bytes for every materialized dev and RAG record (mismatch = loud
+      failure, no silent sample removal).
+
+    Order of operations (protocol): reserve RAG first from the eligible
+    confirmed complement (protected pool families excluded, public sources
+    only), then label-stratified dev/test split of the protected pool by
+    ``family_group`` (seed 42). The select command materializes dev records
+    and RAG cases; test records are returned deterministically for the
+    ``freeze`` step, which materializes the internal POC validation
+    partition as metadata-only GoldRecords.
+    """
+
+    if seed != 42:
+        raise GoldValidationError("selection protocol requires seed 42")
+    project_root = Path(project_root) if project_root is not None else PROJECT_ROOT
+    manifest_by_id = {str(record["sample_id"]): record for record in manifest_records}
+    labels = {
+        str(row["sample_id"]): dict(row)
+        for row in label_rows
+    }
+    candidates = [dict(row) for row in gold_candidates]
+
+    # --- protected pool guards ------------------------------------------------
+    pool_samples: set[str] = set()
+    pool_families: set[str] = set()
+    for row in candidates:
+        sample_id = str(row["sample_id"])
+        family = str(row["family_group"])
+        if sample_id in pool_samples or family in pool_families:
+            raise GoldValidationError(
+                f"duplicate Gold candidate sample/family: {sample_id!r}/{family!r}"
+            )
+        label_row = labels.get(sample_id)
+        if label_row is None:
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} absent from canonical labels"
+            )
+        if label_row["label_status"] != "confirmed":
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} is not confirmed in canonical labels"
+            )
+        if str(label_row["normalized_label"]) != str(row["final_label"]):
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} label disagrees with canonical "
+                f"labels ({row['final_label']!r} vs {label_row['normalized_label']!r})"
+            )
+        if str(row["raw_sha256"]) != str(label_row["raw_sha256"]):
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} raw_sha256 disagrees with "
+                f"canonical labels ({row['raw_sha256']!r} vs "
+                f"{label_row['raw_sha256']!r}) — fail-closed"
+            )
+        if str(label_row["family_group"]) != family:
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} family_group disagrees with "
+                "canonical labels"
+            )
+        if sample_id not in manifest_by_id:
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} absent from the manifest"
+            )
+        if str(row["raw_sha256"]) != str(manifest_by_id[sample_id]["raw_sha256"]):
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} raw_sha256 disagrees with the "
+                f"manifest ({row['raw_sha256']!r} vs "
+                f"{manifest_by_id[sample_id]['raw_sha256']!r}) — fail-closed"
+            )
+        pool_samples.add(sample_id)
+        pool_families.add(family)
+
+    # --- eligible confirmed complement for RAG --------------------------------
+    complement: dict[str, dict[str, Any]] = {}
+    refused_private: list[str] = []
+    for sample_id, label_row in labels.items():
+        if sample_id in pool_samples:
+            continue
+        if str(label_row["family_group"]) in pool_families:
+            continue  # protected Gold family — never enters RAG
+        if label_row["label_status"] != "confirmed":
+            continue  # ambiguous rows are excluded from Gold and RAG
+        manifest_row = manifest_by_id.get(sample_id)
+        if manifest_row is None:
+            raise GoldValidationError(
+                f"confirmed sample {sample_id!r} missing from the manifest"
+            )
+        if not manifest_row["public_source"]:
+            refused_private.append(sample_id)
+            continue
+        complement[sample_id] = label_row
+    if refused_private:
+        raise GoldValidationError(
+            "private/non-public confirmed samples refused from the public "
+            f"RAG pool: {sorted(refused_private)[:5]}"
+        )
+
+    # --- RAG reservation: family granularity, one record per family -----------
+    mixed_label_families: set[str] = set()
+    family_to_label: dict[str, str] = {}
+    family_members: dict[str, list[str]] = {}
+    for sample_id, label_row in complement.items():
+        family = str(label_row["family_group"])
+        label = str(label_row["normalized_label"])
+        if family in family_to_label and family_to_label[family] != label:
+            mixed_label_families.add(family)
+            continue
+        family_to_label[family] = label
+        family_members.setdefault(family, []).append(sample_id)
+    for family in mixed_label_families:
+        family_to_label.pop(family, None)
+        family_members.pop(family, None)
+
+    rng = random.Random(seed)
+    rag_families: list[str] = []
+    rag_caps: dict[str, int] = {}
+    for label, cap in RAG_CLASS_CAPS:
+        class_families = sorted(
+            family for family, fam_label in family_to_label.items()
+            if fam_label == label
+        )
+        rng.shuffle(class_families)
+        taken = class_families[:cap]
+        rag_caps[label] = len(taken)
+        rag_families.extend(taken)
+    remaining = rag_total - len(rag_families)
+    if remaining > 0:
+        fill_families = sorted(
+            family for family, fam_label in family_to_label.items()
+            if fam_label == RAG_FILL_CLASS
+        )
+        rng.shuffle(fill_families)
+        taken = fill_families[:remaining]
+        rag_families.extend(taken)
+        rag_caps[RAG_FILL_CLASS] = len(taken)
+    rag_pool_overlap = sorted(set(rag_families) & pool_families)
+    if rag_pool_overlap:
+        raise GoldValidationError(
+            f"protected Gold family entered RAG: {rag_pool_overlap[:5]}"
+        )
+    rag_sample_ids: list[str] = []
+    for family in rag_families:
+        rag_sample = sorted(family_members[family])[0]
+        rag_sample_ids.append(rag_sample)
+    rag_class_support = _class_support(
+        [labels[sample] for sample in rag_sample_ids], "normalized_label"
+    )
+
+    # --- dev/test: label-stratified family split of the protected pool --------
+    dev_samples: list[str] = []
+    test_samples: list[str] = []
+    for label in TAXONOMY_LABELS:
+        class_families = sorted(
+            str(row["family_group"]) for row in candidates
+            if str(row["final_label"]) == label
+        )
+        rng.shuffle(class_families)
+        half = len(class_families) // 2
+        for index, family in enumerate(class_families):
+            member = min(
+                str(row["sample_id"]) for row in candidates
+                if str(row["family_group"]) == family
+            )
+            (dev_samples if index < half else test_samples).append(member)
+    test_class_support = _class_support(
+        [labels[sample] for sample in test_samples], "normalized_label"
+    )
+    dev_class_support = _class_support(
+        [labels[sample] for sample in dev_samples], "normalized_label"
+    )
+
+    # --- raw integrity for everything the build materializes (fail-closed) ----
+    loader = _RawLoader(project_root)
+    for sample_id in sorted(dev_samples + rag_sample_ids):
+        manifest_row = manifest_by_id[sample_id]
+        loader.verified_bytes(
+            sample_id,
+            str(manifest_row["raw_path"]),
+            str(manifest_row["raw_sha256"]),
+            str(manifest_row["input_format"]),
+        )
+    excerpts = {
+        sample_id: _body_text_for_excerpt(
+            loader.verified_bytes(
+                sample_id,
+                str(manifest_by_id[sample_id]["raw_path"]),
+                str(manifest_by_id[sample_id]["raw_sha256"]),
+                str(manifest_by_id[sample_id]["input_format"]),
+            ),
+            str(manifest_by_id[sample_id]["input_format"]),
+        )
+        for sample_id in sorted(rag_sample_ids)
+    }
+
+    rag_cases = [
+        build_rag_case(
+            manifest_by_id[sample], labels[sample], excerpts[sample]
+        )
+        for sample in sorted(rag_sample_ids)
+    ]
+    dev_records = [
+        build_gold_record(manifest_by_id[sample], labels[sample], "dev")
+        for sample in sorted(dev_samples)
+    ]
+    test_records = [
+        build_gold_record(manifest_by_id[sample], labels[sample], "test")
+        for sample in sorted(test_samples)
+    ]
+    validate_gold_records(dev_records, ("dev",))
+    validate_gold_records(test_records, ("test",))
+    validate_rag_cases(rag_cases)
+
+    plan = {
+        "selection_protocol": SELECTION_PROTOCOL,
+        "seed": seed,
+        "reference": {
+            "kind": "gold_ai",
+            "reviewer_ref": GOLD_AI_REVIEWER_REF,
+            "review_method": GOLD_AI_REVIEW_METHOD,
+            "human_validated": False,
+        },
+        "labels": {
+            "confirmed": sum(
+                1 for row in labels.values() if row["label_status"] == "confirmed"
+            ),
+            "ambiguous": sum(
+                1 for row in labels.values() if row["label_status"] == "ambiguous"
+            ),
+        },
+        "pool": {
+            "count": len(candidates),
+            "family_count": len(pool_families),
+            "class_support": _class_support(candidates, "final_label"),
+            "protected": True,
+        },
+        "dev": {
+            "sample_ids": sorted(dev_samples),
+            "record_count": len(dev_samples),
+            "family_count": len({str(labels[s]["family_group"]) for s in dev_samples}),
+            "class_support": dev_class_support,
+        },
+        "test": {
+            # Aggregates ONLY in the plan — the individual test records are
+            # materialized by `freeze` into gold_test.jsonl (internal POC
+            # validation partition; metadata-only).
+            "record_count": len(test_samples),
+            "family_count": len(
+                {str(labels[s]["family_group"]) for s in test_samples}
+            ),
+            "class_support": test_class_support,
+        },
+        "rag": {
+            "count": len(rag_cases),
+            "family_count": len(rag_families),
+            "class_support": rag_class_support,
+            "class_caps": dict(rag_caps),
+            "deficits": {
+                label: max(0, cap - rag_caps[label])
+                for label, cap in RAG_CLASS_CAPS
+            },
+        },
+        "intersections": {
+            "dev_test_families": len(
+                {str(labels[s]["family_group"]) for s in dev_samples}
+                & {str(labels[s]["family_group"]) for s in test_samples}
+            ),
+            "rag_dev_families": len(
+                {str(labels[s]["family_group"]) for s in rag_sample_ids}
+                & {str(labels[s]["family_group"]) for s in dev_samples}
+            ),
+            "rag_test_families": len(
+                {str(labels[s]["family_group"]) for s in rag_sample_ids}
+                & {str(labels[s]["family_group"]) for s in test_samples}
+            ),
+        },
+        "targets_vs_dev": {
+            label: {
+                "target": GOLD_TARGETS[label],
+                "actual": dev_class_support[label],
+                "deficit": max(0, GOLD_TARGETS[label] - dev_class_support[label]),
+            }
+            for label in sorted(TAXONOMY_LABELS)
+        },
+        "limitations": {
+            "menace_reference_support": test_class_support["menace"] + dev_class_support["menace"],
+            "spear_phishing_gold_support": dev_class_support["spear_phishing"] + test_class_support["spear_phishing"],
+            "macro_f1_non_conclusive_if_class_unsupported": True,
+        },
+    }
+    return {
+        "plan": plan,
+        "dev_gold_records": dev_records,
+        "rag_cases": rag_cases,
+        "test_gold_records": test_records,
+    }
+
+
+def _resolve_freeze_destination(destination: str | Path) -> Path:
+    """Resolve the freeze destination (POC simplification, operator
+    amendment 2026-09-20): the internal validation partition
+    ``gold_test.jsonl`` may be materialized inside the build workspace as
+    metadata-only GoldRecord data; only metadata-only closed-schema writes
+    are permitted here, raw bytes stay in ``corpus/raw/**``."""
+
+    return Path(destination).expanduser().resolve()
+
+
+def freeze_test(
+    manifest_records: Iterable[NormalizedRecord],
+    label_rows: Iterable[Mapping[str, Any]],
+    gold_candidates: Iterable[Mapping[str, Any]],
+    destination: str | Path,
+    seed: int = 42,
+    project_root: Path | None = None,
+    created_at: str | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Materialize the sealed test split and return the aggregate seal.
+
+    POC simplification (operator amendment 2026-09-20): the test split is an
+    INTERNAL VALIDATION partition — metadata-only GoldRecord data — and is
+    materialized in the build workspace (e.g. ``corpus/gold``). Reproduces
+    the exact same deterministic split as :func:`select_gold` (same inputs,
+    seed 42), verifies every test record's raw hash, writes
+    ``gold_test.jsonl`` (GoldRecords, split=test) and ``test_seal.json`` into
+    the destination directory, and returns ``(seal, gold_test_path)``. The
+    seal carries aggregates only — never individual test sample ids.
+    """
+
+    if seed != 42:
+        raise GoldValidationError("selection protocol requires seed 42")
+    project_root = Path(project_root) if project_root is not None else PROJECT_ROOT
+    resolved_destination = _resolve_freeze_destination(destination)
+    outcome = select_gold(
+        manifest_records, label_rows, gold_candidates, seed=seed, project_root=project_root
+    )
+    test_records = outcome["test_gold_records"]
+    validate_gold_records(test_records, ("test",))
+
+    # Owner-side integrity: every test record's raw bytes are resolved under
+    # the owner's local raw tree and hash-verified before sealing.
+    loader = _RawLoader(project_root)
+    for record in test_records:
+        loader.verified_bytes(
+            str(record["sample_id"]),
+            str(record["raw_path"]),
+            str(record["raw_sha256"]),
+            str(record["input_format"]),
+        )
+
+    resolved_destination.mkdir(parents=True, exist_ok=True)
+    gold_bytes = (
+        "\n".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True)
+            for row in test_records
+        )
+        + ("\n" if test_records else "")
+    ).encode("utf-8")
+    gold_test_path = resolved_destination / "gold_test.jsonl"
+    gold_test_path.write_bytes(gold_bytes)
+    digest = hashlib.sha256(gold_bytes).hexdigest()
+    seal = {
+        "version": SEAL_VERSION,
+        "split": "test",
+        "record_count": len(test_records),
+        "family_count": len({str(row["family_group"]) for row in test_records}),
+        "label_support": _class_support(test_records, "normalized_label"),
+        "seed": seed,
+        "gold_test_sha256": digest,
+        "selection_protocol": SELECTION_PROTOCOL,
+        "created_at": created_at
+        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reference_method": GOLD_AI_REVIEW_METHOD,
+        "reviewer_ref": GOLD_AI_REVIEWER_REF,
+        "human_validated": False,
+    }
+    seal_out_path = resolved_destination / "test_seal.json"
+    seal_out_path.write_text(
+        json.dumps(seal, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return seal, gold_test_path
+
+
+def validate_test_seal(
+    seal_path: Path, expected: Mapping[str, Any]
+) -> list[str]:
+    """Validate the external test seal schema and aggregates WITHOUT opening
+    ``gold_test``. Returns a list of violations (empty = valid)."""
+
+    if not seal_path.is_file():
+        return [f"test seal missing: {seal_path}"]
+    try:
+        seal = json.loads(seal_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"test seal is not valid JSON: {exc}"]
+    errors: list[str] = []
+    for key in SEAL_REQUIRED_KEYS:
+        if key not in seal:
+            errors.append(f"missing key {key!r}")
+    if errors:
+        return errors
+    if seal["version"] != SEAL_VERSION:
+        errors.append(f"unexpected version {seal['version']!r}")
+    if seal["split"] != "test":
+        errors.append(f"split must be 'test', got {seal['split']!r}")
+    if seal["seed"] != 42:
+        errors.append("seed must be 42")
+    if seal["human_validated"] is not False:
+        errors.append("human_validated must remain false (Gold-AI reference)")
+    if seal["reviewer_ref"] != GOLD_AI_REVIEWER_REF:
+        errors.append(
+            f"reviewer_ref must remain {GOLD_AI_REVIEWER_REF!r}"
+        )
+    if seal["reference_method"] != GOLD_AI_REVIEW_METHOD:
+        errors.append(
+            f"reference_method must remain {GOLD_AI_REVIEW_METHOD!r}"
+        )
+    if seal["selection_protocol"] != SELECTION_PROTOCOL:
+        errors.append("selection_protocol mismatch")
+    digest = str(seal["gold_test_sha256"])
+    if len(digest) != 64 or digest != digest.lower():
+        errors.append("gold_test_sha256 must be a lowercase SHA-256 hex digest")
+    if not isinstance(seal["record_count"], int) or isinstance(seal["record_count"], bool):
+        errors.append("record_count must be an integer")
+    if not isinstance(seal["label_support"], dict):
+        errors.append("label_support must be an object")
+    if errors:
+        return errors
+    support = seal["label_support"]
+    for label, value in support.items():
+        if label not in TAXONOMY_LABELS:
+            errors.append(f"unknown label {label!r} in label_support")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            errors.append(f"label_support[{label!r}] must be a non-negative integer")
+    if sum(int(v) for v in support.values()) != seal["record_count"]:
+        errors.append("label_support does not sum to record_count")
+    if not (
+        isinstance(seal["family_count"], int)
+        and not isinstance(seal["family_count"], bool)
+    ) or seal["family_count"] < 0:
+        errors.append("family_count must be a non-negative integer")
+    elif seal["family_count"] > seal["record_count"]:
+        errors.append("family_count exceeds record_count")
+    # Aggregate consistency against the build-side recomputation.
+    expected_support = (
+        expected.get("label_support")
+        or expected.get("class_support")
+        or {}
+    )
+    if seal["record_count"] != expected.get("record_count"):
+        errors.append(
+            f"record_count disagrees with the build-side plan "
+            f"({seal['record_count']} vs {expected.get('record_count')})"
+        )
+    if seal["family_count"] != expected.get("family_count"):
+        errors.append(
+            f"family_count disagrees with the build-side plan "
+            f"({seal['family_count']} vs {expected.get('family_count')})"
+        )
+    if dict(support) != dict(expected_support):
+        errors.append(
+            "label_support disagrees with the build-side plan "
+            f"({support} vs {expected_support})"
+        )
+    return errors
+
+
+def _t13_input_path(raw: str | Path) -> Path:
+    path = Path(raw)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def cmd_labels(args: argparse.Namespace) -> int:
+    """Deterministic conversion: operator-approved AI adjudication ->
+    canonical ``corpus/review/labels.jsonl`` (format conversion only)."""
+
+    adjudication_path = _t13_input_path(args.adjudication)
+    adjudication = load_adjudication(adjudication_path)
+    manifest = read_manifest(_t13_input_path(args.manifest))
+    template_path = _t13_input_path(args.template)
+    template_rows = [
+        json.loads(line)
+        for line in template_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not template_rows:
+        print(f"FAIL: empty review template {template_path}", file=sys.stderr)
+        return 2
+    try:
+        rows, summary = build_canonical_labels(adjudication, manifest, template_rows)
+    except GoldValidationError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    out_path = _t13_input_path(args.out)
+    count = write_labels_jsonl(out_path, rows)
+
+    audit_dir = PROJECT_ROOT / "runs" / "tickets" / "TICKET-13"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    summary.update(
+        {
+            "command": "labels",
+            "adjudication_path": str(adjudication_path),
+            "adjudication_sha256": _file_sha256(adjudication_path),
+            "out_path": str(out_path),
+            "out_sha256": _file_sha256(out_path),
+            "row_count": count,
+            "format_conversion_only": True,
+            "new_semantic_labeling_by_agent": False,
+        }
+    )
+    (audit_dir / "labels_import.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(
+        f"labels: {summary['total']} canonical rows "
+        f"({summary['confirmed']} confirmed, {summary['ambiguous']} ambiguous; "
+        f"reviewer_ref={GOLD_AI_REVIEWER_REF}; human validation claimed: none)"
+    )
+    return 0
+
+
+def cmd_select(args: argparse.Namespace) -> int:
+    """Deterministic SplitPlan: RAG reservation + dev materialization +
+    test aggregates. Never writes a test split or a seal."""
+
+    try:
+        outcome = select_gold(
+            read_manifest(_t13_input_path(args.manifest)),
+            list(load_canonical_labels(_t13_input_path(args.labels)).values()),
+            load_gold_candidates(
+                _t13_input_path(args.gold_candidates),
+                adjudication=load_adjudication(_t13_input_path(args.adjudication)),
+            ),
+            seed=int(args.seed),
+        )
+    except GoldValidationError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    plan = outcome["plan"]
+    plan_path = _t13_input_path(args.plan_out)
+    gold_dev_path = _t13_input_path(args.gold_dev)
+    rag_path = _t13_input_path(args.rag_out)
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    gold_dev_path.parent.mkdir(parents=True, exist_ok=True)
+    rag_path.parent.mkdir(parents=True, exist_ok=True)
+    write_labels_jsonl(gold_dev_path, outcome["dev_gold_records"])
+    write_labels_jsonl(rag_path, outcome["rag_cases"])
+    plan_path.write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    audit_dir = PROJECT_ROOT / "runs" / "tickets" / "TICKET-13"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    pool_path = _t13_input_path(args.gold_candidates)
+    receipt = {
+        "command": "select",
+        "seed": int(args.seed),
+        "selection_protocol": SELECTION_PROTOCOL,
+        "inputs": {
+            "manifest": str(args.manifest),
+            "labels": str(_t13_input_path(args.labels)),
+            "labels_sha256": _file_sha256(_t13_input_path(args.labels)),
+            "gold_candidates": str(pool_path),
+            "gold_candidates_sha256": _file_sha256(pool_path),
+        },
+        "gold_dev_path": str(gold_dev_path),
+        "public_cases_path": str(rag_path),
+        "split_plan_path": str(plan_path),
+        "dev": plan["dev"],
+        "test_aggregates": plan["test"],
+        "rag": plan["rag"],
+        "intersections": plan["intersections"],
+        "limitations": plan["limitations"],
+        "test_split": "materialized by freeze as an internal POC validation "
+        "partition (metadata-only; not an independent holdout — POC "
+        "simplification amendment 2026-09-20)",
+    }
+    (audit_dir / "select.json").write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    rag = plan["rag"]
+    print(
+        f"select: dev={plan['dev']['record_count']} "
+        f"(families={plan['dev']['family_count']}), "
+        f"test aggregate={plan['test']['record_count']} (families="
+        f"{plan['test']['family_count']}, aggregates only), "
+        f"RAG={rag['count']} (families={rag['family_count']}, "
+        f"support={rag['class_support']}); intersections empty: "
+        f"{all(value == 0 for value in plan['intersections'].values())}"
+    )
+    return 0
+
+
+def cmd_freeze(args: argparse.Namespace) -> int:
+    """Materialize the internal validation partition and its seal."""
+
+    try:
+        seal, gold_test_path = freeze_test(
+            read_manifest(_t13_input_path(args.manifest)),
+            list(load_canonical_labels(_t13_input_path(args.labels)).values()),
+            load_gold_candidates(
+                _t13_input_path(args.gold_candidates),
+                adjudication=load_adjudication(_t13_input_path(args.adjudication)),
+            ),
+            destination=args.destination,
+            seed=int(args.seed),
+        )
+    except GoldValidationError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"freeze: gold_test.jsonl written to {gold_test_path} "
+        f"(record_count={seal['record_count']}, family_count="
+        f"{seal['family_count']}, gold_test_sha256="
+        f"{seal['gold_test_sha256'][:12]}…); seal at {gold_test_path.parent / 'test_seal.json'}"
+    )
+    return 0
+
+
+def cmd_verify_splits(args: argparse.Namespace) -> int:
+    """Re-derive the plan and compare it with the materialized artifacts
+    (gold_dev, public_cases, gold_test, split plan); validate the test seal
+    (schema, aggregates, gold_test.jsonl bytes match)."""
+
+    try:
+        outcome = select_gold(
+            read_manifest(_t13_input_path(args.manifest)),
+            list(load_canonical_labels(_t13_input_path(args.labels)).values()),
+            load_gold_candidates(
+                _t13_input_path(args.gold_candidates),
+                adjudication=load_adjudication(_t13_input_path(args.adjudication)),
+            ),
+            seed=int(args.seed),
+        )
+    except GoldValidationError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
+    plan = outcome["plan"]
+    problems: list[str] = []
+
+    plan_path = _t13_input_path(args.plan_out)
+    if not plan_path.is_file():
+        problems.append(f"split plan missing: {plan_path}")
+    else:
+        on_disk = json.loads(plan_path.read_text(encoding="utf-8"))
+        if on_disk != plan:
+            problems.append("split_plan.json does not match the recomputation")
+
+    gold_dev_path = _t13_input_path(args.gold_dev)
+    if not gold_dev_path.is_file():
+        problems.append(f"gold_dev.jsonl missing: {gold_dev_path}")
+    else:
+        dev_rows = [
+            json.loads(line)
+            for line in gold_dev_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if dev_rows != outcome["dev_gold_records"]:
+            problems.append("gold_dev.jsonl does not match the recomputation")
+
+    rag_path = _t13_input_path(args.rag_in)
+    if not rag_path.is_file():
+        problems.append(f"public_cases.jsonl missing: {rag_path}")
+    else:
+        rag_rows = [
+            json.loads(line)
+            for line in rag_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if rag_rows != outcome["rag_cases"]:
+            problems.append("public_cases.jsonl does not match the recomputation")
+
+    intersection_errors = [
+        f"family intersection {name}={value} is not empty"
+        for name, value in plan["intersections"].items()
+        if value != 0
+    ]
+    problems.extend(intersection_errors)
+
+    gold_test_path = PROJECT_ROOT / "corpus" / "gold" / "gold_test.jsonl"
+    seal_path = _t13_input_path(args.seal)
+    if not gold_test_path.is_file():
+        problems.append(
+            f"internal validation partition missing: {gold_test_path} — run "
+            "the freeze step (POC simplification amendment)"
+        )
+    else:
+        test_rows = [
+            json.loads(line)
+            for line in gold_test_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        try:
+            validate_gold_records(test_rows, ("test",))
+        except GoldValidationError as exc:
+            problems.append(f"gold_test.jsonl invalid: {exc}")
+        if test_rows != outcome["test_gold_records"]:
+            problems.append(
+                "gold_test.jsonl does not match the recomputed deterministic split"
+            )
+        digest = hashlib.sha256(gold_test_path.read_bytes()).hexdigest()
+        if seal_path.is_file():
+            seal = json.loads(seal_path.read_text(encoding="utf-8"))
+            if str(seal.get("gold_test_sha256")) != digest:
+                problems.append(
+                    "test seal gold_test_sha256 does not match the "
+                    "gold_test.jsonl bytes on disk"
+                )
+
+    seal_path = _t13_input_path(args.seal)
+    if not seal_path.is_file():
+        problems.append(
+            f"test seal missing: {seal_path} — run the freeze step"
+        )
+    else:
+        seal_errors = validate_test_seal(seal_path, plan["test"])
+        problems.extend(f"test seal: {error}" for error in seal_errors)
+        seal_note = (
+            "test seal validated (schema + aggregates + gold_test.jsonl "
+            "bytes match); internal validation partition materialized per "
+            "the POC simplification amendment"
+        )
+
+    audit_dir = PROJECT_ROOT / "runs" / "tickets" / "TICKET-13"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "command": "verify-splits",
+        "seed": int(args.seed),
+        "problems": problems,
+        "intersections": plan["intersections"],
+        "dev": {"record_count": plan["dev"]["record_count"], "class_support": plan["dev"]["class_support"]},
+        "rag": {"record_count": plan["rag"]["count"], "class_support": plan["rag"]["class_support"]},
+        "test_aggregates": plan["test"],
+        "seal_validated": seal_path.is_file() and not any(
+            error.startswith("test seal") for error in problems
+        ),
+        "status_note": seal_note,
+        "gold_test_partition": "internal POC validation partition (metadata-only; "
+        "not an independent holdout — POC simplification amendment 2026-09-20)",
+    }
+    (audit_dir / "verify_splits.json").write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    if problems:
+        for problem in problems:
+            print(f"FAIL: {problem}", file=sys.stderr)
+        return 1
+    print(
+        f"verify-splits: plan reproduced exactly; dev={plan['dev']['record_count']}, "
+        f"RAG={plan['rag']['count']}, test aggregate={plan['test']['record_count']}; "
+        f"{seal_note}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Corpus build/inspect/dedupe CLI (TICKET-12)")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1336,6 +2918,60 @@ def main(argv: list[str] | None = None) -> int:
     dedupe_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     dedupe_parser.add_argument("--seed", type=int, default=42)
     dedupe_parser.set_defaults(func=cmd_dedupe)
+
+    # --- TICKET-13 (G6): Gold-AI reference partitions -------------------------
+
+    labels_parser = subparsers.add_parser(
+        "labels",
+        help="deterministic conversion: operator AI adjudication -> canonical labels.jsonl",
+    )
+    labels_parser.add_argument("--adjudication", required=True)
+    labels_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
+    labels_parser.add_argument("--template", default=str(LABELS_TEMPLATE_PATH))
+    labels_parser.add_argument("--out", default=str(LABELS_PATH))
+    labels_parser.set_defaults(func=cmd_labels)
+
+    select_parser = subparsers.add_parser(
+        "select",
+        help="TICKET-13 SplitPlan: RAG reservation + dev gold + test aggregates",
+    )
+    select_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
+    select_parser.add_argument("--labels", default=str(LABELS_PATH))
+    select_parser.add_argument("--adjudication", required=True)
+    select_parser.add_argument("--gold-candidates", required=True)
+    select_parser.add_argument("--seed", type=int, default=42)
+    select_parser.add_argument("--gold-dev", default=str(GOLD_DEV_PATH))
+    select_parser.add_argument("--rag-out", default=str(PUBLIC_CASES_PATH))
+    select_parser.add_argument("--plan-out", default=str(SPLIT_PLAN_PATH))
+    select_parser.set_defaults(func=cmd_select)
+
+    freeze_parser = subparsers.add_parser(
+        "freeze",
+        help="materialize gold_test.jsonl (metadata-only) + test_seal.json "
+        "(internal validation partition per the POC simplification amendment)",
+    )
+    freeze_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
+    freeze_parser.add_argument("--labels", default=str(LABELS_PATH))
+    freeze_parser.add_argument("--adjudication", required=True)
+    freeze_parser.add_argument("--gold-candidates", required=True)
+    freeze_parser.add_argument("--destination", default="corpus/gold")
+    freeze_parser.add_argument("--seed", type=int, default=42)
+    freeze_parser.set_defaults(func=cmd_freeze)
+
+    verify_parser = subparsers.add_parser(
+        "verify-splits",
+        help="reproduce the plan, compare artifacts, validate the external seal",
+    )
+    verify_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
+    verify_parser.add_argument("--labels", default=str(LABELS_PATH))
+    verify_parser.add_argument("--adjudication", required=True)
+    verify_parser.add_argument("--gold-candidates", required=True)
+    verify_parser.add_argument("--seed", type=int, default=42)
+    verify_parser.add_argument("--gold-dev", default=str(GOLD_DEV_PATH))
+    verify_parser.add_argument("--rag-in", default=str(PUBLIC_CASES_PATH))
+    verify_parser.add_argument("--plan-out", default=str(SPLIT_PLAN_PATH))
+    verify_parser.add_argument("--seal", default=str(TEST_SEAL_PATH))
+    verify_parser.set_defaults(func=cmd_verify_splits)
 
     args = parser.parse_args(argv)
     return args.func(args)
