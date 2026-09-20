@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-09-20T20:44:50Z",
+  "family_count": 83,
+  "gold_test_sha256": "bf1ccc1e8094dac15542cd26324ef57e3f1f7c23873e0e92ab7c6fb851f8e242",
+  "human_validated": false,
+  "label_support": {
+    "fraude": 15,
+    "legitime": 20,
+    "menace": 0,
+    "phishing": 25,
+    "spam": 15,
+    "spear_phishing": 8
+  },
+  "record_count": 83,
+  "reference_method": "independent_dual_model_ai_adjudication",
+  "reviewer_ref": "astra_gold_ai_v1",
+  "seed": 42,
+  "selection_protocol": "gold_ai_operator_amendment_2026_09_20: RAG families reserved first from the eligible confirmed complement (protected operator Gold candidate pool families excluded), then label-stratified dev/test split of the protected pool by family_group, seed 42; family-granular, one record per family in RAG; no confidence value is ever used as a selection or easy-case filter; deficits stay visible, never filled.",
+  "split": "test",
+  "version": "t13-gold-seal-1"
+}

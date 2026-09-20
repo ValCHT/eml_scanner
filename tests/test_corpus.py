@@ -748,3 +748,608 @@ def test_labels_template_has_no_content_and_no_labels(tmp_path: Path):
     assert row["label_status"] == "unreviewed"
     assert row["reviewer_ref"] is None
     assert row["label_rationale"] is None
+
+
+# ---------------------------------------------------------------------------
+# TICKET-13 (G6): Gold-AI reference partitions — operator-approved amendment.
+# Synthetic fixtures only (tempfile); the real-corpus pipeline is exercised by
+# the ticket's validation commands, never by fabricating records.
+# ---------------------------------------------------------------------------
+
+GOLD_AI_REVIEWER_REF = "astra_gold_ai_v1"
+GOLD_AI_REVIEW_METHOD = "independent_dual_model_ai_adjudication"
+
+
+def _t13_case(
+    tmp_path: Path,
+    index: int,
+    label: str | None,
+    *,
+    dataset: str = "t13dataset",
+    raw: bytes | None = None,
+    body: str | None = None,
+    family: str | None = None,
+) -> tuple[bc.NormalizedRecord, dict, dict]:
+    """One synthetic corpus case: raw file under tmp_path/corpus/raw, manifest
+    record, canonical label row and an operator-protocol adjudication row."""
+
+    label = label or None
+    body = body if body is not None else (
+        f"Case {index}: distinct synthetic body text for scenario {label} "
+        f"carrying the unique marker zebra-{index} for isolation."
+    )
+    raw = raw if raw is not None else _eml_bytes(
+        subject=f"T13 case {index}",
+        body=body,
+        message_id=f"<t13-{index}@example.com>",
+    )
+    raw_dir = tmp_path / "corpus" / "raw" / "t13"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / f"{index}.eml").write_bytes(raw)
+    raw_path = f"corpus/raw/t13/{index}.eml"
+    raw_sha = hashlib.sha256(raw).hexdigest()
+    text = bc.normalize_fingerprint_text(body)
+    family = family or f"fam:t13_{index:04d}"
+    record = bc.NormalizedRecord(
+        sample_id=f"t13_{index:04d}",
+        source_id=f"src_t13_{index:04d}",
+        source_dataset=dataset,
+        source_subset="t13",
+        source_record_id=str(index),
+        source_url="https://example.org/t13",
+        public_source=True,
+        raw_path=raw_path,
+        raw_sha256=raw_sha,
+        input_format="rfc822",
+        original_label="ham",
+        normalized_label=None,
+        label_status="unreviewed",
+        reviewer_ref=None,
+        label_rationale=None,
+        header_integrity="original",
+        header_presence={field: True for field in bc.HEADER_PRESENCE_FIELDS},
+        has_full_headers=True,
+        has_received=True,
+        has_authentication_results=True,
+        has_text=True,
+        has_html=False,
+        has_urls=False,
+        has_attachments=False,
+        has_images=False,
+        has_original_attachment_bytes=False,
+        attachment_representation="absent",
+        is_synthetic=None,
+        campaign_id=None,
+        body_sha256=bc.fingerprint_from_text(text),
+        duplicate_group=f"dup:t13_{index:04d}",
+        family_group=family,
+        split="candidate",
+        transformation_notes="",
+        notes="",
+        body_text=text,
+    )
+    template_row = {
+        "sample_id": record["sample_id"],
+        "source_dataset": dataset,
+        "source_record_id": str(index),
+        "raw_sha256": raw_sha,
+        "raw_path": raw_path,
+        "original_label": "ham",
+        "normalized_label": None,
+        "candidate_label": None,
+        "label_status": "unreviewed",
+        "reviewer_ref": None,
+        "label_rationale": None,
+        "duplicate_group": family.replace("fam:", "dup:"),
+        "family_group": family,
+        "notes": "",
+    }
+    label_row = {
+        "sample_id": record["sample_id"],
+        "source_dataset": dataset,
+        "source_record_id": str(index),
+        "raw_sha256": raw_sha,
+        "raw_path": raw_path,
+        "original_label": "ham",
+        "normalized_label": label,
+        "candidate_label": None,
+        "label_status": "confirmed" if label else "ambiguous",
+        "reviewer_ref": GOLD_AI_REVIEWER_REF,
+        "label_rationale": (
+            "AI-adjudicated POC reference (Gold-AI); provenance retained in "
+            "TICKET-13 audit artefact."
+        ),
+        "duplicate_group": family.replace("fam:", "dup:"),
+        "family_group": family,
+        "notes": "",
+    }
+    adjudication_row = {
+        "sample_id": record["sample_id"],
+        "raw_sha256": raw_sha,
+        "family_group": family,
+        "silver_label": "phishing",
+        "astra_independent_label": label,
+        "agreement": "AGREE" if label else "BOTH_AMBIGUOUS",
+        "final_label": label,
+        "final_status": "ai_adjudicated" if label else "ambiguous",
+        "adjudication_reason": "analytic, content-free",
+        "reviewer_ref": GOLD_AI_REVIEWER_REF,
+        "review_method": GOLD_AI_REVIEW_METHOD,
+        "human_validated": False,
+    }
+    return record, label_row, adjudication_row
+
+
+def _t13_write_labels(tmp_path: Path, label_rows: list[dict]) -> Path:
+    path = tmp_path / "corpus" / "review" / "labels.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in label_rows
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _t13_write_pool(path: Path, rows: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_goldai_protocol_row_accepted_and_rejected(tmp_path: Path):
+    record, _, adjudication_row = _t13_case(tmp_path, 1, "phishing")
+    manifest_path = tmp_path / "manifest.parquet"
+    bc._pq().write_table(bc.build_manifest([record]), manifest_path)
+    adjudication_path = tmp_path / "adj.jsonl"
+    _t13_write_pool(adjudication_path, [adjudication_row])
+    loaded = bc.load_adjudication(adjudication_path)
+    assert set(loaded) == {"t13_0001"}
+
+    # unsupported final_label is rejected
+    bad = dict(adjudication_row, final_label="unknown_class")
+    _t13_write_pool(adjudication_path, [bad])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_adjudication(adjudication_path)
+
+    # final_status outside the approved protocol is rejected
+    _t13_write_pool(adjudication_path, [dict(adjudication_row, final_status="silver_only")])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_adjudication(adjudication_path)
+
+    # raw_sha256 missing on an ai_adjudicated row is rejected
+    _t13_write_pool(adjudication_path, [dict(adjudication_row, raw_sha256="")])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_adjudication(adjudication_path)
+
+    # human_validated must stay explicitly false (never rewritten)
+    for wrong in (True, None, "false"):
+        _t13_write_pool(adjudication_path, [dict(adjudication_row, human_validated=wrong)])
+        with pytest.raises(bc.GoldValidationError):
+            bc.load_adjudication(adjudication_path)
+
+    # reviewer_ref stays the real Gold-AI reference
+    _t13_write_pool(adjudication_path, [dict(adjudication_row, reviewer_ref="human_senior_analyst")])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_adjudication(adjudication_path)
+
+
+def test_goldai_canonical_rows_cannot_claim_human_validation(tmp_path: Path):
+    record, label_row, adjudication_row = _t13_case(tmp_path, 2, "legitime")
+    rows, summary = bc.build_canonical_labels(
+        {"t13_0002": adjudication_row}, [record], [dict(label_row, normalized_label=None,
+         label_status="unreviewed", reviewer_ref=None, label_rationale=None)]
+    )
+    assert summary["human_validation_claimed"] is False
+    assert rows[0]["reviewer_ref"] == GOLD_AI_REVIEWER_REF
+    assert rows[0]["label_status"] == "confirmed"
+    assert "human" not in rows[0]["label_rationale"].lower()
+    # the canonical schema is closed: a human_validated key is structurally refused
+    polluted = dict(rows[0], human_validated=True)
+    with pytest.raises(bc.GoldValidationError):
+        bc._validate_canonical_label_row(polluted, "canonical-label-row")
+
+
+def test_goldai_join_requires_exact_equality(tmp_path: Path):
+    record, _, adjudication_row = _t13_case(tmp_path, 3, "spam")
+    template_row = dict(
+        _t13_case(tmp_path, 3, "spam")[1],
+        raw_sha256=adjudication_row["raw_sha256"],
+        family_group=adjudication_row["family_group"],
+    )
+
+    # sample missing from manifest/template
+    other_record, _, _ = _t13_case(tmp_path, 4, "spam")
+    with pytest.raises(bc.GoldValidationError):
+        bc.build_canonical_labels(adjudication={other_record["sample_id"]: adjudication_row},
+                                  manifest_records=[record], template_rows=[template_row])
+
+    # raw_sha256 mismatch between adjudication and manifest/template
+    tampered = dict(adjudication_row, raw_sha256="0" * 64)
+    with pytest.raises(bc.GoldValidationError):
+        bc.build_canonical_labels(adjudication={record["sample_id"]: tampered},
+                                  manifest_records=[record], template_rows=[template_row])
+
+    # family_group mismatch between adjudication and manifest/template
+    tampered = dict(adjudication_row, family_group="fam:somewhere_else")
+    with pytest.raises(bc.GoldValidationError):
+        bc.build_canonical_labels(adjudication={record["sample_id"]: tampered},
+                                  manifest_records=[record], template_rows=[template_row])
+
+    # the good join succeeds and is deterministic (input row order is irrelevant)
+    rows_one, _ = bc.build_canonical_labels({record["sample_id"]: adjudication_row},
+                                            [record], [template_row])
+    rows_two, _ = bc.build_canonical_labels({record["sample_id"]: adjudication_row},
+                                            [record], [template_row])
+    assert rows_one == rows_two
+
+
+def _t13_build_scenario(tmp_path: Path, counts: dict[str, int]):
+    records, labels_rows, adjudication_rows, pool_rows = [], [], [], []
+    index = 0
+    for label, count in counts.items():
+        for _ in range(count):
+            index += 1
+            record, label_row, adjudication_row = _t13_case(tmp_path, index, label)
+            records.append(record)
+            labels_rows.append(label_row)
+            adjudication_rows.append(adjudication_row)
+            pool_rows.append(adjudication_row)
+    return {
+        "records": records,
+        "labels_rows": labels_rows,
+        "adjudication_rows": adjudication_rows,
+        "pool_rows": pool_rows,
+        "labels_path": _t13_write_labels(tmp_path, labels_rows),
+        "pool_path": _t13_write_pool(tmp_path / "pool.jsonl", pool_rows),
+    }
+
+
+def test_goldai_pool_guards(tmp_path: Path):
+    scenario = _t13_build_scenario(
+        tmp_path,
+        {"phishing": 2, "legitime": 2, "fraude": 1, "spam": 1},
+    )
+    adjudication = bc.load_adjudication  # reference only; pool guards tested directly
+    pool_rows = scenario["pool_rows"]
+
+    # duplicate Gold candidate sample is rejected
+    path = _t13_write_pool(tmp_path / "pool_dup_sample.jsonl", [pool_rows[0], pool_rows[0]])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_gold_candidates(path)
+
+    # duplicate Gold candidate family is rejected
+    duplicated_family = dict(pool_rows[1], sample_id="t13_9999")
+    path = _t13_write_pool(
+        tmp_path / "pool_dup_family.jsonl", [pool_rows[1], duplicated_family]
+    )
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_gold_candidates(path)
+
+    # Gold candidate absent from the full adjudication is rejected
+    stranger = dict(pool_rows[0], sample_id="t13_absent")
+    adjudication_map = bc.load_adjudication(
+        _t13_write_pool(tmp_path / "adj.jsonl", scenario["adjudication_rows"])
+    )
+    path = _t13_write_pool(tmp_path / "pool_stranger.jsonl", [stranger])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_gold_candidates(path, adjudication=adjudication_map)
+
+    # provenance disagreement with the adjudication artefact is rejected
+    wrong_raw = dict(pool_rows[0], raw_sha256="1" * 64)
+    path = _t13_write_pool(tmp_path / "pool_wrong_raw.jsonl", [wrong_raw])
+    with pytest.raises(bc.GoldValidationError):
+        bc.load_gold_candidates(path, adjudication_map)
+
+
+def test_goldai_select_intersections_ambiguity_and_support(tmp_path: Path):
+    scenario = _t13_build_scenario(
+        tmp_path,
+        {"phishing": 4, "legitime": 4, "fraude": 2, "spam": 2, "menace": 0},
+    )
+    # two ambiguous records, excluded from Gold and RAG
+    _, ambiguous_label_row, ambiguous_adjudication_row = _t13_case(
+        tmp_path, 900, None
+    )
+    labels_path = _t13_write_labels(
+        tmp_path, scenario["labels_rows"] + [ambiguous_label_row]
+    )
+    outcome = bc.select_gold(
+        scenario["records"],
+        scenario["labels_rows"] + [ambiguous_label_row],
+        scenario["pool_rows"],
+        seed=42,
+        project_root=tmp_path,
+    )
+    plan = outcome["plan"]
+    dev_ids = set(plan["dev"]["sample_ids"])
+    rag_ids = {row["sample_id"] for row in outcome["rag_cases"]}
+    ambiguous_id = ambiguous_label_row["sample_id"]
+    assert ambiguous_id not in dev_ids
+    assert ambiguous_id not in rag_ids
+
+    # family intersections are empty (dev/test/rag)
+    dev_families = {str(row["family_group"]) for row in outcome["dev_gold_records"]}
+    test_families = {
+        str(row["family_group"]) for row in outcome["test_gold_records"]
+    }
+    rag_families = {str(row["family_group"]) for row in outcome["rag_cases"]}
+    assert not (dev_families & test_families)
+    assert not (rag_families & dev_families)
+    assert not (rag_families & test_families)
+    assert all(value == 0 for value in plan["intersections"].values())
+
+    # protected pool families never enter RAG
+    pool_families = {str(row["family_group"]) for row in scenario["pool_rows"]}
+    assert not (rag_families & pool_families)
+
+    # menace stays unsupported rather than fabricated
+    assert plan["dev"]["class_support"]["menace"] == 0
+    assert plan["test"]["class_support"]["menace"] == 0
+    assert plan["rag"]["class_support"]["menace"] == 0
+    assert plan["limitations"]["menace_reference_support"] == 0
+
+    # dev/test halves of an even pool (2 per class -> 1/1)
+    assert plan["dev"]["record_count"] == plan["test"]["record_count"]
+    assert plan["dev"]["class_support"] == plan["test"]["class_support"]
+
+
+def test_goldai_rag_reservation_from_complement(tmp_path: Path):
+    # pool: 1 phishing candidate; complement: 2 legitime + 1 phishing + 1 fraude
+    records, labels_rows, adjudication_rows, pool_rows = [], [], [], []
+    pool_member, _, pool_adjudication = _t13_case(tmp_path, 10, "phishing")
+    records.append(pool_member)
+    adjudication_rows.append(pool_adjudication)
+    pool_rows.append(pool_adjudication)
+    labels_rows.append(
+        dict(
+            _t13_case(tmp_path, 10, "phishing")[1],
+            label_status="confirmed",
+            normalized_label="phishing",
+            reviewer_ref=GOLD_AI_REVIEWER_REF,
+        )
+    )
+    for index, label in ((11, "legitime"), (12, "legitime"), (13, "phishing"), (14, "fraude")):
+        record, label_row, adjudication_row = _t13_case(tmp_path, index, label)
+        records.append(record)
+        labels_rows.append(label_row)
+        adjudication_rows.append(adjudication_row)
+    outcome = bc.select_gold(
+        records, labels_rows, [pool_adjudication], seed=42, project_root=tmp_path,
+    )
+    rag_case_ids = {row["case_id"] for row in outcome["rag_cases"]}
+    pool_family = str(pool_adjudication["family_group"])
+    rag_families = {str(row["family_group"]) for row in outcome["rag_cases"]}
+    # protected family never enters RAG, even though a same-family sample exists
+    assert pool_family not in rag_families
+    assert "rag_t13_0010" not in rag_case_ids
+    # complement families fill RAG deterministically
+    assert len(rag_case_ids) == 4  # every complement family selected (under cap 150)
+    assert rag_families == {f"fam:t13_{i:04d}" for i in (11, 12, 13, 14)}
+
+
+def test_goldai_select_reproducible_and_confidence_agnostic(tmp_path: Path):
+    scenario = _t13_build_scenario(
+        tmp_path,
+        {"phishing": 4, "legitime": 4, "fraude": 2, "spam": 2},
+    )
+    outcome_one = bc.select_gold(
+        scenario["records"], scenario["labels_rows"], scenario["pool_rows"],
+        seed=42, project_root=tmp_path,
+    )
+    outcome_two = bc.select_gold(
+        scenario["records"], scenario["labels_rows"], scenario["pool_rows"],
+        seed=42, project_root=tmp_path,
+    )
+    assert outcome_one["plan"] == outcome_two["plan"]
+    assert outcome_one["dev_gold_records"] == outcome_two["dev_gold_records"]
+    assert outcome_one["rag_cases"] == outcome_two["rag_cases"]
+
+    # shuffled input row order must not change the plan
+    reversed_rows = list(reversed(scenario["labels_rows"]))
+    outcome_three = bc.select_gold(
+        list(reversed(scenario["records"])), reversed_rows,
+        list(reversed(scenario["pool_rows"])), seed=42, project_root=tmp_path,
+    )
+    assert outcome_three["plan"] == outcome_one["plan"]
+
+    # confidence values are never a selection input: mutating them changes nothing
+    outcome_four = bc.select_gold(
+        scenario["records"],
+        [dict(row) for row in scenario["labels_rows"]],
+        [dict(row, silver_confidence=0.0, astra_independent_confidence=1.0)
+         for row in scenario["pool_rows"]],
+        seed=42, project_root=tmp_path,
+    )
+    assert outcome_four["plan"] == outcome_one["plan"]
+
+    # any other seed is refused: the protocol pins seed 42
+    with pytest.raises(bc.GoldValidationError):
+        bc.select_gold(
+            scenario["records"], scenario["labels_rows"], scenario["pool_rows"],
+            seed=43, project_root=tmp_path,
+        )
+
+
+def _t13_gold_record(tmp_path: Path, index: int = 20, label: str = "phishing"):
+    record, label_row, _ = _t13_case(tmp_path, index, label)
+    return bc.build_gold_record(record, label_row, "dev")
+
+
+def test_goldai_content_keys_refused_recursively(tmp_path: Path):
+    base = _t13_gold_record(tmp_path)
+    for value in ("", None, [], {}, "content"):
+        polluted = dict(base, body=value)
+        with pytest.raises(bc.GoldValidationError):
+            bc.validate_gold_records([polluted], ("dev",))
+    # nested and under another name, even empty/null
+    for polluted in (
+        dict(base, tags=[{"body": None}]),
+        dict(base, tags=[{"nested": {"mime_content": ""}}]),
+        dict(base, raw_email="abc"),
+    ):
+        with pytest.raises(bc.GoldValidationError):
+            bc.validate_gold_records([polluted], ("dev",))
+
+
+def test_goldrecord_extra_fields_forbidden(tmp_path: Path):
+    base = _t13_gold_record(tmp_path)
+    for extra in ({"human_validated": False}, {"review_method": GOLD_AI_REVIEW_METHOD},
+                  {"extra": 1}):
+        with pytest.raises(bc.GoldValidationError):
+            bc.validate_gold_records([dict(base, **extra)], ("dev",))
+    # missing field is equally refused (closed list)
+    incomplete = dict(base)
+    incomplete.pop("campaign_id")
+    with pytest.raises(bc.GoldValidationError):
+        bc.validate_gold_records([incomplete], ("dev",))
+
+
+def test_goldai_raw_path_and_hash_fail_closed(tmp_path: Path):
+    # raw_path outside corpus/raw is refused
+    record, label_row, _ = _t13_case(tmp_path, 30, "spam")
+    record["raw_path"] = "corpus/normalized/t13/30.eml"
+    with pytest.raises(bc.GoldValidationError):
+        bc.select_gold([record], [label_row], [], seed=42, project_root=tmp_path)
+    record["raw_path"] = "corpus/raw/../../outside.eml"
+    with pytest.raises(bc.GoldValidationError):
+        bc._resolve_checked_raw_path(tmp_path, record["raw_path"])
+    record["raw_path"] = "corpus/raw/t13/missing.eml"
+    with pytest.raises(bc.GoldValidationError):
+        bc.select_gold([record], [label_row], [], seed=42, project_root=tmp_path)
+
+    # raw hash mismatch is a loud failure (fail-closed, no silent removal)
+    record_ok, label_row_ok, _ = _t13_case(tmp_path, 31, "spam")
+    raw_file = tmp_path / record_ok["raw_path"]
+    raw_file.write_bytes(raw_file.read_bytes() + b"tampered\n")
+    with pytest.raises(bc.GoldValidationError):
+        bc.select_gold([record_ok], [label_row_ok], [], seed=42, project_root=tmp_path)
+
+    # a plain-file raw_path that resolves outside corpus/raw is refused
+    with pytest.raises(bc.GoldValidationError):
+        bc._resolve_checked_raw_path(tmp_path, "corpus/raw/t13/sub/../../escape.eml")
+
+
+def test_goldai_private_source_refused_from_rag(tmp_path: Path):
+    record, label_row, _ = _t13_case(tmp_path, 40, "legitime")
+    record["public_source"] = False
+    with pytest.raises(bc.GoldValidationError):
+        bc.select_gold([record], [label_row], [], seed=42, project_root=tmp_path)
+
+
+def test_goldai_freeze_and_seal(tmp_path: Path):
+    scenario = _t13_build_scenario(
+        tmp_path,
+        {"phishing": 2, "legitime": 2, "fraude": 1, "spam": 1},
+    )
+    holdout_dir = tmp_path / "holdout_owner_space"
+    seal, gold_test_path = bc.freeze_test(
+        scenario["records"], scenario["labels_rows"], scenario["pool_rows"],
+        destination=holdout_dir, seed=42, project_root=tmp_path,
+    )
+    assert gold_test_path == holdout_dir / "gold_test.jsonl"
+    assert gold_test_path.is_file()
+
+    # seal schema + aggregates validate WITHOUT opening gold_test
+    plan = bc.select_gold(
+        scenario["records"], scenario["labels_rows"], scenario["pool_rows"],
+        seed=42, project_root=tmp_path,
+    )["plan"]
+    errors = bc.validate_test_seal(
+        holdout_dir / "test_seal.json", plan["test"]
+    )
+    assert errors == []
+    assert seal["split"] == "test"
+    assert seal["seed"] == 42
+    assert seal["human_validated"] is False
+    assert seal["reviewer_ref"] == GOLD_AI_REVIEWER_REF
+    assert seal["reference_method"] == GOLD_AI_REVIEW_METHOD
+    # no individual test sample ids in the seal
+    assert not any(key.endswith("sample_ids") for key in seal)
+    assert "sample_ids" not in json.dumps(seal)
+
+    # aggregate inconsistency is rejected
+    tampered_plan = dict(plan["test"], record_count=plan["test"]["record_count"] + 1)
+    errors = bc.validate_test_seal(holdout_dir / "test_seal.json", tampered_plan)
+    assert any("record_count" in error for error in errors)
+
+    # changing one byte of the gold test object changes its seal hash
+    original_bytes = gold_test_path.read_bytes()
+    flipped = b"X" + original_bytes[1:]
+    assert hashlib.sha256(flipped).hexdigest() != seal["gold_test_sha256"]
+    assert hashlib.sha256(original_bytes).hexdigest() == seal["gold_test_sha256"]
+
+    # POC simplification amendment: the internal validation partition may be
+    # materialized inside the build workspace (metadata-only); destination
+    # resolution no longer refuses the build root.
+    assert bc._resolve_freeze_destination(holdout_dir) == holdout_dir.resolve()
+    inside_simulated_root = tmp_path / "corpus" / "gold"
+    assert (
+        bc._resolve_freeze_destination(inside_simulated_root)
+        == inside_simulated_root.resolve()
+    )
+
+    # build-side: freezing into the (simulated) build workspace succeeds and
+    # writes only metadata-only closed-schema records
+    seal_build, gold_test_build = bc.freeze_test(
+        scenario["records"], scenario["labels_rows"], scenario["pool_rows"],
+        destination=tmp_path / "corpus" / "gold", seed=42, project_root=tmp_path,
+    )
+    assert (tmp_path / "corpus" / "gold" / "gold_test.jsonl").is_file()
+    assert seal_build["gold_test_sha256"] == seal["gold_test_sha256"]
+
+
+def test_goldai_labels_conversion_file_level(tmp_path: Path):
+    scenario = _t13_build_scenario(tmp_path, {"phishing": 1, "legitime": 1})
+    manifest_path = tmp_path / "manifest.parquet"
+    bc._pq().write_table(bc.build_manifest(scenario["records"]), manifest_path)
+    template_path = tmp_path / "template.jsonl"
+    template_path.write_text(
+        "".join(
+            json.dumps(
+                dict(
+                    row,
+                    normalized_label=None,
+                    label_status="unreviewed",
+                    reviewer_ref=None,
+                    label_rationale=None,
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ) + "\n"
+            for row in scenario["labels_rows"]
+        ),
+        encoding="utf-8",
+    )
+    adj_path = _t13_write_pool(tmp_path / "adj.jsonl", scenario["adjudication_rows"])
+
+    out_path = tmp_path / "labels.jsonl"
+    cmd = ["labels", "--adjudication", str(tmp_path / "adj.jsonl"),
+           "--manifest", str(manifest_path), "--template", str(template_path),
+           "--out", str(out_path)]
+    exit_one = bc.main(cmd)
+    assert exit_one == 0
+    bytes_one = out_path.read_bytes()
+    exit_two = bc.main(cmd)
+    assert exit_two == 0
+    bytes_two = out_path.read_bytes()
+    # deterministic format conversion: byte-identical on re-run
+    assert bytes_one == bytes_two
+    rows = [json.loads(line) for line in bytes_one.decode("utf-8").splitlines() if line]
+    assert all(row["reviewer_ref"] == GOLD_AI_REVIEWER_REF for row in rows)
+    assert all("human" not in json.dumps(row).lower() or
+               "AI-adjudicated" in row["label_rationale"] for row in rows)
+    # original/source labels are preserved, normalized_label comes from the protocol
+    by_id = {row["sample_id"]: row for row in rows}
+    assert by_id["t13_0001"]["label_status"] in ("confirmed", "ambiguous")
+    # ambiguous rows excluded from gold selection
+    ambiguous = [row for row in rows if row["label_status"] == "ambiguous"]
+    assert all(row["normalized_label"] is None for row in ambiguous)
