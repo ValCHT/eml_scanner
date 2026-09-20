@@ -5,6 +5,14 @@ A fixed-list checker: validates prerequisites, runs the gate's commands,
 expurgates stdout/stderr, archives receipts under ``runs/gates/G<n>/`` and
 writes ``gate.json``. No scheduling, no agents, no orchestration engine.
 
+Receipt validity is scope-aware: ``validated_scope_hashes`` records the
+SHA-256 of every file the gate's commands really exercise (``GATE_SCOPE``)
+plus one hash per fixed command tail. ``verify`` re-expands the same table
+and requires exact equality, so a change outside the scope (docs, another
+ticket's module) never forces a live re-run, while any change to a shared
+file inside the scope still invalidates the receipt. Receipts recorded
+before this mechanism (empty scope) keep the legacy exact-fingerprint check.
+
 Usage:
     python scripts/check_gate.py G0 --record   # run commands and record receipt
     python scripts/check_gate.py G0            # verify the recorded receipt
@@ -108,6 +116,134 @@ REQUIRED_TICKETS: dict[str, list[str]] = {
 REQUIRED_FILES: dict[str, list[str]] = {
     "G7-C": ["docs/fine_tuning_decision.md"],
 }
+
+#: Content scope of each gate's fixed commands: the test/script entry files,
+#: the modules and data files they exercise. ``record`` stores a SHA-256 per
+#: expanded file in ``validated_scope_hashes`` plus one hash per command tail;
+#: ``verify`` re-expands this SAME table and requires exact equality. A change
+#: outside the scope (docs, another ticket's module) never invalidates the
+#: receipt; any change inside it (a shared relevant file) always does. The
+#: scope is deliberately explicit and reviewable: no import tracing engine.
+GATE_SCOPE: dict[str, list[str]] = {
+    "G0": [
+        "src/__init__.py", "src/config.py", "src/llm.py", "src/parsing.py",
+        "src/prompts.py", "src/state.py", "src/verify.py",
+        "tests/conftest.py", "tests/test_llm_client.py", "tests/test_bootstrap.py",
+        "tests/test_contracts.py", "tests/fixtures/**",
+        "scripts/smoke.py", "scripts/validate_reports.py",
+        "configs/*.yaml", "schemas/*.json", "prompts/internal_assessment.txt",
+        "pyproject.toml", "requirements.lock",
+    ],
+    "G1": [
+        "src/__init__.py", "src/config.py", "src/parsing.py", "src/state.py",
+        "tests/conftest.py", "tests/test_parsing.py", "tests/fixtures/**",
+        "pyproject.toml",
+    ],
+    "G2": [
+        "src/__init__.py", "src/config.py", "src/llm.py", "src/parsing.py",
+        "src/prompts.py", "src/state.py", "src/verify.py",
+        "tests/conftest.py", "tests/test_internal.py", "tests/fixtures/**",
+        "scripts/validate_reports.py", "schemas/assessment.schema.json",
+        "prompts/internal_assessment.txt", "pyproject.toml",
+    ],
+    "G3": [
+        "src/__init__.py", "src/config.py", "src/gate.py", "src/parsing.py",
+        "src/state.py",
+        "tests/conftest.py", "tests/test_gate.py", "tests/fixtures/**",
+        "configs/gate.yaml", "pyproject.toml",
+    ],
+    "G4": [
+        "src/__init__.py", "src/config.py", "src/llm.py", "src/parsing.py",
+        "src/prompts.py", "src/state.py", "src/tools/**/*.py",
+        "tests/conftest.py", "tests/test_virustotal.py", "tests/test_opencti.py",
+        "tests/test_urlscan.py",
+        "scripts/smoke.py", "configs/tools.yaml", "pyproject.toml",
+    ],
+    "G5": [
+        "src/**/*.py",
+        "tests/conftest.py", "tests/test_evidence.py", "tests/test_verify.py",
+        "tests/test_policy.py", "tests/test_graph.py", "tests/test_reporting.py",
+        "tests/fixtures/**/*",
+        "run_batch.py", "scripts/validate_reports.py",
+        "configs/*.yaml", "schemas/*.json", "prompts/*.txt",
+        "pyproject.toml", "requirements.lock",
+    ],
+    "G6": [
+        "src/**/*.py", "scripts/evaluate.py", "scripts/build_corpus.py",
+        "tests/conftest.py", "tests/test_corpus.py", "tests/test_metrics.py",
+        "tests/test_evaluation.py",
+        "configs/*.yaml", "configs/experiment_lock.json", "schemas/*.json",
+        "corpus/gold/gold_dev.jsonl",
+        "pyproject.toml", "requirements.lock",
+    ],
+    "G7-A": [
+        "src/__init__.py", "src/config.py", "src/graph.py", "src/state.py",
+        "src/tools/**/*.py",
+        "tests/conftest.py", "tests/test_rag.py",
+        "scripts/manage_rag.py", "configs/tools.yaml", "configs/experiment_lock.json",
+        "pyproject.toml", "requirements.lock",
+    ],
+    "G7-B": [
+        "src/__init__.py", "src/config.py", "src/llm.py", "src/parsing.py",
+        "src/prompts.py", "src/state.py", "src/tools/**/*.py",
+        "tests/conftest.py", "tests/test_vision.py", "scripts/smoke.py",
+        "configs/tools.yaml", "configs/experiment_lock.json", "prompts/*.txt",
+        "pyproject.toml", "requirements.lock",
+    ],
+    "G7-C": [
+        "src/**/*.py", "scripts/evaluate.py", "docs/fine_tuning_decision.md",
+        "configs/experiment_lock.json",
+        "pyproject.toml", "requirements.lock",
+    ],
+}
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def compute_gate_scope(gate: str) -> dict[str, str]:
+    """Expand :data:`GATE_SCOPE` and hash every scope file + command tail.
+
+    Keys are project-relative POSIX paths (or ``command:<n>``); values are
+    SHA-256 hex digests. The expansion is deterministic and skips caches.
+    """
+
+    scope: dict[str, str] = {}
+    for pattern in GATE_SCOPE.get(gate, []):
+        for path in sorted(PROJECT_ROOT.glob(pattern)):
+            if not path.is_file():
+                continue
+            if "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            relative = str(path.relative_to(PROJECT_ROOT)).replace(os.sep, "/")
+            scope[relative] = _sha256_file(path)
+    for index, command in enumerate(GATE_COMMANDS.get(gate, [])):
+        if len(command) < 2:
+            continue
+        scope[f"command:{index}"] = hashlib.sha256(
+            " ".join(command[1:]).encode("utf-8")
+        ).hexdigest()
+    return scope
+
+
+def _scope_differences(recorded: dict[str, str], current: dict[str, str]) -> list[str]:
+    """Human-readable diff between a recorded and a recomputed scope."""
+
+    lines: list[str] = []
+    for key in sorted(set(recorded) | set(current)):
+        before = recorded.get(key)
+        after = current.get(key)
+        if before == after:
+            continue
+        if before is None:
+            lines.append(f"scope entry added: {key}")
+        elif after is None:
+            lines.append(f"scope entry missing: {key}")
+        else:
+            lines.append(f"scope entry changed: {key}")
+    return lines
+
 
 #: The eleven mandatory fields of docs/evaluation.md §8.5 when the G7-C
 #: decision is YES. A decision file missing any of them forbids PASS.
@@ -527,7 +663,9 @@ def record(gate: str) -> int:
         "g7c_validation_problems": g7c_problems,
         "g3_replay_problems": g3_replay_problems,
         "tested_commit": worktree_fingerprint(),
-        "validated_scope_hashes": {},
+        # Scope-aware validity (docs/gates.md §5.2): the receipt stays valid
+        # while the files this gate really exercised are content-identical.
+        "validated_scope_hashes": compute_gate_scope(gate),
         "commands": commands,
         "tests": tests,
         "live_evidence_refs": [],
@@ -562,6 +700,20 @@ def verify(gate: str) -> int:
     if receipt.get("status") != "PASS":
         print(f"gate={gate} status={receipt.get('status')} (not PASS)")
         return 1
+    scope_recorded = receipt.get("validated_scope_hashes")
+    if scope_recorded:
+        # Scope-aware validity: only a change to a file the gate really
+        # exercised (or to its fixed command list) invalidates the receipt.
+        current = compute_gate_scope(gate)
+        if current != scope_recorded:
+            print(f"gate={gate} receipt stale: validated scope changed")
+            for line in _scope_differences(scope_recorded, current):
+                print(f"  {line}")
+            return 1
+        print(f"gate={gate} status=PASS receipt verified (scope hashes match)")
+        return 0
+    # Legacy receipt without scope hashes: keep the exact-fingerprint check so
+    # pre-existing receipts never verify more loosely than they were recorded.
     if receipt.get("tested_commit") != worktree_fingerprint():
         print(f"gate={gate} receipt stale: worktree changed since recording")
         return 1

@@ -22,7 +22,9 @@ UI web, serveur, base, Docker, actions email réelles, parallélisme.
 
 ## FILES ALLOWED
 
-src/graph.py; src/reporting.py; run.py; run_batch.py; tests/test_graph.py; tests/test_reporting.py; scripts/validate_reports.py; README.md; docs/architecture.md; docs/threat_model.md. Artefacts de validation sous runs/tickets/TICKET-11/ et runs/gates/ de la gate concernée.
+src/graph.py; src/reporting.py; run.py; run_batch.py; tests/test_graph.py; tests/test_reporting.py; scripts/validate_reports.py; README.md; docs/architecture.md; docs/threat_model.md; pyproject.toml; requirements.lock. Artefacts de validation sous runs/tickets/TICKET-11/ et runs/gates/ de la gate concernée.
+
+`pyproject.toml` et `requirements.lock` — uniquement pour ajouter/résoudre les dépendances LangGraph déjà imposées par `docs/architecture.md` : `langgraph>=1.0.10,<2` et `langgraph-checkpoint>=4.1.1,<5`. Aucun changement de dépendance non lié ; pas de LangChain, pas de langchain-openai, pas de framework d'agents.
 
 ## INTERFACES / CONTRACTS
 

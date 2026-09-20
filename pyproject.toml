@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "SOC Email Triage POC (V1.2) - squelette G0: configuration et contrats"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    # Baseline StateGraph runtime mandated by docs/architecture.md §1.2.
+    "langgraph>=1.0.10,<2",
+    "langgraph-checkpoint>=4.1.1,<5",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.2,<3",
     "PyYAML>=6.0,<7",

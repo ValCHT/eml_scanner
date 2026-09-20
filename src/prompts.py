@@ -1,15 +1,21 @@
-"""INTERNAL prompt projection (TICKET-04, docs/prompt_integration.md §3).
+"""INTERNAL and FINAL prompt projections (TICKET-04/TICKET-09, docs/prompt_integration.md §3).
 
-Builds the deterministic INTERNAL user envelope from a ``ParsedEmail``:
+Builds the deterministic user envelopes from a ``ParsedEmail``:
+
+- INTERNAL: ``UNTRUSTED_EMAIL``, ``EVIDENCE_REGISTRY``,
+  ``OBSERVABLE_REGISTRY``, ``SUPPLIED_VISUAL_IDS`` — parser-produced
+  registries (provenance INTERNE only by construction);
+- FINAL (TICKET-09): the same four fields plus ``INTERNAL_ASSESSMENT``,
+  ``TOOL_STATUS`` and ``RAG_CONTEXT``. ``TOOL_STATUS`` carries every
+  normalized tool result status (including ``unavailable``/``skipped`` with
+  their cause), never raw provider data.
 
 - ``UNTRUSTED_EMAIL``: only the business-useful fields of the parsed email
   (subject, selected headers, text/HTML parts, links, attachments metadata,
   authentication as reported, image METADATA — never pixels, never an
   invented visual description);
-- ``EVIDENCE_REGISTRY`` / ``OBSERVABLE_REGISTRY``: parser-produced registries
-  (provenance INTERNE only by construction);
 - ``SUPPLIED_VISUAL_IDS``: always empty in this POC unless actual pixels are
-  supplied to the model — G2 supplies none.
+  supplied to the model — G2/G5 supply none.
 
 Harness-only manifest data (fixture filename, scenario, design_label,
 content_anchors, part_expectations, constraints, gold metadata, historical
@@ -34,12 +40,13 @@ observables referenced by kept evidence are always included.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from .state import ParsedEmail
+from .state import Assessment, Observable, ParsedEmail, RagCase, ToolResult
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -55,12 +62,26 @@ INTERNAL_EFFORT = "medium"
 INTERNAL_MAX_OUTPUT_TOKENS = 8_192
 INTERNAL_PHASE_SECONDS = 60.0
 
+#: FINAL phase call parameters (docs/architecture.md §1.4; TICKET-09).
+FINAL_EFFORT = "xhigh"
+FINAL_MAX_OUTPUT_TOKENS = 16_384
+FINAL_PHASE_SECONDS = 90.0
+
+#: RAG_CONTEXT bounds (docs/contracts.md §2.7 tools config: k=3, 1200 chars).
+RAG_MAX_CASES = 3
+RAG_MAX_CASE_CHARS = 1_200
+
+#: Canonical tool order (docs/architecture.md §1.2 pipeline order).
+TOOL_ORDER: tuple[str, ...] = ("virustotal", "opencti", "urlscan")
+
 
 class ContextLimits(BaseModel):
     """Deterministic projection budgets (docs/prompt_integration.md §3).
 
     The last two fields carry the INTERNAL call parameters so the frozen
     ``assess_internal(parsed, client, limits)`` interface needs no Settings.
+    The two FINAL fields (TICKET-09) play the same role for
+    ``assess_final``; the caller may override them from ``Settings``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -72,12 +93,27 @@ class ContextLimits(BaseModel):
     total_user_chars: int = TOTAL_USER_CHARS_LIMIT
     internal_max_output_tokens: int = INTERNAL_MAX_OUTPUT_TOKENS
     internal_phase_seconds: float = INTERNAL_PHASE_SECONDS
+    final_max_output_tokens: int = FINAL_MAX_OUTPUT_TOKENS
+    final_phase_seconds: float = FINAL_PHASE_SECONDS
 
 
 def load_internal_prompt() -> str:
     """Load the complete delivered system prompt, unchanged (V1.2)."""
 
     return (PROMPTS_DIR / "internal_assessment.txt").read_text(encoding="utf-8")
+
+
+def load_final_prompt() -> str:
+    """Load the complete delivered FINAL system prompt (docs/prompt_integration.md §3).
+
+    TICKET-09 mirrors the TICKET-04 documented deviation: the closed enum
+    values (inference ``code``, ``reason_code``, ``missing_information``) are
+    enumerated verbatim in the prompt because the observed proxy does not
+    enforce ``response_format=json_schema`` for the model. The schema,
+    taxonomy, business rules and user envelope are unchanged.
+    """
+
+    return (PROMPTS_DIR / "final_assessment.txt").read_text(encoding="utf-8")
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -282,18 +318,18 @@ def _select_observables(
 # ---------------------------------------------------------------------------
 
 
-def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[str, Any]:
-    """Deterministic INTERNAL user envelope (docs/prompt_integration.md §3).
-
-    Returns the four conceptual fields exactly:
-    ``UNTRUSTED_EMAIL``, ``EVIDENCE_REGISTRY``, ``OBSERVABLE_REGISTRY``,
-    ``SUPPLIED_VISUAL_IDS``. ``SUPPLIED_VISUAL_IDS`` is empty: G2 supplies no
-    pixels, and an image metadata record never becomes a visual description.
+def _project_untrusted_email(
+    parsed: ParsedEmail, limits: ContextLimits
+) -> tuple[dict[str, Any], int, bool, bool, bool]:
+    """Deterministic UNTRUSTED_EMAIL projection shared by both phases.
 
     Section budgets are enforced in the frozen order headers → body →
-    links/observables → evidence; every truncation is flagged in
-    ``UNTRUSTED_EMAIL.content_limits``. The section budgets are mutually
-    consistent with the total user payload limit, which is asserted.
+    links; ``content_limits`` is intentionally NOT set here: the caller
+    appends every truncation flag in one deterministic pass once all
+    sections have been selected, so INTERNAL and FINAL flag identically.
+
+    Returns ``(untrusted_email, links_chars_used, body_truncated,
+    headers_truncated, links_truncated)``.
     """
 
     headers, headers_trunc = _select_headers(parsed, limits.headers_chars)
@@ -309,30 +345,6 @@ def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[
     body_trunc = text_trunc or html_trunc
 
     links, links_used, links_trunc = _select_links(parsed, limits.urls_observables_chars)
-
-    evidence_entries = _evidence_entries(parsed)
-    kept_evidence, evidence_trunc = _select_evidence(evidence_entries, limits.evidence_chars)
-
-    all_observables = _observable_entries(parsed)
-    remaining_obs_budget = max(0, limits.urls_observables_chars - links_used)
-    # Mandatory observables (referenced by kept evidence) are budget-bound
-    # too: one that no longer fits is excluded and the evidence entries
-    # referencing it are dropped, so no dangling reference ever remains
-    # (docs/prompt_integration.md §3: aucune preuve tronquée ne reste
-    # référençable).
-    observables, kept_evidence, obs_trunc = _select_observables(
-        all_observables, kept_evidence, remaining_obs_budget
-    )
-
-    content_limits = list(parsed.content_limits)
-    for flag, hit in (
-        ("body_truncated", body_trunc),
-        ("headers_truncated", headers_trunc),
-        ("urls_truncated", links_trunc or obs_trunc),
-        ("evidence_truncated", evidence_trunc),
-    ):
-        if hit and flag not in content_limits:
-            content_limits.append(flag)
 
     untrusted_email = {
         "subject": parsed.subject,
@@ -385,15 +397,77 @@ def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[
             for img in parsed.images
         ],
         "defects": list(parsed.defects),
-        "content_limits": content_limits,
         "essential_visual_content": parsed.essential_visual_content,
     }
+    return untrusted_email, links_used, body_trunc, headers_trunc, links_trunc
+
+
+def _content_limits(
+    parsed: ParsedEmail,
+    body_trunc: bool,
+    headers_trunc: bool,
+    urls_trunc: bool,
+    evidence_trunc: bool,
+) -> list[str]:
+    """Truncation flags in the frozen order (body → headers → urls → evidence)."""
+
+    content_limits = list(parsed.content_limits)
+    for flag, hit in (
+        ("body_truncated", body_trunc),
+        ("headers_truncated", headers_trunc),
+        ("urls_truncated", urls_trunc),
+        ("evidence_truncated", evidence_trunc),
+    ):
+        if hit and flag not in content_limits:
+            content_limits.append(flag)
+    return content_limits
+
+
+def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[str, Any]:
+    """Deterministic INTERNAL user envelope (docs/prompt_integration.md §3).
+
+    Returns the four conceptual fields exactly:
+    ``UNTRUSTED_EMAIL``, ``EVIDENCE_REGISTRY``, ``OBSERVABLE_REGISTRY``,
+    ``SUPPLIED_VISUAL_IDS``. ``SUPPLIED_VISUAL_IDS`` is empty: G2 supplies no
+    pixels, and an image metadata record never becomes a visual description.
+
+    Section budgets are enforced in the frozen order headers → body →
+    links/observables → evidence; every truncation is flagged in
+    ``UNTRUSTED_EMAIL.content_limits``. The section budgets are mutually
+    consistent with the total user payload limit, which is asserted.
+    """
+
+    untrusted_email, links_used, body_trunc, headers_trunc, links_trunc = (
+        _project_untrusted_email(parsed, limits)
+    )
+
+    evidence_entries = _evidence_entries(parsed)
+    kept_evidence, evidence_trunc = _select_evidence(evidence_entries, limits.evidence_chars)
+
+    all_observables = _observable_entries(parsed)
+    remaining_obs_budget = max(0, limits.urls_observables_chars - links_used)
+    # Mandatory observables (referenced by kept evidence) are budget-bound
+    # too: one that no longer fits is excluded and the evidence entries
+    # referencing it are dropped, so no dangling reference ever remains
+    # (docs/prompt_integration.md §3: aucune preuve tronquée ne reste
+    # référençable).
+    observables, kept_evidence, obs_trunc = _select_observables(
+        all_observables, kept_evidence, remaining_obs_budget
+    )
+
+    untrusted_email["content_limits"] = _content_limits(
+        parsed,
+        body_trunc,
+        headers_trunc,
+        links_trunc or obs_trunc,
+        evidence_trunc,
+    )
 
     envelope = {
         "UNTRUSTED_EMAIL": untrusted_email,
         "EVIDENCE_REGISTRY": {entry["id"]: entry for entry in kept_evidence},
         "OBSERVABLE_REGISTRY": observables,
-        # No pixels are supplied by this phase: always empty for G2.
+        # No pixels are supplied by this phase: always empty for G2/G5.
         "SUPPLIED_VISUAL_IDS": [],
     }
 
@@ -403,6 +477,184 @@ def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[
         # + fixed keys < 100k), but the invariant stays explicit and checked.
         raise ValueError(
             f"INTERNAL user payload {user_chars} exceeds total budget "
+            f"{limits.total_user_chars}; reduce section budgets deterministically"
+        )
+    return envelope
+
+
+# ---------------------------------------------------------------------------
+# FINAL envelope (TICKET-09, docs/prompt_integration.md §3)
+# ---------------------------------------------------------------------------
+
+
+def canonical_tool_results(tool_results: Any) -> tuple[ToolResult, ...]:
+    """Deterministic tool-result order, independent of the caller's ordering.
+
+    Accepts ``None``, an ``Enrichment``-like object (``virustotal`` /
+    ``opencti`` / ``urlscan`` lists) or any iterable of ``ToolResult``. The
+    order is (tool order, query observable id, canonical content) so merging
+    the same set in a different order yields identical registries, TOOL_STATUS
+    and therefore identical audit digests.
+    """
+
+    if tool_results is None:
+        items: list[Any] = []
+    elif all(hasattr(tool_results, name) for name in TOOL_ORDER):
+        items = [
+            *getattr(tool_results, "virustotal", ()),
+            *getattr(tool_results, "opencti", ()),
+            *getattr(tool_results, "urlscan", ()),
+        ]
+    else:
+        items = list(tool_results)
+    results: list[ToolResult] = []
+    for item in items:
+        if not isinstance(item, ToolResult):
+            raise ValueError(
+                f"tool_results: expected ToolResult objects, got {type(item).__name__}"
+            )
+        results.append(item)
+
+    def _key(result: ToolResult) -> tuple[int, str, bytes]:
+        return (
+            TOOL_ORDER.index(result.tool),
+            result.query_observable_id or "",
+            canonical_bytes(result.model_dump(mode="json")),
+        )
+
+    return tuple(sorted(results, key=_key))
+
+
+def tool_status_entries(tool_results: Any) -> list[dict[str, Any]]:
+    """TOOL_STATUS included in the FINAL envelope: normalized facts only.
+
+    Every result is transmitted, including ``not_found`` / ``unavailable`` /
+    ``skipped`` with their cause, mode, date and fingerprint. Raw provider
+    data is never copied here (docs/architecture.md §1.6, TICKET-09).
+    """
+
+    return [
+        {
+            "tool": result.tool,
+            "query_observable_id": result.query_observable_id,
+            "status": result.status,
+            "reason": result.reason,
+            "mode": result.mode,
+            "collected_at": result.collected_at,
+            "requests_sent": result.requests_sent,
+            "elapsed_ms": result.elapsed_ms,
+            "response_ref": result.response_ref,
+            "response_sha256": result.response_sha256,
+            "visibility": result.visibility,
+            "scan_id": result.scan_id,
+        }
+        for result in canonical_tool_results(tool_results)
+    ]
+
+
+def rag_context_entries(rag_context: Any) -> list[dict[str, Any]]:
+    """Bounded RAG_CONTEXT projection (max 3 cases, ≤1200 chars per case).
+
+    Only public/validated ``RagCase`` fields are projected; the ``case_id``
+    is what an inference may cite in ``rag_case_ids``. No IOC or verdict is
+    propagated (docs/contracts.md §2.4/§2.7). In G5 the context is always
+    empty because RAG is not active.
+    """
+
+    if rag_context is None:
+        return []
+    cases = list(rag_context)
+    if any(not isinstance(case, RagCase) for case in cases):
+        raise ValueError("rag_context: expected RagCase objects")
+    if len(cases) > RAG_MAX_CASES:
+        raise ValueError(
+            f"rag_context: at most {RAG_MAX_CASES} cases allowed (got {len(cases)})"
+        )
+    entries: list[dict[str, Any]] = []
+    for case in cases:
+        entry: dict[str, Any] = {
+            "case_id": case.case_id,
+            "public_source_url": case.public_source_url,
+            "dataset": case.dataset,
+            "validated_label": case.validated_label,
+            "text_excerpt": case.text_excerpt,
+        }
+        # Deterministic character bound on the whole projected case.
+        while entry["text_excerpt"] and len(canonical_bytes(entry)) > RAG_MAX_CASE_CHARS:
+            overflow = len(canonical_bytes(entry)) - RAG_MAX_CASE_CHARS
+            entry["text_excerpt"] = entry["text_excerpt"][
+                : max(0, len(entry["text_excerpt"]) - max(1, overflow))
+            ]
+        entries.append(entry)
+    return entries
+
+
+def build_final_envelope(
+    parsed: ParsedEmail,
+    internal: Assessment | None,
+    evidence: Mapping[str, Evidence],
+    observables: Mapping[str, Observable],
+    tool_results: Any,
+    rag_context: Any,
+    limits: ContextLimits,
+) -> dict[str, Any]:
+    """Deterministic FINAL user envelope (docs/prompt_integration.md §3).
+
+    Same four fields as INTERNAL plus ``INTERNAL_ASSESSMENT``,
+    ``TOOL_STATUS`` and ``RAG_CONTEXT``. The registries are the MERGED ones
+    (INTERNE + OSINT + SANDBOX); the selection is deterministic and never
+    leaves a dangling reference: whole evidence entries only, observables
+    under the shared budget, and an evidence entry whose observable no
+    longer fits is dropped (truncation flagged in ``content_limits``).
+    """
+
+    untrusted_email, links_used, body_trunc, headers_trunc, links_trunc = (
+        _project_untrusted_email(parsed, limits)
+    )
+
+    evidence_entries = [
+        entry.model_dump(mode="json") for entry in evidence.values()
+    ]
+    kept_evidence, evidence_trunc = _select_evidence(
+        evidence_entries, limits.evidence_chars
+    )
+
+    all_observables = {
+        obs_id: entry.model_dump(mode="json")
+        for obs_id, entry in observables.items()
+    }
+    remaining_obs_budget = max(0, limits.urls_observables_chars - links_used)
+    observables_sent, kept_evidence, obs_trunc = _select_observables(
+        all_observables, kept_evidence, remaining_obs_budget
+    )
+
+    untrusted_email["content_limits"] = _content_limits(
+        parsed,
+        body_trunc,
+        headers_trunc,
+        links_trunc or obs_trunc,
+        evidence_trunc,
+    )
+
+    envelope = {
+        "UNTRUSTED_EMAIL": untrusted_email,
+        "EVIDENCE_REGISTRY": {entry["id"]: entry for entry in kept_evidence},
+        "OBSERVABLE_REGISTRY": observables_sent,
+        # No pixels are supplied by this phase: always empty for G5.
+        "SUPPLIED_VISUAL_IDS": [],
+        # The internal assessment is unreliable data like the rest of the
+        # envelope; null is honest when no valid internal result exists.
+        "INTERNAL_ASSESSMENT": (
+            internal.model_dump(mode="json") if internal is not None else None
+        ),
+        "TOOL_STATUS": tool_status_entries(tool_results),
+        "RAG_CONTEXT": rag_context_entries(rag_context),
+    }
+
+    user_chars = len(canonical_bytes(envelope).decode("utf-8"))
+    if user_chars > limits.total_user_chars:
+        raise ValueError(
+            f"FINAL user payload {user_chars} exceeds total budget "
             f"{limits.total_user_chars}; reduce section budgets deterministically"
         )
     return envelope
@@ -436,24 +688,59 @@ def build_internal_messages(parsed: ParsedEmail, limits: ContextLimits) -> tuple
     """
 
     envelope = build_internal_envelope(parsed, limits)
-    return _messages_from_envelope(envelope), envelope
+    return _messages_from_envelope(envelope, load_internal_prompt()), envelope
 
 
-def _messages_from_envelope(envelope: dict[str, Any]) -> list[dict[str, str]]:
+def build_final_messages(
+    parsed: ParsedEmail,
+    internal: Assessment | None,
+    evidence: Mapping[str, Evidence],
+    observables: Mapping[str, Observable],
+    tool_results: Any,
+    rag_context: Any,
+    limits: ContextLimits,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """FINAL system prompt (delivered file) + user JSON envelope.
+
+    Returns ``(messages, envelope)`` so the caller can validate references
+    against the registries ACTUALLY sent, never a rebuild.
+    """
+
+    envelope = build_final_envelope(
+        parsed, internal, evidence, observables, tool_results, rag_context, limits
+    )
+    return _messages_from_envelope(envelope, load_final_prompt()), envelope
+
+
+def _messages_from_envelope(
+    envelope: dict[str, Any], system_prompt: str
+) -> list[dict[str, str]]:
     user_payload = json.dumps(
         envelope, ensure_ascii=False, sort_keys=True, allow_nan=False
     )
     return [
-        {"role": "system", "content": load_internal_prompt()},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_payload},
     ]
 
 
 __all__ = [
     "ContextLimits",
+    "FINAL_EFFORT",
+    "FINAL_MAX_OUTPUT_TOKENS",
+    "FINAL_PHASE_SECONDS",
+    "RAG_MAX_CASES",
+    "RAG_MAX_CASE_CHARS",
+    "TOOL_ORDER",
+    "build_final_envelope",
+    "build_final_messages",
     "build_internal_envelope",
     "build_internal_messages",
     "canonical_bytes",
+    "canonical_tool_results",
     "envelope_has_useful_content",
+    "load_final_prompt",
     "load_internal_prompt",
+    "rag_context_entries",
+    "tool_status_entries",
 ]

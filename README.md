@@ -2,10 +2,44 @@
 
 Implementation repository prepared from the frozen V1.2 specification dated 18/09/2026.
 
-**Implementation status (updated 19/09/2026):** TICKET-01 through TICKET-04 are
-merged on `main` (HEAD `6635ee4182a4497ecdac889b37fc7ed2f7afed14`). The
-current maintenance task migrates the runtime and revalidates G2. TICKET-05 must
-not start until this change and the refreshed G1/G2 receipts receive human review.
+**Implementation status (updated 19/09/2026):** TICKET-01 through TICKET-11 are
+implemented in the working tree. Gate receipts G0–G4 are recorded under
+`runs/gates/` (G4 was re-recorded live after the architecture-mandated
+LangGraph dependency alignment); the G5 closing receipt is produced by
+TICKET-11 (`python scripts/check_gate.py G5 --record`). TICKET-12 (G6) must
+not start before the G5 receipt and the human review of the diff.
+
+## Running the pipeline
+
+The runtime uses the real OpenAI-compatible endpoint configured through
+`LITELLM_*`; there is no mock or recorded mode. A missing `LITELLM_API_KEY`
+refuses the LLM phase with an explicit error instead of simulating it.
+
+```bash
+# one email -> RUNS_DIR/<run_id>/{report.json,summary.txt,events.jsonl}
+python run.py tests/fixtures/malicious_url_redirect.eml --source-profile fixture
+
+# sequential live batch -> results.jsonl, metrics.json, run_manifest.json
+python run_batch.py --input tests/fixtures --mode live --output runs/gates/G5/batch
+
+# strict validation of a batch directory (schema + invariants + row/report match)
+python scripts/validate_reports.py --run-dir runs/gates/G5/batch
+
+# single-email runs can also be validated through the frozen report schema
+python scripts/validate_reports.py runs/<run_id>/report.json \
+  --schema schemas/triage_report.schema.json
+```
+
+`--source-profile` is **required** on the single-email CLI and is never guessed
+from the email content: allowed values are exactly `fixture`, `public_corpus`
+and `private_authorized`. Only `fixture` may persist the complete LLM request
+body (docs/contracts.md §2.6.1), so `python run.py customer.eml` fails at
+argument parsing (exit 2) before any pipeline execution or network call.
+
+`run.py` and `run_batch.py` never act on a mailbox: AUTO/REVIEW/ESCALATE are
+recommendations only. The batch is sequential, sorted by input path, continues
+after a failing email by writing its explicit error line, and exits non-zero
+if any input produced no archived report.
 
 ## Runtime LLM decision
 
@@ -15,6 +49,12 @@ not start until this change and the refreshed G1/G2 receipts receive human revie
   quantitative POC assessments.
 - **Cheap technical model:** `openai/gpt-oss-20b` for connectivity, transport,
   parsing, schema and smoke checks only. Its output is never an official result.
+- **Non-official development model:** `Qwen3.6-35B-A3B` is operator-approved for
+  cheap non-official development loops, functional/debug live tests that
+  genuinely need an LLM, and pre-validation before an official run. Its outputs
+  must never be presented as official Qwen3.8 gate evidence or baseline
+  measurements. No AkashML model ID is claimed for it: the exact ID must be
+  taken from the configured endpoint's model list when it is used.
 - **Future Orange demo target:** the same generic `LITELLM_CHAT_URL`,
   `LITELLM_API_KEY` and `LITELLM_MODEL` settings switch provider without code edits.
 - **Historical evidence:** G2 was previously run through Genspark with
@@ -74,5 +114,7 @@ RFC822 `.eml` files are byte-sensitive. `.gitattributes` deliberately disables G
 
 ## Next implementation step
 
-Complete and review the AkashML/Qwen runtime migration and refreshed G1/G2
-evidence. Do not start TICKET-05 in this maintenance session.
+Review the G5 receipt (`runs/gates/G5/`), the TICKET-11 report
+(`runs/tickets/TICKET-11/report.md`) and the batch evidence
+(`runs/gates/G5/batch/`). TICKET-12–14 (G6 corpus, metrics and evaluation)
+start only after that review; TICKET-11 must not be re-run.
