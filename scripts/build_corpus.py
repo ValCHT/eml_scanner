@@ -1792,12 +1792,17 @@ def build_canonical_labels(
     a format conversion only — never new semantic labeling.
     """
 
-    manifest_by_id = {
-        str(record["sample_id"]): record for record in manifest_records
-    }
-    template_by_id = {str(row["sample_id"]): dict(row) for row in template_rows}
-    if len(manifest_by_id) != len(list(manifest_records)) and not manifest_by_id:
+    manifest_rows = list(manifest_records)
+    if not manifest_rows:
         raise GoldValidationError("empty manifest for canonical conversion")
+    manifest_by_id = {
+        str(record["sample_id"]): record for record in manifest_rows
+    }
+    if len(manifest_by_id) != len(manifest_rows):
+        raise GoldValidationError(
+            "duplicate sample_id in manifest for canonical conversion"
+        )
+    template_by_id = {str(row["sample_id"]): dict(row) for row in template_rows}
     rows: list[dict[str, Any]] = []
     mismatches: list[str] = []
     for sample_id in sorted(adjudication):
@@ -2139,9 +2144,10 @@ def select_gold(
     Order of operations (protocol): reserve RAG first from the eligible
     confirmed complement (protected pool families excluded, public sources
     only), then label-stratified dev/test split of the protected pool by
-    ``family_group`` (seed 42). Only dev records and RAG cases are returned
-    for materialization; the test split is returned for the holdout owner
-    only and is never written by the build side.
+    ``family_group`` (seed 42). The select command materializes dev records
+    and RAG cases; test records are returned deterministically for the
+    ``freeze`` step, which materializes the internal POC validation
+    partition as metadata-only GoldRecords.
     """
 
     if seed != 42:
@@ -2228,7 +2234,6 @@ def select_gold(
         )
 
     # --- RAG reservation: family granularity, one record per family -----------
-    rag_family_rows: dict[str, dict[str, Any]] = {}
     mixed_label_families: set[str] = set()
     family_to_label: dict[str, str] = {}
     family_members: dict[str, list[str]] = {}
