@@ -2,7 +2,11 @@
 """Single-email CLI (TICKET-11, docs/architecture.md §1.7).
 
 Usage:
-    python run.py tests/fixtures/malicious_url_redirect.eml [--source-profile fixture]
+    python run.py tests/fixtures/malicious_url_redirect.eml --source-profile fixture
+
+``--source-profile`` is required and is never guessed from the email content:
+only ``fixture`` permits persisting the complete LLM request body, so an
+arbitrary real email must not silently default to it.
 
 Executes the frozen StateGraph pipeline once, writes ``report.json`` /
 ``summary.txt`` / ``events.jsonl`` under ``RUNS_DIR/<run_id>/`` and exits 0
@@ -38,8 +42,8 @@ def main() -> int:
     parser.add_argument(
         "--source-profile",
         choices=_SOURCE_PROFILES,
-        default="fixture",
-        help="source profile of the input (never guessed from the content)",
+        required=True,
+        help="source profile of the input (required; never guessed from the content)",
     )
     args = parser.parse_args()
 

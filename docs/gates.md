@@ -1,6 +1,6 @@
 # 5. Gates d'implémentation et exécution Codex
 
-**Binding runtime courant (19/09/2026) :** AkashML + `Qwen/Qwen3.8-27B` pour tout run officiel, dont la matrice G2 consommée par TICKET-05. `openai/gpt-oss-20b` est réservé aux smokes et validations techniques, archivés séparément, et ne peut jamais produire `runs/gates/G2/assessments.jsonl` ni `fixture_performance.jsonl`. Les preuves G2 historiques Genspark + `claude-haiku-4-5` restent historiques. Orange LiteLLM demeure une cible future via configuration `LITELLM_*` uniquement.
+**Binding runtime courant (19/09/2026, précisé par l'opérateur le 20/09/2026) :** AkashML + `Qwen/Qwen3.8-27B` pour tout run officiel, dont la matrice G2 consommée par TICKET-05. `openai/gpt-oss-20b` est réservé aux smokes et validations techniques, archivés séparément, et ne peut jamais produire `runs/gates/G2/assessments.jsonl` ni `fixture_performance.jsonl`. `Qwen3.6-35B-A3B` est autorisé pour le développement non officiel uniquement — boucles bon marché, tests live fonctionnels/débogage nécessitant un LLM, pré-validation avant un run officiel — et ne peut produire aucune évidence de gate ni mesure baseline ; aucun ID fournisseur Akash n'est revendiqué, l'ID exact doit provenir de la liste de modèles de l'endpoint configuré. Les preuves G2 historiques Genspark + `claude-haiku-4-5` restent historiques. Orange LiteLLM demeure une cible future via configuration `LITELLM_*` uniquement.
 
 ## 5.1 Ordre obligatoire et définition de PASS
 

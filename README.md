@@ -30,6 +30,12 @@ python scripts/validate_reports.py runs/<run_id>/report.json \
   --schema schemas/triage_report.schema.json
 ```
 
+`--source-profile` is **required** on the single-email CLI and is never guessed
+from the email content: allowed values are exactly `fixture`, `public_corpus`
+and `private_authorized`. Only `fixture` may persist the complete LLM request
+body (docs/contracts.md §2.6.1), so `python run.py customer.eml` fails at
+argument parsing (exit 2) before any pipeline execution or network call.
+
 `run.py` and `run_batch.py` never act on a mailbox: AUTO/REVIEW/ESCALATE are
 recommendations only. The batch is sequential, sorted by input path, continues
 after a failing email by writing its explicit error line, and exits non-zero
@@ -43,6 +49,12 @@ if any input produced no archived report.
   quantitative POC assessments.
 - **Cheap technical model:** `openai/gpt-oss-20b` for connectivity, transport,
   parsing, schema and smoke checks only. Its output is never an official result.
+- **Non-official development model:** `Qwen3.6-35B-A3B` is operator-approved for
+  cheap non-official development loops, functional/debug live tests that
+  genuinely need an LLM, and pre-validation before an official run. Its outputs
+  must never be presented as official Qwen3.8 gate evidence or baseline
+  measurements. No AkashML model ID is claimed for it: the exact ID must be
+  taken from the configured endpoint's model list when it is used.
 - **Future Orange demo target:** the same generic `LITELLM_CHAT_URL`,
   `LITELLM_API_KEY` and `LITELLM_MODEL` settings switch provider without code edits.
 - **Historical evidence:** G2 was previously run through Genspark with
