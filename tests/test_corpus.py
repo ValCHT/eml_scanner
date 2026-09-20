@@ -548,6 +548,134 @@ def test_dedupe_seed_reproducible():
 
 
 # ---------------------------------------------------------------------------
+# Dedupe raw re-read (TICKET-12 review blocker): same safety/bounds as
+# ingestion, sha256 verification, explicit failures.
+# ---------------------------------------------------------------------------
+
+
+def _raw_record(
+    archive: Path,
+    member: str,
+    raw_sha256: str,
+    sample_id: str = "raw1",
+) -> bc.NormalizedRecord:
+    record = _record_for_dedupe(sample_id, "datasetX", "irrelevant body")
+    record["raw_path"] = f"{archive}!{member}"
+    record["raw_sha256"] = raw_sha256
+    return record
+
+
+def test_dedupe_reread_refuses_unsafe_member(tmp_path: Path):
+    archive = tmp_path / "unsafe.tar.bz2"
+    safe_bytes = _eml_bytes(body="safe body")
+    _write_tar(
+        archive,
+        {"../evil.txt": b"evil-bytes", "ok/0001.msg": safe_bytes},
+    )
+    bad = _raw_record(
+        archive, "../evil.txt", hashlib.sha256(b"evil-bytes").hexdigest()
+    )
+    with pytest.raises(bc.CorpusRawError) as excinfo:
+        bc.load_texts_from_raw([bad])
+    assert "unresolvable" in str(excinfo.value)
+
+    # the same archive's safe member still resolves with hash verification
+    good = _raw_record(
+        archive,
+        "ok/0001.msg",
+        hashlib.sha256(safe_bytes).hexdigest(),
+        sample_id="raw-safe",
+    )
+    texts, refused = bc.load_texts_from_raw([good])
+    assert texts["raw-safe"]
+    assert refused == set()
+
+
+def test_dedupe_reread_refuses_oversized_member(tmp_path: Path):
+    archive = tmp_path / "oversized.tar.bz2"
+    big = b"A" * 4096
+    _write_tar(archive, {"big.bin": big})
+    record = _raw_record(archive, "big.bin", hashlib.sha256(big).hexdigest())
+    with pytest.raises(bc.CorpusRawError) as excinfo:
+        bc.load_texts_from_raw([record], max_member_bytes=64)
+    assert "unresolvable" in str(excinfo.value)
+
+    # the oversized member is never read into the member map
+    members = bc._read_tar_members(archive, max_member_bytes=64, max_total_bytes=10_000)
+    assert "big.bin" not in members
+
+
+def test_dedupe_reread_enforces_aggregate_archive_bound(tmp_path: Path):
+    archive = tmp_path / "aggregate.tar.bz2"
+    first = b"B" * 40
+    second = b"C" * 40
+    _write_tar(archive, {"a.bin": first, "b.bin": second})
+    with pytest.raises(bc.CorpusRawError) as excinfo:
+        bc._read_tar_members(archive, max_member_bytes=1000, max_total_bytes=64)
+    assert "exceeds bound" in str(excinfo.value)
+
+    record = _raw_record(
+        archive, "a.bin", hashlib.sha256(first).hexdigest(), sample_id="raw-agg"
+    )
+    with pytest.raises(bc.CorpusRawError):
+        bc.load_texts_from_raw([record], max_member_bytes=1000, max_total_bytes=64)
+
+
+def test_dedupe_reread_hash_mismatch_fails_explicitly(tmp_path: Path):
+    archive = tmp_path / "mismatch.tar.bz2"
+    data = _eml_bytes(body="actual bytes")
+    _write_tar(archive, {"mismatch.msg": data})
+    record = _raw_record(
+        archive,
+        "mismatch.msg",
+        hashlib.sha256(b"different bytes").hexdigest(),
+        sample_id="raw-bad",
+    )
+    with pytest.raises(bc.CorpusRawError) as excinfo:
+        bc.load_texts_from_raw([record])
+    assert "raw_sha256 mismatch" in str(excinfo.value)
+
+
+def test_dedupe_reread_missing_raw_file_fails_explicitly(tmp_path: Path):
+    record = _record_for_dedupe("raw-missing", "datasetX", "body")
+    record["raw_path"] = str(tmp_path / "does-not-exist.eml")
+    record["raw_sha256"] = hashlib.sha256(b"whatever").hexdigest()
+    with pytest.raises(bc.CorpusRawError) as excinfo:
+        bc.load_texts_from_raw([record])
+    assert "unresolvable" in str(excinfo.value)
+
+
+def test_dedupe_reread_refused_rows_are_counted_not_read(tmp_path: Path):
+    record = _record_for_dedupe("raw-refused", "datasetX", "body")
+    record["raw_path"] = "corpus/raw/iwspa/refused-member"
+    record["raw_sha256"] = ""  # ingestion-refused row: no readable raw bytes
+    texts, refused = bc.load_texts_from_raw([record])
+    assert refused == {"raw-refused"}
+    assert texts["raw-refused"] == ""
+
+
+def test_dedupe_command_fails_closed_before_writing(tmp_path: Path, capsys):
+    archive = tmp_path / "cmd.tar.bz2"
+    data = _eml_bytes(body="actual bytes")
+    _write_tar(archive, {"cmd.msg": data})
+    record = _raw_record(
+        archive,
+        "cmd.msg",
+        hashlib.sha256(b"other bytes").hexdigest(),
+        sample_id="cmd-bad",
+    )
+    manifest_path = tmp_path / "manifest.parquet"
+    bc._pq().write_table(bc.build_manifest([record]), manifest_path)
+    before = manifest_path.read_bytes()
+
+    assert bc.main(["dedupe", "--manifest", str(manifest_path), "--seed", "42"]) == 2
+    captured = capsys.readouterr()
+    assert "FAIL" in captured.err
+    assert "raw_sha256 mismatch" in captured.err
+    assert manifest_path.read_bytes() == before  # nothing was rewritten
+
+
+# ---------------------------------------------------------------------------
 # Parser never sees labels; manifest/JSONL/template invariants.
 # ---------------------------------------------------------------------------
 

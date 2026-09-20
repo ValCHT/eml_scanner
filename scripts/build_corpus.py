@@ -92,6 +92,17 @@ MAX_CANDIDATES_PER_RECORD = 256
 #: noted rows, never silent losses.
 MAX_MEMBER_BYTES = 256 * 1024 * 1024
 
+#: Aggregate decompressed-size bound for one archive during any re-read
+#: (the dedupe raw re-derivation included). Exceeding it is an explicit
+#: error, never a silent truncation.
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+
+
+class CorpusRawError(RuntimeError):
+    """Explicit failure: a manifest row's raw bytes cannot be trusted
+    (unresolvable/refused member, archive bound exceeded, or raw_sha256
+    mismatch). Never downgraded to empty fingerprint text."""
+
 #: Row-note markers proving a row is kept with an explicit note.
 ROW_NOTE_TAGS = (
     "parse_error:",
@@ -848,17 +859,41 @@ def compute_duplicate_families(
     return duplicate_groups, family_groups, stats
 
 
-def _read_tar_members(archive: Path) -> dict[str, bytes]:
-    """Read every regular member of a tar archive once (raw stays read-only)."""
+def _read_tar_members(
+    archive: Path,
+    max_member_bytes: int = MAX_MEMBER_BYTES,
+    max_total_bytes: int = MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+) -> dict[str, bytes]:
+    """Read regular members of a tar archive once, raw stays read-only.
+
+    Applies the same rules as ingestion: unsafe member names and members
+    over the per-member bound are **refused without being read** (a manifest
+    row referencing them fails explicitly downstream), and the aggregate
+    uncompressed size of one archive is bounded — exceeding the bound
+    raises :class:`CorpusRawError` instead of reading on.
+    """
 
     members: dict[str, bytes] = {}
+    total_bytes = 0
     with tarfile.open(archive, "r:*") as tar:
         for member in tar.getmembers():
             if not member.isfile():
                 continue
+            if not _member_is_safe(member.name):
+                continue  # refused, never read
+            if member.size > max_member_bytes:
+                continue  # refused, never read
+            if total_bytes + member.size > max_total_bytes:
+                raise CorpusRawError(
+                    f"archive uncompressed size exceeds bound "
+                    f"({max_total_bytes} bytes): {archive}"
+                )
             handle = tar.extractfile(member)
-            if handle is not None:
-                members[member.name] = handle.read()
+            if handle is None:  # pragma: no cover - isfile() guarantees a body
+                continue
+            data = handle.read()
+            total_bytes += len(data)
+            members[member.name] = data
     return members
 
 
@@ -869,32 +904,64 @@ def _read_mbox_members(mailbox: Path) -> dict[str, bytes]:
     }
 
 
-def load_texts_from_raw(records: Iterable[NormalizedRecord]) -> dict[str, str]:
+def load_texts_from_raw(
+    records: Iterable[NormalizedRecord],
+    max_member_bytes: int = MAX_MEMBER_BYTES,
+    max_total_bytes: int = MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+) -> tuple[dict[str, str], set[str]]:
     """Re-derive fingerprint text from the immutable raw bytes.
 
     Comparison-only (docs/corpus.md §7.4): the manifest stays content-free;
     proximity needs the normalized text, recomputed here from raw.
+
+    Fail-closed rules (TICKET-12 review):
+    - a record with an empty ``raw_sha256`` is an ingestion-refused row
+      (unsafe/oversized/empty member): no text is derived and it is counted,
+      never treated as readable;
+    - otherwise the resolved bytes must be non-empty **and**
+      ``sha256(data) == record.raw_sha256`` before any fingerprint is
+      derived; anything else raises :class:`CorpusRawError` explicitly.
+
+    Returns ``(texts, refused_ids)``; an empty fingerprint text for a
+    readable, hash-verified row is legitimate (empty body), not an error.
     """
 
     limits = ParseLimits()
     tar_cache: dict[str, dict[str, bytes]] = {}
     mbox_cache: dict[str, dict[str, bytes]] = {}
     texts: dict[str, str] = {}
+    refused: set[str] = set()
     for record in records:
+        sample_id = str(record["sample_id"])
+        expected_sha = str(record["raw_sha256"])
+        if not expected_sha:
+            refused.add(sample_id)
+            texts[sample_id] = ""
+            continue
         data = _read_mbox_or_tar(
             str(record["raw_path"]),
             str(record["input_format"]),
             tar_cache,
             mbox_cache,
+            max_member_bytes=max_member_bytes,
+            max_total_bytes=max_total_bytes,
         )
         if not data:
-            texts[record["sample_id"]] = ""
-            continue
+            raise CorpusRawError(
+                f"raw bytes unresolvable for {sample_id}: {record['raw_path']} "
+                "(refused/unsafe/oversized member or missing raw file)"
+            )
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if actual_sha != expected_sha:
+            raise CorpusRawError(
+                f"raw_sha256 mismatch for {sample_id}: manifest={expected_sha} "
+                f"actual={actual_sha} ({record['raw_path']})"
+            )
         parsed = parse_bytes(data, str(record["input_format"]), limits)
-        texts[record["sample_id"]] = fingerprint_text_of_parsed(
+        texts[sample_id] = fingerprint_text_of_parsed(
             parsed if isinstance(parsed, ParsedEmail) else None
         )
-    return texts
+    return texts, refused
 
 
 def _read_mbox_or_tar(
@@ -902,6 +969,8 @@ def _read_mbox_or_tar(
     input_format: str,
     tar_cache: dict[str, dict[str, bytes]],
     mbox_cache: dict[str, dict[str, bytes]],
+    max_member_bytes: int = MAX_MEMBER_BYTES,
+    max_total_bytes: int = MAX_ARCHIVE_UNCOMPRESSED_BYTES,
 ) -> bytes:
     """Resolve ``<archive>!<member-or-ordinal>`` (or a plain file path)."""
 
@@ -918,7 +987,11 @@ def _read_mbox_or_tar(
         return mbox_cache[archive_ref].get(member, b"")
     if archive.suffix.lower() in (".bz2", ".gz", ".xz", ".tar"):
         if archive_ref not in tar_cache:
-            tar_cache[archive_ref] = _read_tar_members(archive)
+            tar_cache[archive_ref] = _read_tar_members(
+                archive,
+                max_member_bytes=max_member_bytes,
+                max_total_bytes=max_total_bytes,
+            )
         return tar_cache[archive_ref].get(member, b"")
     try:
         return archive.read_bytes()  # pragma: no cover - unknown raw layout
@@ -1192,8 +1265,19 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
         print(f"FAIL: empty manifest {manifest_path}", file=sys.stderr)
         return 2
 
-    texts = load_texts_from_raw(records)
-    unreadable = sorted(sample for sample, text in texts.items() if not text)
+    try:
+        texts, refused = load_texts_from_raw(records)
+    except CorpusRawError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        print(
+            "FAIL: dedupe stopped before writing anything (fail-closed, "
+            "no silent fingerprint)",
+            file=sys.stderr,
+        )
+        return 2
+    empty_text_rows = sorted(
+        sample for sample, text in texts.items() if not text and sample not in refused
+    )
     duplicate_groups, family_groups, stats = compute_duplicate_families(
         records, texts, seed=int(args.seed)
     )
@@ -1208,10 +1292,13 @@ def cmd_dedupe(args: argparse.Namespace) -> int:
     write_labels_template(PROJECT_ROOT / LABELS_TEMPLATE_PATH, records)
 
     stats["seed"] = int(args.seed)
-    stats["fingerprint_text_unreadable"] = len(unreadable)
+    stats["refused_rows_no_raw_sha256"] = len(refused)
+    stats["empty_fingerprint_text_rows"] = len(empty_text_rows)
     stats["note"] = (
-        "records with unreadable fingerprint text keep their exact-hash groups; "
-        "no line is lost (docs/corpus.md §7.4)"
+        "every readable row was sha256-verified against manifest raw_sha256 "
+        "before fingerprinting; refused rows (empty raw_sha256) keep their "
+        "note and are counted, never silently fingerprinted "
+        "(docs/corpus.md §7.4)"
     )
     out_dir = PROJECT_ROOT / "runs" / "corpus"
     out_dir.mkdir(parents=True, exist_ok=True)
