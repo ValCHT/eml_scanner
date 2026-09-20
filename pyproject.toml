@@ -11,6 +11,8 @@ dependencies = [
     # Baseline StateGraph runtime mandated by docs/architecture.md §1.2.
     "langgraph>=1.0.10,<2",
     "langgraph-checkpoint>=4.1.1,<5",
+    # Parquet corpus manifest (docs/corpus.md §7.3), G6-only dependency.
+    "pyarrow>=25.0,<26",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.2,<3",
     "PyYAML>=6.0,<7",

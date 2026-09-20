@@ -78,3 +78,39 @@ Contenu indexé : objet + corps utile + scénario, pas label ni rationale analys
 Le README Nazario décrit une collecte personnelle classée manuellement, avec erreurs possibles ; il annonce CC-BY-4.0 et distingue anciennes anonymisations des données récentes. Conserver attribution et transformations. SpamAssassin conserve les droits des auteurs des messages : sa disponibilité publique ne signifie pas libre redistribution universelle. Le POC garde les sources/liens et n'inclut pas le corpus brut dans le dépôt distribué. [Nazario](https://monkey.org/~jose/phishing/README.txt), [SpamAssassin](https://spamassassin.apache.org/old/publiccorpus/readme.html).
 
 La finalité est une analogie de scénario. Ne pas recopier des IOC historiques dans la liste courante, ni réutiliser le verdict ancien d'une URL comme réputation actuelle. Les images/QR ne sont pas automatiquement couverts par un index textuel. Si les voisins publics sont trop éloignés des emails SOC, G7-A conclura INCONCLUSIVE/NO au lieu d'agrandir l'infrastructure.
+
+## 7.7 Acquisition réelle TICKET-12 (2026-09-20)
+
+Acquisition bornée exécutée le 2026-09-20 (UTC) sur les quatre sources préférées ; les archives sont posées dans `corpus/raw/**` (git-ignoré), immuables, et l'empreinte réelle de chaque archive est consignée dans `corpus/sources.json` (URL source, date UTC, SHA-256, taille). Les comptages ci-dessous sont les observations locales du `scripts/build_corpus.py inspect` de ce ticket, méthode : présence d'en-tête avec valeur décodée **non vide** (définition §2.3), URLs comptées lexicalement dans les octets bruts pour rester comparables au tableau §7.1, comptages parser séparés.
+
+| Source | Statut | Messages | Archive SHA-256 (12) | Taille | Acquis (UTC) | Format |
+|---|---|---:|---|---:|---|---|
+| SpamAssassin easy_ham | acquis | 2500 | `2b7b65904bcf` | 1 612 216 B | 2026-09-20T14:49:19Z | RFC822 (tar.bz2) |
+| SpamAssassin hard_ham | acquis | 250 | `ce2ce6788064` | 1 029 898 B | 2026-09-20T14:49:19Z | RFC822 (tar.bz2) |
+| SpamAssassin spam | acquis | 500 | `c08debc32413` | 1 183 768 B | 2026-09-20T14:49:19Z | RFC822 (tar.bz2) |
+| Nazario phishing-2025 | acquis | 481 | `f1fa7e0fe35c` | 18 769 863 B | 2026-09-20T14:49:21Z | mbox |
+| IWSPA-AP 2018 | **non acquis** | — | — | — | — | `.txt` prétraités |
+| Enron CMU | non acquis (optionnel, non requis) | — | — | — | — | — |
+| PhishFuzzer | non acquis (optionnel, non requis) | — | — | — | — | JSON |
+| Privé autorisé | **non fourni** | — | — | — | — | — |
+
+Total réel : **3731 messages** bruts ; 0 échec de parsing, 0 ligne perdue, 0 membre refusé. Les fichiers `cmds` expédiés par les archives SpamAssassin sont exclus des messages (`exclude_members` déclaré dans `corpus/sources.json`) ; ce sont des métadonnées d'archive, pas des emails.
+
+Sources déclarées indisponibles (aucune fabrication) : l'archive officielle IWSPA n'a pas été obtenue (échantillons publics = PDF prétraités ; interdiction de les reconstituer en faux RFC822) ; Enron et PhishFuzzer sont optionnels et non requis pour le cœur initial ; aucun corpus privé n'a été fourni. `corpus/raw/iwspa/`, `corpus/raw/enron/`, `corpus/raw/phishfuzzer/` et `corpus/raw/private/` doivent rester absents : l'inspect refuse toute présence d'un dossier déclaré absent.
+
+Couverture d'en-têtes mesurée sur ces acquisitions (présence avec valeur non vide ; §7.2 du 17/09 comptait la présence lexicale, d'où de rares écarts, ex. spam To 500 présents / 496 non vides) :
+
+| Source / n | From | To | Subject | Date | Message-ID | Received | Return-Path | Auth-Results | DKIM |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| easy_ham / 2500 | 2500 | 2348 | 2500 | 2500 | 2500 | 2365 | 2500 | 0 | 0 |
+| hard_ham / 250 | 250 | 250 | 249 | 250 | 250 | 250 | 241 | 0 | 0 |
+| spam / 500 | 500 | 496 | 498 | 500 | 500 | 500 | 494 | 0 | 0 |
+| Nazario 2025 / 481 | 481 | 471 | 480 | 478 | 476 | 481 | 481 | 481 | 401 |
+
+Comptages parser (nouveaux, basés sur `src.parsing`, complémentaires des définitions lexicales §7.1) : messages avec URLs extraites par le parser = easy_ham 2005, hard_ham 241, spam 444, Nazario 445 ; messages avec HTML = 8/165/257/470 ; pièces attachées avec octets décodés = 17/3/9/52 messages ; images MIME = 0/2/1/35 messages. Présence lexicale d'URL dans les octets bruts : 3016/481 identique au tableau §7.1 (même méthode).
+
+Sorties du ticket : `corpus/normalized/emails.jsonl` (3731 lignes, métadonnées seulement — le texte reste dans raw), `corpus/manifest.parquet` (3731 lignes × 35 colonnes : minimum §7.3 + ajouts justifiés, dont `raw_sha256`, `header_presence`, `header_integrity`, `attachment_representation`, `has_original_attachment_bytes`, `body_sha256` comparatif, `split='candidate'`), `corpus/review/labels_template.jsonl` (3731 lignes `label_status='unreviewed'`, `normalized_label=null`, aucun faux label prérempli), rapports `runs/corpus/{inspection,normalize,dedupe}.json`.
+
+Déduplication (`dedupe --seed 42`, bornée) : 80 groupes de doublons exacts (>1 membre, par raw SHA-256 ou empreinte de corps normalisée), 145 familles à membres multiples (plus grande = 12), 439 liens de proximité Jaccard ≥ 0,85 sur shingles de 5 mots (0 faillite de borne : 0 dépassement du pool candidat), **0 famille intersource** SA↔Nazario observée, 5 messages sans texte d'empreinte conservés via leurs groupes de hash exacts. `duplicate_group`/`family_group` sont écrits dans le manifest ; les labels source restent intacts, `normalized_label` reste null — la revue humaine (TICKET-13) fait la suite.
+
+Conventions de référence (`raw_path`) : `<archive>!<membre>` pour les tar (membre lu en place, jamais extrait), `<mbox>!<ordinal 1-based sur 4 chiffres>` pour le mbox (lignes séparatrices `From ` exclues — dérivé documenté, cf. §7.3). `raw_sha256` couvre toujours les octets exacts du message référencé ; pour un membre mbox, c'est le message RFC822 sans la ligne séparatrice. `input_format` : `rfc822` (SpamAssassin), `mbox_member` (Nazario) ; `structured_public_text` reste réservé aux fichiers JSON sans RFC822 (PhishFuzzer), non acquis ici — aucune donnée n'est inventée pour l'exercer. `header_integrity` décrit la chaîne locale : `original` (membre tar conservé tel quel), `transformed` (flux mbox dérivé du conteneur), `unknown` (JSON sans SMTP) ; les transformations documentées par les auteurs des corpus figurent dans `transformation_notes`, jamais comme un nettoyage de notre part. `attachment_representation` : `bytes` (octets décodés présents), `filename` (nom seul — cas PhishFuzzer, unit-testé sans données réelles), `hash`, `absent`.
