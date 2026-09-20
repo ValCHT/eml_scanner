@@ -2178,6 +2178,12 @@ def select_gold(
                 f"Gold candidate {sample_id!r} label disagrees with canonical "
                 f"labels ({row['final_label']!r} vs {label_row['normalized_label']!r})"
             )
+        if str(row["raw_sha256"]) != str(label_row["raw_sha256"]):
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} raw_sha256 disagrees with "
+                f"canonical labels ({row['raw_sha256']!r} vs "
+                f"{label_row['raw_sha256']!r}) — fail-closed"
+            )
         if str(label_row["family_group"]) != family:
             raise GoldValidationError(
                 f"Gold candidate {sample_id!r} family_group disagrees with "
@@ -2186,6 +2192,12 @@ def select_gold(
         if sample_id not in manifest_by_id:
             raise GoldValidationError(
                 f"Gold candidate {sample_id!r} absent from the manifest"
+            )
+        if str(row["raw_sha256"]) != str(manifest_by_id[sample_id]["raw_sha256"]):
+            raise GoldValidationError(
+                f"Gold candidate {sample_id!r} raw_sha256 disagrees with the "
+                f"manifest ({row['raw_sha256']!r} vs "
+                f"{manifest_by_id[sample_id]['raw_sha256']!r}) — fail-closed"
             )
         pool_samples.add(sample_id)
         pool_families.add(family)
@@ -2649,7 +2661,10 @@ def cmd_select(args: argparse.Namespace) -> int:
         outcome = select_gold(
             read_manifest(_t13_input_path(args.manifest)),
             list(load_canonical_labels(_t13_input_path(args.labels)).values()),
-            load_gold_candidates(_t13_input_path(args.gold_candidates)),
+            load_gold_candidates(
+                _t13_input_path(args.gold_candidates),
+                adjudication=load_adjudication(_t13_input_path(args.adjudication)),
+            ),
             seed=int(args.seed),
         )
     except GoldValidationError as exc:
@@ -2719,7 +2734,10 @@ def cmd_freeze(args: argparse.Namespace) -> int:
         seal, gold_test_path = freeze_test(
             read_manifest(_t13_input_path(args.manifest)),
             list(load_canonical_labels(_t13_input_path(args.labels)).values()),
-            load_gold_candidates(_t13_input_path(args.gold_candidates)),
+            load_gold_candidates(
+                _t13_input_path(args.gold_candidates),
+                adjudication=load_adjudication(_t13_input_path(args.adjudication)),
+            ),
             destination=args.destination,
             seed=int(args.seed),
         )
@@ -2744,7 +2762,10 @@ def cmd_verify_splits(args: argparse.Namespace) -> int:
         outcome = select_gold(
             read_manifest(_t13_input_path(args.manifest)),
             list(load_canonical_labels(_t13_input_path(args.labels)).values()),
-            load_gold_candidates(_t13_input_path(args.gold_candidates)),
+            load_gold_candidates(
+                _t13_input_path(args.gold_candidates),
+                adjudication=load_adjudication(_t13_input_path(args.adjudication)),
+            ),
             seed=int(args.seed),
         )
     except GoldValidationError as exc:
@@ -2911,6 +2932,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     select_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     select_parser.add_argument("--labels", default=str(LABELS_PATH))
+    select_parser.add_argument("--adjudication", required=True)
     select_parser.add_argument("--gold-candidates", required=True)
     select_parser.add_argument("--seed", type=int, default=42)
     select_parser.add_argument("--gold-dev", default=str(GOLD_DEV_PATH))
@@ -2925,6 +2947,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     freeze_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     freeze_parser.add_argument("--labels", default=str(LABELS_PATH))
+    freeze_parser.add_argument("--adjudication", required=True)
     freeze_parser.add_argument("--gold-candidates", required=True)
     freeze_parser.add_argument("--destination", default="corpus/gold")
     freeze_parser.add_argument("--seed", type=int, default=42)
@@ -2936,6 +2959,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     verify_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     verify_parser.add_argument("--labels", default=str(LABELS_PATH))
+    verify_parser.add_argument("--adjudication", required=True)
     verify_parser.add_argument("--gold-candidates", required=True)
     verify_parser.add_argument("--seed", type=int, default=42)
     verify_parser.add_argument("--gold-dev", default=str(GOLD_DEV_PATH))

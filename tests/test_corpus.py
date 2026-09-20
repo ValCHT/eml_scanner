@@ -1353,3 +1353,62 @@ def test_goldai_labels_conversion_file_level(tmp_path: Path):
     # ambiguous rows excluded from gold selection
     ambiguous = [row for row in rows if row["label_status"] == "ambiguous"]
     assert all(row["normalized_label"] is None for row in ambiguous)
+
+
+def test_goldai_real_select_command_rejects_candidate_raw_sha256_tamper(
+    tmp_path: Path, capsys
+):
+    """Regression (PR review): through the REAL select command path — not
+    only the optional-adjudication helper — a Gold candidate whose
+    sample_id/family/final_label all agree but whose raw_sha256 disagrees
+    with the authoritative adjudication artefact must be rejected."""
+
+    scenario = _t13_build_scenario(
+        tmp_path,
+        {"phishing": 2, "legitime": 2, "fraude": 1, "spam": 1},
+    )
+    manifest_path = tmp_path / "manifest.parquet"
+    bc._pq().write_table(bc.build_manifest(scenario["records"]), manifest_path)
+    adj_path = _t13_write_pool(tmp_path / "adj.jsonl", scenario["adjudication_rows"])
+
+    # a pool row with a plausible-looking but wrong raw_sha256 for an
+    # otherwise-consistent sample_id/family/final_label
+    tampered_candidate = dict(
+        scenario["pool_rows"][0], raw_sha256="c" * 64
+    )
+    pool_path = _t13_write_pool(
+        tmp_path / "pool_tampered_raw.jsonl",
+        [tampered_candidate] + scenario["pool_rows"][1:],
+    )
+
+    exit_code = bc.main(
+        [
+            "select",
+            "--manifest", str(manifest_path),
+            "--labels", str(scenario["labels_path"]),
+            "--adjudication", str(adj_path),
+            "--gold-candidates", str(pool_path),
+            "--seed", "42",
+            "--gold-dev", str(tmp_path / "gold_dev.jsonl"),
+            "--rag-out", str(tmp_path / "rag.jsonl"),
+            "--plan-out", str(tmp_path / "plan.json"),
+        ]
+    )
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "raw_sha256 disagrees" in captured.err
+
+    # the same tampering must also be rejected on the freeze path
+    exit_code = bc.main(
+        [
+            "freeze",
+            "--manifest", str(manifest_path),
+            "--labels", str(scenario["labels_path"]),
+            "--adjudication", str(adj_path),
+            "--gold-candidates", str(pool_path),
+            "--seed", "42",
+            "--destination", str(tmp_path / "holdout"),
+        ]
+    )
+    assert exit_code == 2
+    assert not (tmp_path / "holdout" / "gold_test.jsonl").exists()

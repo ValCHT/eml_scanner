@@ -59,7 +59,7 @@ Produire soi-même des labels supposés analyste, afficher le contenu email du g
 
 ## FILES ALLOWED
 
-scripts/build_corpus.py; tests/test_corpus.py; corpus/manifest.parquet; corpus/review/labels.jsonl (conversion canonique déterministe de l'artefact Gold-AI approuvé, conservé comme audit source); corpus/gold/gold_dev.jsonl; corpus/gold/gold_test.jsonl (partition de validation interne, métadonnées/labels uniquement); corpus/gold/test_seal.json (reçu agrégé de reproductibilité); corpus/rag/public_cases.jsonl; docs/corpus.md; docs/evaluation.md; docs/contracts.md; docs/tickets/TICKET-13.md (amendements opérateur). Les bytes raw restent dans corpus/raw/** git-ignoré, jamais dupliqués dans les gold. Artefacts de validation sous runs/tickets/TICKET-13/ (dont inputs/ copies immuables) et runs/gates/ de la gate concernée.
+scripts/build_corpus.py; tests/test_corpus.py; corpus/manifest.parquet; corpus/review/labels.jsonl (conversion canonique déterministe de l'artefact Gold-AI approuvé, conservé comme audit source); corpus/gold/gold_dev.jsonl; corpus/gold/gold_test.jsonl (partition de validation interne, métadonnées/labels uniquement); corpus/gold/test_seal.json (reçu agrégé de reproductibilité); corpus/rag/public_cases.jsonl; docs/corpus.md; docs/evaluation.md; docs/contracts.md; docs/tickets/TICKET-13.md (amendements opérateur); .gitignore et AGENTS.md (amendement opérateur : suivi des artefacts métadonnées approuvés et clarification de l'invariant holdout). Les bytes raw restent dans corpus/raw/** git-ignoré, jamais dupliqués dans les gold. Artefacts de validation sous runs/tickets/TICKET-13/ (dont inputs/ copies immuables) et runs/gates/ de la gate concernée.
 
 ## INTERFACES / CONTRACTS
 
@@ -67,19 +67,19 @@ select_gold(manifest, reviewed_labels, seed=42)->SplitPlan ; freeze_test(split, 
 
 ## IMPLEMENTATION REQUIREMENTS
 
-GoldRecord strict de docs/contracts.md §2.8 : métadonnées/labels uniquement dans gold_dev/gold_test, raw_path et raw_sha256 obligatoires ; email_sha256 V1 conservé et égal. Aucun contenu email/HTML/headers/MIME/pièce/image/extrait privé, y compris dans label_rationale. Les bytes restent dans corpus/raw/** git-ignoré. Valider ce contrat et les hashes avant sélection ; loader résout raw_path et refuse le sample en cas de mismatch avant analyse. Objectifs 50/30/30/20/30/40, sans remplir les déficits avec de faux labels. Réserver les familles des 150 références publiques RAG, puis dev/test. Vérifier collisions de source, seed, fingerprint et campagne. Le responsable garde le test dans son espace ; l’agent reçoit uniquement un reçu agrégé et une empreinte. Annotations ou espace distinct manquants : BLOCKED. Le gold reste utilisable pour mesurer un résultat non concluant si certaines classes manquent, avec cette limite explicite.
+GoldRecord strict de docs/contracts.md §2.8 : métadonnées/labels uniquement dans gold_dev/gold_test, raw_path et raw_sha256 obligatoires ; email_sha256 V1 conservé et égal. Aucun contenu email/HTML/headers/MIME/pièce/image/extrait privé, y compris dans label_rationale. Les bytes restent dans corpus/raw/** git-ignoré. Valider ce contrat et les hashes avant sélection ; loader résout raw_path et refuse le sample en cas de mismatch avant analyse. Objectifs 50/30/30/20/30/40, sans remplir les déficits avec de faux labels. Réserver les familles des 150 références publiques RAG, puis dev/test. Vérifier collisions de source, seed, fingerprint et campagne. POC simplifié (amendement 2) : `gold_test.jsonl` est matérialisé dans le workspace de build comme fichier de **métadonnées/labels uniquement** — ce n'est PAS un holdout indépendant ; `test_seal.json` (reçu agrégé + empreinte) reste obligatoire et validé contre les bytes réels. `gold_test` ne doit JAMAIS servir au tuning, à un changement de prompt, de seuil, de variante ou de modèle ; les décisions de développement utilisent `gold_dev` uniquement. Aucune validation humaine n'est revendiquée. Annotations ou artefacts manquants : BLOCKED. Le gold reste utilisable pour mesurer un résultat non concluant si certaines classes manquent, avec cette limite explicite.
 
 ## TESTS REQUIRED
 
-Champs body/html/headers/raw/raw_email/mime_content et autres contenus interdits rejetés même vides/nichés ; chemin absent/hors raw et hash divergent refusés ; contrôle sur dev et objets locaux de contrat sans accès au holdout. Intersection des groupes vide ; seeds PhishFuzzer inséparables ; privé refusé au RAG ; annotations non confirmées/ambiguës exclues ; split reproductible ; seal sensible à un byte changé ; aucune donnée test montée dans l’environnement d’agent.
+Champs body/html/headers/raw/raw_email/mime_content et autres contenus interdits rejetés même vides/nichés ; chemin absent/hors raw et hash divergent refusés ; contrôle sur dev, test (métadonnées/labels uniquement) et objets locaux de contrat. Intersection des groupes vide (dev/test/RAG) ; seeds PhishFuzzer inséparables ; privé refusé au RAG ; annotations non confirmées/ambiguës exclues ; split reproductible (seed 42) ; seal sensible à un byte changé de l'objet test ; candidate Gold absent de l'adjuration complète ou au raw_sha256 divergent refusé par les chemins CLI réels ; aucune donnée d'un éventuel holdout externe indépendant montée dans l'environnement d'agent.
 
 ## VALIDATION COMMANDS
 
 ```bash
 python scripts/build_corpus.py labels --adjudication <artefact Gold-AI approuvé> --manifest corpus/manifest.parquet
-python scripts/build_corpus.py select --manifest corpus/manifest.parquet --labels corpus/review/labels.jsonl --gold-candidates <pool approuvé> --seed 42
-python scripts/build_corpus.py freeze --manifest corpus/manifest.parquet --labels corpus/review/labels.jsonl --gold-candidates <pool approuvé> --seed 42 --destination corpus/gold
-python scripts/build_corpus.py verify-splits --manifest corpus/manifest.parquet --labels corpus/review/labels.jsonl --gold-candidates <pool approuvé> --seed 42
+python scripts/build_corpus.py select --manifest corpus/manifest.parquet --labels corpus/review/labels.jsonl --adjudication <artefact Gold-AI approuvé> --gold-candidates <pool approuvé> --seed 42
+python scripts/build_corpus.py freeze --manifest corpus/manifest.parquet --labels corpus/review/labels.jsonl --adjudication <artefact Gold-AI approuvé> --gold-candidates <pool approuvé> --seed 42 --destination corpus/gold
+python scripts/build_corpus.py verify-splits --manifest corpus/manifest.parquet --labels corpus/review/labels.jsonl --adjudication <artefact Gold-AI approuvé> --gold-candidates <pool approuvé> --seed 42
 python -m pytest tests/test_corpus.py -q
 python -m pytest -q
 python -m pip check
@@ -92,19 +92,19 @@ Exit 0 ; splits sans collision (83 dev / 83 test, familles disjointes) ; nombre/
 
 ## SECURITY INVARIANTS
 
-Aucune réponse Luna/VT/OpenCTI/urlscan simulée. Fixtures = données d’entrée seulement. Aucun secret dans code, prompts, état ou logs ; aucune pièce jointe exécutée/uploadée ; aucun accès Internet libre au LLM ; tiers via adaptateurs typés et règles de sortie ; RAG exclusivement public, validé et disjoint de gold ; test non accessible aux agents de build.
+Aucune réponse Luna/VT/OpenCTI/urlscan simulée. Fixtures = données d’entrée seulement. Aucun secret dans code, prompts, état ou logs ; aucune pièce jointe exécutée/uploadée ; aucun accès Internet libre au LLM ; tiers via adaptateurs typés et règles de sortie ; RAG exclusivement public, validé et disjoint de gold. Pour ce POC approuvé : `gold_test.jsonl` est une partition de validation interne (métadonnées/labels uniquement), matérialisée et validée dans le workspace de build ; ce n'est PAS un holdout indépendant, et toute utilisation pour tuning/prompt/seuil/variante/sélection de modèle reste interdite — développement sur `gold_dev` uniquement. Les éventuels holdouts externes indépendants (désignés hors poste de build) restent inaccessibles aux agents de build.
 
 ## ACCEPTANCE CRITERIA
 
-Gold dev exploitable, test scellé et inaccessible au build ; références RAG exclusivement publiques et séparées de tous les gold.
+Gold dev exploitable ; `gold_test.jsonl` matérialisé (métadonnées/labels uniquement, validation interne POC — pas un holdout indépendant) et scellé par `test_seal.json` validé ; dev/test/RAG familles disjointes ; références RAG exclusivement publiques et séparées de tous les gold ; aucune décision de développement fondée sur gold_test.
 
 ## FAIL CONDITIONS
 
-Contenu email dans un fichier gold, raw_sha256 incohérent ou raw_path hors périmètre, validation humaine fabriquée, groupes qui traversent splits, consultation test par coding agent, import privé dans public_cases.
+Contenu email dans un fichier gold, raw_sha256 incohérent ou raw_path hors périmètre, validation humaine fabriquée ou revendiquée, groupes qui traversent splits, tuning/prompt/seuil/variante/sélection de modèle fondé sur gold_test, candidate Gold absent de l'adjuration complète ou au raw_sha256 divergent accepté, import privé dans public_cases, holdout externe indépendant accessible par un agent de build.
 
 ## ARTEFACTS PRODUCED
 
-Dev, manifest des partitions, index-source public non vectorisé, reçu de gel ; jalon humain explicite.
+Dev, test (partition de validation interne, métadonnées/labels uniquement), manifest des partitions, index-source public non vectorisé, reçu de gel (test_seal.json) ; jalon d'adjuration opérateur explicite (pas de jalon humain — aucune validation humaine revendiquée).
 
 ## CODEX EXECUTION PROMPT
 
