@@ -26,11 +26,17 @@ Indexation privé/SOC, gold_dev/gold_test, prédictions automatiques, sync CTI, 
 
 ## FILES ALLOWED
 
-src/tools/rag.py; src/graph.py pour remplacement du no-op existant; scripts/manage_rag.py; tests/test_rag.py; configs/tools.yaml; configs/experiment_lock.json; docs/corpus.md; docs/evaluation.md; pyproject.toml; requirements.lock. Artefacts de validation sous runs/tickets/TICKET-15/ et runs/gates/ de la gate concernée.
+src/tools/rag.py; src/graph.py pour remplacement du no-op existant; scripts/manage_rag.py; scripts/evaluate.py; src/metrics.py; tests/test_rag.py; tests/test_metrics.py; tests/test_evaluation.py; configs/tools.yaml; configs/experiment_lock.json; docs/corpus.md; docs/evaluation.md; pyproject.toml; requirements.lock. Artefacts de validation sous runs/tickets/TICKET-15/ et runs/gates/ de la gate concernée.
 
 ## INTERFACES / CONTRACTS
 
 add(cases: list[RagCase]) -> int ; search(query: str, exclusions: set[str], k: int = 3) -> list[RagCase] ; clear() -> None. Collection unique, distance cosine, modèle ONNX all-MiniLM-L6-v2 avec version et empreinte gelées. Chaque cas impose is_public=true et split=rag_reference.
+
+**Interface évaluateur appariée (review PR #15, 2026-09-21) — implémentée par ce ticket.** `scripts/evaluate.py` doit accepter `--variant rag` et `--paired-with <run-dir>` pour un run `--sample-profile smoke` :
+- le run apparié est un run baseline archivé (`runs/eval/dev_smoke`) : il est LU seul, jamais rejoué, et ses lignes/reports ne sont jamais modifiés ;
+- la comparaison apparie exactement les mêmes `sample_id` (identité de sélection vérifiée) et exige des dénominateurs identiques ; une ligne manquante ou surnuméraire = FAIL ;
+- `measurement_scope=smoke` et `performance_claims_allowed=false` restent archivés ; les métriques restent diagnostiques, INCONCLUSIVE valide ;
+- aucun tuning sur les résultats ; le premier benchmark complet avec/sans RAG est T19.
 
 ## IMPLEMENTATION REQUIREMENTS
 

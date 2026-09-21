@@ -20,7 +20,7 @@ Ce dossier est un plan : statut initial de toutes les gates = NOT_STARTED. PASS 
 | G7-A | 15 | index exclusivement public, validé, disjoint de dev/test ; ablation réelle contrôlée ; décision KEEP/NO/INCONCLUSIVE étayée. Ne pas confondre ticket PASS et RAG utile. |
 | G7-B | 16 | capacités vision réellement testées ; images/QR bornés ; mêmes emails comparés ; aucune hallucination de contenu non fourni ; conclusion mesurée. |
 | G7-C | 17 | diagnostic quantitatif des erreurs + faisabilité ; décision FINE-TUNE=YES/NO/INCONCLUSIVE, sans entraînement. Si YES, dossier Phase 2 avec les onze champs de docs/evaluation.md §8.5, dont modèles candidats distincts du besoin. |
-| Mesure terminale G6 | 18→19 | **amendement opérateur 2026-09-21 :** T18 devient un smoke de freeze/readiness/reproducibility pré-T19 (empreintes, gel, reproductibilité — PAS de full gold_test). Le premier benchmark complet (dev complet, test scellé, Visual-79, architecture + modèle) est **T19** : code/config/prompts/RAG gelés ; ouverture du test par l'évaluateur ; une évaluation finale préenregistrée, métriques et décision documentées ; aucune retouche au vu du test. |
+| Mesure terminale | 18→19 | **Amendement opérateur 2026-09-21 :** T18 est un smoke de gel/readiness/reproductibilité pré-T19 (empreintes, gel, reproduction exacte du smoke borné — PAS de full gold_test). La mesure terminale est **T19** : premier benchmark complet (dev complet, test scellé, Visual-79, architecture + modèle) ; code/config/prompts/RAG gelés ; ouverture du test par l'évaluateur ; une évaluation finale préenregistrée, métriques et décision documentées ; aucune retouche au vu du test. |
 
 G7-D TOOL ABLATION est une expérience optionnelle décrite en docs/evaluation.md §8.5, hors baseline, hors chemin critique et sans ticket ni reçu de gate supplémentaire. Elle ne conditionne jamais PASS G6.
 
@@ -40,7 +40,7 @@ Checks bloquants sur chaque entrée réellement envoyée, audit de docs/contract
 
 Minimisation : l'archive du payload HTTP exact est autorisée uniquement pour `source_profile=fixture`. Le chemin de code utilisé en corpus/Gold/privé doit calculer les mêmes hashes et compteurs sur les bytes en mémoire puis transmettre ces mêmes bytes, sans persister le request body complet.
 
-Archiver attentes de fixture, sortie réelle et désaccord dans `runs/gates/G2/fixture_performance.jsonl` sans les transmettre au LLM. G6 reprend ce bilan de performance du harness séparément de Gold Dev/Test ; jamais d'ajout des fixtures aux métriques Gold. Ne pas retoucher un prompt, label ou seuil pour faire artificiellement passer une fixture G2. G6 est la première décision quantitative sur la qualité métier.
+Archiver attentes de fixture, sortie réelle et désaccord dans `runs/gates/G2/fixture_performance.jsonl` sans les transmettre au LLM. G6 reprend ce bilan de performance du harness séparément de Gold Dev/Test ; jamais d'ajout des fixtures aux métriques Gold. Ne pas retoucher un prompt, label ou seuil pour faire artificiellement passer une fixture G2. **Amendement opérateur 2026-09-21 :** G6 valide le harness (smoke borné), pas la qualité métier ; la première décision quantitative sur la qualité métier est la mesure terminale T19 (benchmark complet, après gel).
 
 ## 5.1.2 G5/G6 : audit FINAL et preuve des variantes A/B/C
 
@@ -69,6 +69,8 @@ Commandes de fermeture minimales (gates précédentes incluses) :
 | G4 | `python -m pytest tests/test_virustotal.py tests/test_opencti.py tests/test_urlscan.py --live -q` ; `python scripts/smoke.py tools --require-all` |
 | G5 | `python -m pytest tests/test_evidence.py tests/test_verify.py tests/test_policy.py tests/test_graph.py tests/test_reporting.py --live -q` ; `python run_batch.py --input tests/fixtures --mode live --output runs/gates/G5/batch` ; `python scripts/validate_reports.py --run-dir runs/gates/G5/batch` |
 | G6 | `python -m pytest tests/test_corpus.py tests/test_metrics.py tests/test_evaluation.py -q` ; `python scripts/evaluate.py --split dev --mode live --variant baseline --sample-profile smoke --out runs/eval/dev_smoke` ; `python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke --out runs/eval/dev_smoke_recomputed` |
+
+Avant d'exécuter les commandes, `check_gate.py G6 --record` déplace toute sortie smoke existante (`runs/eval/dev_smoke`, `runs/eval/dev_smoke_recomputed`) sous `runs/eval/_archive/<horodatage UTC>_<nom>` : l'enregistrement est rejouable sans nettoyage manuel, aucune preuve n'est supprimée ni écrasée, et le déplacement est consigné dans le reçu (`archived_pre_run`).
 
 Fermeture de G7-C, uniquement si l'expérience est menée : `python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke --out runs/eval/dev_for_ft_decision`, puis `python scripts/check_gate.py G7-C --record`. Dans la même liste fixe du contrôleur, vérifier `docs/fine_tuning_decision.md`, la concordance des comptes/dev refs avec les archives, le statut YES/NO/INCONCLUSIVE et, si YES, les onze champs de §8.5 évaluation ; archiver le reçu existant `runs/gates/G7-C/gate.json`. TICKET-18 utilise ce reçu ou la décision explicite de ne pas mener G7-C. Aucun nouveau contrôleur ni nouvelle gate.
 

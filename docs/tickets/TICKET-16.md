@@ -26,11 +26,17 @@ Pipeline OCR distinct, visite locale d'URL, deuxième modèle, vision obligatoir
 
 ## FILES ALLOWED
 
-src/parsing.py; src/llm.py; src/tools/urlscan.py; src/prompts.py; tests/test_vision.py; scripts/smoke.py; configs/tools.yaml; configs/experiment_lock.json; docs/contracts.md; docs/evaluation.md; pyproject.toml; requirements.lock. Artefacts de validation sous runs/tickets/TICKET-16/ et runs/gates/ de la gate concernée.
+src/parsing.py; src/llm.py; src/tools/urlscan.py; src/prompts.py; scripts/smoke.py; scripts/evaluate.py; src/metrics.py; tests/test_vision.py; tests/test_metrics.py; tests/test_evaluation.py; configs/tools.yaml; configs/experiment_lock.json; docs/contracts.md; docs/evaluation.md; pyproject.toml; requirements.lock. Artefacts de validation sous runs/tickets/TICKET-16/ et runs/gates/ de la gate concernée.
 
 ## INTERFACES / CONTRACTS
 
 prepare_visuals(parsed, limits) -> list[VisualEvidence] ; decode_qr(image_bytes: bytes) -> list[str]. Mêmes fonctions assess_internal/final, message utilisateur multipart avec data URI. Payload QR validée ajoutée au registre comme INTERNE avant le même gate et les mêmes règles de sortie.
+
+**Interface évaluateur appariée (review PR #15, 2026-09-21) — implémentée par ce ticket.** `scripts/evaluate.py` doit accepter `--variant vision` et `--paired-with <run-dir>` pour un run `--sample-profile smoke` :
+- le run apparié est un run baseline archivé (`runs/eval/dev_smoke`) : il est LU seul, jamais rejoué, et ses lignes/reports ne sont jamais modifiés ;
+- la comparaison apparie exactement les mêmes `sample_id` (identité de sélection vérifiée) et exige des dénominateurs identiques ; une ligne manquante ou surnuméraire = FAIL ;
+- `measurement_scope=smoke` et `performance_claims_allowed=false` restent archivés ; les métriques restent diagnostiques, INCONCLUSIVE valide ;
+- aucun tuning sur les résultats ; le premier benchmark complet texte/QR/vision sur les cas visuels est T19.
 
 ## IMPLEMENTATION REQUIREMENTS
 

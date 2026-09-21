@@ -54,6 +54,18 @@ def evaluate_script():
     return _load_evaluate_module()
 
 
+def _load_check_gate_module():
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("check_gate_script", SCRIPTS_DIR / "check_gate.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["check_gate_script"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 # ---------------------------------------------------------------------------
 # gold_test is NEVER opened by the TICKET-14 dev workflow
 # ---------------------------------------------------------------------------
@@ -906,14 +918,7 @@ def test_live_requires_explicit_sample_profile(evaluate_script, tmp_path):
 
 def test_check_gate_g6_commands_are_smoke_scoped():
     """G6 must run the bounded smoke, not the 83-email benchmark."""
-    import importlib.util
-    import sys
-
-    spec = importlib.util.spec_from_file_location("check_gate_script", SCRIPTS_DIR / "check_gate.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules["check_gate_script"] = module
-    spec.loader.exec_module(module)
+    module = _load_check_gate_module()
     commands = module.GATE_COMMANDS["G6"]
     assert " ".join(commands[1][1:]) == (
         "scripts/evaluate.py --split dev --mode live --variant baseline "
@@ -924,6 +929,54 @@ def test_check_gate_g6_commands_are_smoke_scoped():
         "--out runs/eval/dev_smoke_recomputed"
     )
     assert not any("--out runs/eval/dev_baseline" in " ".join(command) for command in commands)
+    # The gate record must archive those exact output dirs before re-running.
+    assert module.GATE_ARTIFACT_DIRS["G6"] == [
+        "runs/eval/dev_smoke",
+        "runs/eval/dev_smoke_recomputed",
+    ]
+
+
+def test_check_gate_g6_record_is_rerunnable_without_manual_cleanup(monkeypatch, tmp_path):
+    """PR #15 finding 2: --record must archive preserved runs, never fail on them.
+
+    The evaluator refuses a non-empty --out; the controller therefore MOVES
+    any existing gate output under runs/eval/_archive/<stamp>_<name> before
+    executing its fixed commands (non-destructive, deterministic, repeatable).
+    """
+    module = _load_check_gate_module()
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    smoke = tmp_path / "runs" / "eval" / "dev_smoke"
+    recomputed = tmp_path / "runs" / "eval" / "dev_smoke_recomputed"
+    (smoke / "run-1").mkdir(parents=True)
+    (smoke / "predictions.jsonl").write_text("{}\n", encoding="utf-8")
+    recomputed.mkdir(parents=True)
+    (recomputed / "metrics.json").write_text("{}\n", encoding="utf-8")
+
+    archived = module.archive_gate_artifacts("G6", stamp="20260921T000000Z")
+    assert [entry["path"] for entry in archived] == [
+        "runs/eval/dev_smoke",
+        "runs/eval/dev_smoke_recomputed",
+    ]
+    assert not smoke.exists()
+    assert (
+        tmp_path / "runs" / "eval" / "_archive" / "20260921T000000Z_dev_smoke"
+        / "predictions.jsonl"
+    ).is_file()
+    assert (
+        tmp_path / "runs" / "eval" / "_archive" / "20260921T000000Z_dev_smoke_recomputed"
+        / "metrics.json"
+    ).is_file()
+
+    # Re-runnable: a later record archives the new outputs instead of failing.
+    (smoke / "run-2").mkdir(parents=True)
+    (smoke / "run-2" / "report.json").write_text("{}", encoding="utf-8")
+    archived_again = module.archive_gate_artifacts("G6", stamp="20260921T010000Z")
+    assert [entry["path"] for entry in archived_again] == ["runs/eval/dev_smoke"]
+    assert archived_again[0]["archived_to"].endswith("20260921T010000Z_dev_smoke")
+
+    # Nothing to archive -> no-op; unaffected gates stay untouched.
+    assert module.archive_gate_artifacts("G6", stamp="20260921T020000Z") == []
+    assert module.archive_gate_artifacts("G1") == []
 
 
 def test_recompute_smoke_requires_exact_selection_identity(evaluate_script, monkeypatch, tmp_path):
@@ -946,3 +999,199 @@ def test_recompute_smoke_requires_exact_selection_identity(evaluate_script, monk
     config = _make_cfg(evaluate_script, tmp_path)
     exit_code = evaluate_script.run_recompute(args, config)
     assert exit_code == evaluate_script.EXIT_FAIL
+
+
+# ---------------------------------------------------------------------------
+# Provider outcomes in the bounded smoke (PR #15 finding 4)
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_smoke_never_aborts_on_provider_outcomes(evaluate_script):
+    """Five genuine INTERNAL timeouts are honest rows, never a smoke FAIL.
+
+    The consecutive-failure abort is reserved to a FULL-corpus run (T19)
+    that never saw one successful INTERNAL call; the bounded smoke never
+    aborts on provider outcomes (operator amendment 2026-09-21).
+    """
+
+    smoke = evaluate_script.SMOKE_PROFILE
+    full = evaluate_script.FULL_PROFILE
+    assert evaluate_script._abort_on_systematic_outage(smoke, 5, False) is False
+    assert evaluate_script._abort_on_systematic_outage(smoke, 50, False) is False
+    assert evaluate_script._abort_on_systematic_outage(smoke, 5, True) is False
+    assert evaluate_script._abort_on_systematic_outage(full, 4, False) is False
+    assert evaluate_script._abort_on_systematic_outage(full, 5, False) is True
+    assert evaluate_script._abort_on_systematic_outage(full, 9, False) is True
+    assert evaluate_script._abort_on_systematic_outage(full, 5, True) is False
+
+
+class _StubSettings:
+    """Minimal Settings stand-in for the offline run_live contract tests."""
+
+    LITELLM_API_KEY = "unit-test-key-not-a-secret"
+    LITELLM_MODEL = "Qwen/Qwen3.8-27B"
+    LITELLM_CHAT_URL = "https://unit.invalid/v1/chat/completions"
+
+    def model_copy(self, update: dict) -> "_StubSettings":
+        clone = _StubSettings()
+        for key, value in update.items():
+            setattr(clone, key, value)
+        return clone
+
+
+def _stub_offline_run_live(evaluate_script, monkeypatch, tmp_path, gold_rows):
+    """Wire run_live offline with a provider that fails on every record.
+
+    Only the guard/denominator behaviour is under test. The report shape is
+    the same synthetic fixture used by the recompute tests (clearly labeled
+    a unit fixture, never a benchmark measurement); the network is denied
+    module-wide and every provider call is stubbed out.
+    """
+
+    import types
+
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(evaluate_script, "load_settings", lambda: _StubSettings())
+    monkeypatch.setattr(evaluate_script, "verify_experiment_lock", lambda lock: [])
+    monkeypatch.setattr(evaluate_script, "check_runtime_ready", lambda settings, lock: [])
+    monkeypatch.setattr(
+        evaluate_script, "load_gold_records",
+        lambda config, split: (gold_rows, tmp_path / "corpus" / "gold" / "gold_dev.jsonl"),
+    )
+    monkeypatch.setattr(
+        evaluate_script, "validate_gold_raw_files",
+        lambda rows: ({row["sample_id"]: b"raw email bytes" for row in rows}, []),
+    )
+    monkeypatch.setattr(
+        evaluate_script, "build_manifest",
+        lambda **kwargs: {
+            "run_id": kwargs["out_dir"].name,
+            "date_time_utc": kwargs["started_at"],
+            "git_commit": None,
+            "variant": kwargs["variant"],
+            "split": kwargs["split"],
+            "sample_count": len(kwargs["rows"]),
+            "measurement_scope": kwargs["measurement_scope"],
+            "performance_claims_allowed": kwargs["performance_claims_allowed"],
+            "sample_selection_rule": kwargs["sample_selection_rule"],
+            "selected_sample_ids": kwargs["selected_ids"],
+            "full_dev_label_support": kwargs["full_support"],
+        },
+    )
+    monkeypatch.setattr(
+        evaluate_script, "write_human_report",
+        lambda path, metrics, manifest: path.write_text("stub report", encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        evaluate_script, "write_matrix_csv",
+        lambda path, metrics: path.write_text("stub matrix", encoding="utf-8"),
+    )
+    stub_audits = [{
+        "attempt": 1, "phase": "final", "external_evidence_count_sent": 0,
+        "internal_evidence_count_sent": 1, "evidence_count_sent": 1,
+        "rag_case_count_sent": 0, "visual_count_sent": 0,
+        "tool_status_digest": "d" * 64,
+    }]
+    monkeypatch.setattr(evaluate_script, "read_final_audits", lambda capture_dir: list(stub_audits))
+    monkeypatch.setattr(
+        evaluate_script, "run_control_b",
+        lambda settings, final_state, capture_dir, pricing: {
+            "attempted": True, "reason_not_attempted": None, "verdict": None,
+            "confidence": None, "probabilities": None,
+            "call": {"phase": "final", "status": "error", "attempts": 1,
+                     "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+                     "reasoning_tokens": 0, "cost_usd": None, "cost_status": "unknown"},
+            "latency_ms": None, "capture_dir": "responses_control_b",
+            "cost_usd": None, "cost_status": "unknown",
+        },
+    )
+
+    order: dict[str, object] = {"rows": []}
+
+    def _fake_pipeline(settings, email_file, profile):
+        done = order.setdefault("done", [])
+        rows = order["rows"]
+        assert isinstance(rows, list) and len(done) < len(rows)
+        row = rows[len(done)]
+        done.append(row["sample_id"])
+        report = _synthetic_report(
+            row["sample_id"], row["raw_sha256"], gate="complex",
+            final_verdict=None, internal_verdict=None, action="REVIEW",
+        )
+        report_dir = tmp_path / "stubbed_reports" / row["sample_id"]
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_file = report_dir / "report.json"
+        report_file.write_text(
+            json.dumps(report, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+        )
+        final_state = {
+            "parsed": types.SimpleNamespace(email_sha256=row["raw_sha256"]),
+            "internal": None,
+            "final_validated": None,
+            "evidence": {},
+            "report_path": str(report_file),
+        }
+        return report, final_state
+
+    monkeypatch.setattr(evaluate_script, "run_nominal_pipeline", _fake_pipeline)
+    return order
+
+
+def test_run_live_smoke_keeps_all_provider_failures_in_denominators(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """Finding 4 regression: a smoke whose every INTERNAL call fails still
+    completes with honest rows, exact recompute inputs and exit 0."""
+
+    gold = [
+        _gold_row("u1", "a" * 64, "phishing"),
+        _gold_row("u2", "b" * 64, "spam"),
+        _gold_row("u3", "c" * 64, "legitime"),
+    ]
+    config = _make_cfg(evaluate_script, tmp_path)
+    order = _stub_offline_run_live(evaluate_script, monkeypatch, tmp_path, gold)
+    order["rows"] = evaluate_script.select_smoke_sample(gold)
+
+    out = tmp_path / "dev_smoke"
+    args = evaluate_script.build_parser().parse_args(
+        ["--split", "dev", "--mode", "live", "--variant", "baseline",
+         "--sample-profile", "smoke", "--out", str(out)]
+    )
+    exit_code = evaluate_script.run_live(args, config, {})
+    assert exit_code == evaluate_script.EXIT_OK
+    rows = [
+        json.loads(line)
+        for line in (out / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 3  # complete denominator, no silent drop
+    assert all(row["predicted"] is None for row in rows)
+    assert all(row["internal_verdict"] is None for row in rows)
+    assert (out / "metrics.json").is_file()
+
+
+def test_run_live_full_profile_keeps_the_systematic_outage_abort(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """The full-corpus T19 scope still refuses to burn 5 records on a dead
+    endpoint when no INTERNAL call ever succeeded."""
+
+    gold = [
+        _gold_row("u1", "a" * 64, "phishing"),
+        _gold_row("u2", "b" * 64, "phishing"),
+        _gold_row("u3", "c" * 64, "spam"),
+        _gold_row("u4", "d" * 64, "legitime"),
+        _gold_row("u5", "e" * 64, "fraude"),
+    ]
+    config = _make_cfg(evaluate_script, tmp_path)
+    order = _stub_offline_run_live(evaluate_script, monkeypatch, tmp_path, gold)
+    order["rows"] = list(gold)
+
+    out = tmp_path / "dev_full"
+    args = evaluate_script.build_parser().parse_args(
+        ["--split", "dev", "--mode", "live", "--variant", "baseline",
+         "--sample-profile", "full", "--out", str(out)]
+    )
+    exit_code = evaluate_script.run_live(args, config, {})
+    assert exit_code == evaluate_script.EXIT_FAIL
+    assert not (out / "predictions.jsonl").exists()

@@ -2,13 +2,16 @@
 
 Implementation repository prepared from the frozen V1.2 specification dated 18/09/2026.
 
-**Implementation status (updated 21/09/2026):** TICKET-01 through TICKET-13 are
+**Implementation status (updated 21/09/2026):** TICKET-01 through TICKET-14 are
 implemented; gate receipts G0–G5 are recorded under `runs/gates/`. TICKET-14
-(G6 closure) implements the real dev baseline evaluation:
-`src/metrics.py`, `scripts/evaluate.py`, `configs/evaluation.yaml`,
-`configs/experiment_lock.json` with the workflow documented in
-`docs/evaluation.md` §8.6 (frozen A/B/C control on COMPLEX dev emails,
-exact offline recompute, gold_test never opened during development).
+(G6 harness-validation gate) implements the bounded real dev smoke and its
+exact offline recompute: `src/metrics.py`, `scripts/evaluate.py`,
+`configs/evaluation.yaml`, `configs/experiment_lock.json`, documented in
+`docs/evaluation.md` §8.6. Per the operator amendment, T15–T18 use bounded
+samples/smokes only (RAG sample, visual smoke, accumulated diagnostics,
+pre-T19 readiness/reproducibility); the first **full benchmark** (complete dev,
+sealed test, Visual-79) is **TICKET-19**, and `gold_test` is never opened
+before it.
 
 ## Real dev baseline (TICKET-14)
 
@@ -22,7 +25,8 @@ python scripts/evaluate.py --split dev --mode live --variant baseline \
 python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke \
   --out runs/eval/dev_smoke_recomputed
 
-# G6 receipt
+# G6 receipt (re-runnable: existing smoke outputs are archived first,
+# never deleted/overwritten)
 python scripts/check_gate.py G6 --record
 ```
 
@@ -108,12 +112,12 @@ an `sk-*` key. No provider-specific credential mapping exists.
 - `CLAUDE.md` — Claude Code entry point importing `AGENTS.md`.
 - `opencode.jsonc` — project permissions for OpenCode V2; no model is hard-coded.
 - `docs/` — active normative architecture/contracts/gates and domain documents.
-- `docs/tickets/` — TICKET-01 … TICKET-18. Execute one ticket per agent session.
+- `docs/tickets/` — TICKET-01 … TICKET-18 (TICKET-19 = terminal sealed evaluation). Execute one ticket per agent session.
 - `docs/spec/` — frozen V1.2 audit snapshot, changelog, QA, matrix and research inspections.
 - `prompts/` — runtime INTERNAL / FINAL prompts.
 - `schemas/` — runtime JSON schemas.
 - `ops/` — human/agent runbooks and repository setup helpers. Not runtime code.
-- `.github/workflows/cross-platform.yml` — non-live test matrix for Python 3.11 on Linux/macOS/Windows once G0 creates the package.
+- `ops/ci/cross-platform.yml.disabled` — non-live Python 3.11 test matrix for Linux/macOS/Windows; kept out of `.github/workflows/` because the publishing token lacks the `workflows` permission, so no GitHub status check runs on PR heads until it is restored.
 
 ## Recommended implementation workflow
 
@@ -127,7 +131,8 @@ Use one Git branch per implementation gate and one commit per ticket:
 - `gate/g5`: TICKET-09 → 11
 - `gate/g6`: TICKET-12 → 14
 - optional G7 branches only if selected
-- TICKET-18 only after the experiment is frozen and the holdout is released by the evaluator
+- TICKET-18: pre-T19 freeze/readiness/reproducibility smoke only (no gold_test read)
+- TICKET-19: terminal sealed evaluation — the first full benchmark, only after the experiment is frozen and the holdout is released by the evaluator
 
 Start a fresh OpenCode session for every ticket. Do not reuse the previous ticket's conversational context as a source of truth; the filesystem, Git history and ticket are the state.
 

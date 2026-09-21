@@ -134,6 +134,11 @@ SAMPLE_SELECTION_RULE = (
 #: Exact filename of the archived FINAL validation rejects (assess_final).
 FINAL_REJECT_FILE = "final_validation_reject.json"
 
+#: Early-abort threshold for a FULL-corpus run (TICKET-19 scope): a hard
+#: endpoint outage fails every INTERNAL attempt from the first record, and
+#: aborting avoids burning the corpus. The bounded smoke NEVER aborts on
+#: provider outcomes (operator amendment 2026-09-21): a timeout/unavailable is
+#: an honest archived row, not a harness failure.
 CONSECUTIVE_INFRA_FAILURE_LIMIT = 5
 
 VALID_EXIT_CODES = {EXIT_OK, EXIT_FAIL, EXIT_BLOCKED}
@@ -1427,14 +1432,17 @@ def run_live(
             consecutive_infra_failures = _infra_guard(
                 evaluation_row, consecutive_infra_failures
             )
-            if consecutive_infra_failures >= CONSECUTIVE_INFRA_FAILURE_LIMIT and not any_internal_ok:
+            if _abort_on_systematic_outage(
+                sample_profile, consecutive_infra_failures, any_internal_ok
+            ):
                 print(
                     "FAIL: systematic provider failure detected "
                     f"({consecutive_infra_failures} consecutive samples with a "
                     "failed INTERNAL attempt and no successful internal call "
-                    "so far); the measurement would be empty — aborting before "
-                    "burning the corpus; fix the runtime and rerun the SAME "
-                    "frozen baseline",
+                    "so far; full-corpus scope, the bounded smoke never aborts "
+                    "on provider outcomes) — aborting before burning the "
+                    "corpus; fix the runtime and rerun the SAME frozen "
+                    "baseline",
                     file=sys.stderr,
                 )
                 return EXIT_FAIL
@@ -1497,6 +1505,26 @@ def run_live(
     return EXIT_OK
 
 
+def _abort_on_systematic_outage(
+    sample_profile: str, consecutive_failures: int, any_internal_ok: bool
+) -> bool:
+    """True only for a FULL-corpus run that never saw ONE successful INTERNAL call.
+
+    Operator amendment 2026-09-21: the bounded smoke is a harness-validation
+    gate — provider timeout/unavailable outcomes stay honest rows in the
+    denominator and never abort it, even when all smoke records fail (five
+    genuine timeouts must not invalidate G6). The full T19 run keeps the
+    early abort so a dead endpoint cannot burn 83 emails without a single
+    real model result.
+    """
+
+    return (
+        sample_profile == FULL_PROFILE
+        and consecutive_failures >= CONSECUTIVE_INFRA_FAILURE_LIMIT
+        and not any_internal_ok
+    )
+
+
 def _infra_guard(
     evaluation_row: Mapping[str, Any], current: int
 ) -> int:
@@ -1505,9 +1533,10 @@ def _infra_guard(
     A hard outage (e.g. every call 401) fails every INTERNAL attempt from
     the very first sample. Legitimate endpoint latency VARIANCE (some calls
     succeed near the frozen phase budgets, others time out) must never
-    abort a long run: the abort only triggers when ``any_internal_ok``
-    (tracked by the caller) is still False after
-    CONSECUTIVE_INFRA_FAILURE_LIMIT consecutive failures.
+    abort a run. ``_abort_on_systematic_outage`` decides from this counter;
+    it only ever fires for a FULL-corpus run whose first
+    CONSECUTIVE_INFRA_FAILURE_LIMIT records all failed with no internal
+    success yet.
     """
 
     if _row_internal_ok(evaluation_row):

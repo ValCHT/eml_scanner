@@ -18,12 +18,13 @@ split_files:
 
 # Split policy (operator amendment 2026-09-20): gold_test is an INTERNAL POC
 # validation partition, NOT an independent holdout. The TICKET-14 dev
-# workflow never opens it; the terminal test evaluation is executed by a
-# later authorized ticket after the experiment configuration is frozen.
+# workflow never opens it; the terminal test evaluation is executed by the
+# later authorized ticket (operator amendment 2026-09-21: TICKET-19, the
+# first full benchmark) after the experiment configuration is frozen.
 split_policy:
   dev_only_in_ticket_14: true
   gold_test_readable_by_ticket_14: false
-  terminal_test_command_ticket: TICKET-18
+  terminal_test_command_ticket: TICKET-19
   test_seal: corpus/gold/test_seal.json
 
 # Source profile derivation (from dataset provenance, never message content).

@@ -26,6 +26,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -110,6 +111,16 @@ REQUIRED_TICKETS: dict[str, list[str]] = {
     "G7-A": ["TICKET-15"],
     "G7-B": ["TICKET-16"],
     "G7-C": ["TICKET-17"],
+}
+
+#: Gate output directories whose commands have a strict "never overwrite an
+#: existing run" contract (``scripts/evaluate.py`` fails closed on a non-empty
+#: ``--out``). Before ``--record`` executes the fixed commands, an existing
+#: non-empty directory is MOVED (never deleted, never overwritten) to
+#: ``runs/eval/_archive/<UTC stamp>_<name>``. Recording is therefore
+#: re-runnable without manual cleanup and the preserved evidence is kept.
+GATE_ARTIFACT_DIRS: dict[str, list[str]] = {
+    "G6": ["runs/eval/dev_smoke", "runs/eval/dev_smoke_recomputed"],
 }
 
 #: Files that must exist for the gate (docs/gates.md §5.2).
@@ -545,6 +556,39 @@ def check_prerequisites(gate: str) -> list[str]:
     return missing
 
 
+def archive_gate_artifacts(gate: str, stamp: str | None = None) -> list[dict[str, str]]:
+    """Deterministically archive the gate's previous output directories.
+
+    Non-destructive by construction: a non-empty directory listed in
+    :data:`GATE_ARTIFACT_DIRS` is MOVED under ``runs/eval/_archive/`` with a
+    UTC timestamp (a colliding name gets a numeric suffix; nothing is ever
+    deleted or overwritten). Returns the archive moves, newest call last;
+    an empty list means there was nothing to do. Called by ``record`` so a
+    receipt can always be (re-)recorded without manual cleanup.
+    """
+
+    archived: list[dict[str, str]] = []
+    for relative in GATE_ARTIFACT_DIRS.get(gate, []):
+        source = PROJECT_ROOT / relative
+        if not source.is_dir() or not any(source.iterdir()):
+            continue
+        if stamp is None:
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        archive_root = PROJECT_ROOT / "runs" / "eval" / "_archive"
+        target = archive_root / f"{stamp}_{source.name}"
+        suffix = 2
+        while target.exists():
+            target = archive_root / f"{stamp}_{source.name}-{suffix}"
+            suffix += 1
+        archive_root.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        archived.append({
+            "path": relative,
+            "archived_to": str(target.relative_to(PROJECT_ROOT)).replace(os.sep, "/"),
+        })
+    return archived
+
+
 def record(gate: str) -> int:
     missing = check_prerequisites(gate)
     if missing:
@@ -559,6 +603,13 @@ def record(gate: str) -> int:
         )
         print(f"BLOCKED/FAIL: missing prerequisites: {', '.join(missing)}")
         return 2
+
+    # Deterministic, non-destructive archive of any previous output the fixed
+    # commands would refuse to overwrite (see GATE_ARTIFACT_DIRS): --record is
+    # always (re-)runnable, no manual cleanup, no evidence loss.
+    archived_pre_run = archive_gate_artifacts(gate)
+    for entry in archived_pre_run:
+        print(f"archived previous run: {entry['path']} -> {entry['archived_to']}")
 
     commands: list[dict[str, object]] = []
     all_ok = True
@@ -663,6 +714,7 @@ def record(gate: str) -> int:
         "g7c_validation_problems": g7c_problems,
         "g3_replay_problems": g3_replay_problems,
         "tested_commit": worktree_fingerprint(),
+        "archived_pre_run": archived_pre_run,
         # Scope-aware validity (docs/gates.md §5.2): the receipt stays valid
         # while the files this gate really exercised are content-identical.
         "validated_scope_hashes": compute_gate_scope(gate),

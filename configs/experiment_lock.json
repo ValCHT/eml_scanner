@@ -23,7 +23,7 @@
     "config_gate": "d41cb9f4d14c72ceddd7cbaf0d4352d2cddd71beb0a3405a8fed8ee59c02a9ae",
     "config_policy": "e0bf22da81f416667191755138fe243088005b2f2bd1eac22409be6ef1285aee",
     "config_tools": "59a6867e03de960bedf75da5945692bf6372fb7073efa0b7765107907514b564",
-    "evaluation_config": "d2fa480d52e87f078065573dc62ee67f12bf39114a37c3a1886275d570ad6074",
+    "evaluation_config": "716c42ad3425039e4746881dc87b5f8dfd54e8f0cbaea42243c02a9badc70ed4",
     "gold_dev": "74f364e2a6624047b20adfa7f08ab67f8bff9a2ec71edb77dc4bb3c3947dd5da",
     "prompts_final": "cfc9ba52a8426e524223cbfbfda53b874f2c4beac5379688bbcb772f6e14f6f7",
     "prompts_internal": "60dc6ee00e0eabfd063638af7f62f9aeb00a919305277d99b64820809469b9ae",
