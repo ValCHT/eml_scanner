@@ -42,7 +42,13 @@ Security invariants:
   ``unsupported``.
 - Limits (configs/tools.yaml ``vision``): 4 images, 4 MiB per image,
   8 MiB total, 16,000,000 decoded pixels; enforced BEFORE expensive
-  processing whenever possible.
+  processing whenever possible. ``vision.enabled`` gates the pixel staging
+  ONLY: QR decoding is piloted independently by ``QR_DECODE_ENABLED`` and
+  never attaches pixels by itself (``text+QR`` mode).
+- The SHA-256 of the exact staged bytes is computed independently
+  (``derived_sha256``) and must equal the parser's original hash; this POC
+  creates no derived representation, so a mismatch is refused instead of
+  sending pixels whose provenance hash would be wrong.
 - Images, QR payloads and screenshots are untrusted email content, never
   instructions: staged pixels travel as user-message ``image_url`` parts
   (PNG/JPEG data URIs only) and never as system text.
@@ -51,6 +57,7 @@ Security invariants:
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -228,9 +235,11 @@ class StagedVisual:
     """Pixels staged for ONE model call; runtime-only, never persisted.
 
     ``sha256`` is the hash of the ORIGINAL image bytes (parent reference,
-    never replaced). ``derived_sha256`` is the independent hash of the exact
-    bytes embedded in the data URI; this POC creates no derived
-    representation, so both hashes are equal by construction.
+    never replaced). ``derived_sha256`` is the INDEPENDENT SHA-256 of the
+    exact bytes embedded in the data URI, computed here and never copied
+    from the parent. This POC creates no derived representation, so the two
+    hashes must be equal: a mismatch means the bytes do not belong to this
+    visual and the image is refused (typed ``unavailable``, never staged).
     """
 
     visual_id: str
@@ -251,9 +260,13 @@ class VisionPreparation:
 
     ``staged`` carries exactly the images whose pixels may be attached to
     the next model call (``SUPPLIED_VISUAL_IDS`` = their ids, in this
-    order). ``qr_decoder_available`` is computed only when QR decoding is
-    requested: ``qr_enabled=True`` without zxing-cpp degrades to empty
-    ``qr_payloads`` (typed, observable — never fabricated).
+    order). Vision and QR are INDEPENDENT: ``limits.enabled`` controls the
+    pixel staging while ``qr_enabled`` controls the local decoder, so
+    ``text+QR`` decodes payloads without staging a pixel and ``text+vision``
+    stages pixels without executing the decoder. ``qr_decoder_available`` is
+    computed only when QR decoding is requested: ``qr_enabled=True`` without
+    zxing-cpp degrades to empty ``qr_payloads`` (typed, observable — never
+    fabricated).
     """
 
     visuals: list[VisualEvidence]
@@ -282,17 +295,34 @@ def prepare_visual_bundle(
     metadata-only state is kept; missing bytes become ``unavailable``; the
     per-image, cumulative and pixel limits are checked BEFORE decoding and
     produce ``over_limit``; a corrupt image becomes ``unavailable``; an
-    accepted image beyond ``max_images`` becomes ``over_limit``. Accepted
-    images are staged (``supplied_to_model``) with their true dimensions
-    and, when ``qr_enabled``, their locally decoded QR payloads.
+    accepted image beyond ``max_images`` becomes ``over_limit``.
+
+    Vision and QR are INDEPENDENT switches:
+
+    - pixels are staged (``supplied_to_model``) only when ``limits.enabled``
+      is true (``MODEL_SUPPORTS_VISION``);
+    - QR payloads are decoded only when ``qr_enabled`` is true
+      (``QR_DECODE_ENABLED``) and are attached to the visual whatever the
+      vision switch: ``text+QR`` decodes without staging any pixel, and a
+      disabled QR switch never executes the decoder;
+    - when neither is requested, the optional stack is never imported and
+      the parser's metadata-only state is forwarded unchanged.
+
+    A staged image whose bytes hash to something other than its recorded
+    ``sha256`` is refused (typed ``unavailable``, never staged): this POC
+    creates no derived representation, so the hash of the exact bytes sent
+    must equal the original's — a mismatch means the association is wrong.
     """
 
     visuals: list[VisualEvidence] = []
     staged: list[StagedVisual] = []
     staged_total = 0
     accepted = 0
-    pixel_decoder_available = _probe_pillow() if image_bytes is not None else False
-    qr_decoder_available = _probe_zxingcpp() if qr_enabled else False
+    vision_enabled = bool(limits.enabled)
+    qr_requested = bool(qr_enabled)
+    process_bytes = (vision_enabled or qr_requested) and image_bytes is not None
+    pixel_decoder_available = _probe_pillow() if process_bytes else False
+    qr_decoder_available = _probe_zxingcpp() if qr_requested else False
 
     for original in parsed.images:
         # Forward parser-typed outcomes unchanged: nothing is re-interpreted.
@@ -302,9 +332,10 @@ def prepare_visual_bundle(
         if original.mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
             visuals.append(_retype(original, status="unsupported"))
             continue
-        if image_bytes is None or not pixel_decoder_available:
-            # Metadata-only mode (no pixels supplied, or the optional stack
-            # is broken/absent): typed degradation, never a crash.
+        if not process_bytes or not pixel_decoder_available:
+            # Metadata-only mode (no bytes supplied, both switches off, or
+            # the optional stack is broken/absent): typed degradation, never
+            # a crash.
             visuals.append(original.model_copy(deep=True))
             continue
         data = image_bytes.get(original.part_id or "")
@@ -340,37 +371,54 @@ def prepare_visual_bundle(
             visuals.append(_retype(original, status="over_limit"))
             continue
 
+        # The hash of the EXACT bytes is computed independently here; this
+        # POC creates no derived representation, so a mismatch with the
+        # original means the bytes do not belong to this visual: refused,
+        # never staged (the parser's sha256 is never rewritten).
+        derived_sha256 = hashlib.sha256(data).hexdigest()
+        if derived_sha256 != original.sha256:
+            visuals.append(_retype(original, status="unavailable"))
+            continue
+
         payloads: list[str] = []
-        if qr_enabled and qr_decoder_available:
+        if qr_requested and qr_decoder_available:
             try:
                 payloads = decode_qr(data)
             except VisionDependencyError:
                 payloads = []
-        staged_total += len(data)
-        prepared = original.model_copy(
-            deep=True,
-            update={
-                "width": width,
-                "height": height,
-                "status": "supplied_to_model",
-                "qr_payloads": payloads,
-            },
-        )
-        visuals.append(prepared)
-        staged.append(
-            StagedVisual(
-                visual_id=original.id,
-                sha256=original.sha256,
-                mime_type=original.mime_type,
-                part_id=original.part_id,
-                content_id=original.content_id,
-                data_mime_type=detected_mime,
-                data_uri=_data_uri(detected_mime, data),
-                width=width,
-                height=height,
-                derived_sha256=original.sha256,
+
+        if vision_enabled:
+            staged_total += len(data)
+            prepared = original.model_copy(
+                deep=True,
+                update={
+                    "width": width,
+                    "height": height,
+                    "status": "supplied_to_model",
+                    "qr_payloads": payloads,
+                },
             )
-        )
+            visuals.append(prepared)
+            staged.append(
+                StagedVisual(
+                    visual_id=original.id,
+                    sha256=original.sha256,
+                    mime_type=original.mime_type,
+                    part_id=original.part_id,
+                    content_id=original.content_id,
+                    data_mime_type=detected_mime,
+                    data_uri=_data_uri(detected_mime, data),
+                    width=width,
+                    height=height,
+                    derived_sha256=derived_sha256,
+                )
+            )
+        else:
+            # QR-only mode: no pixel is staged; the exact local payloads are
+            # the only produced state (the visual stays metadata_only).
+            visuals.append(
+                original.model_copy(deep=True, update={"qr_payloads": payloads})
+            )
 
     return VisionPreparation(
         visuals=visuals,

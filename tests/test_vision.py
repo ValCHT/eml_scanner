@@ -286,6 +286,102 @@ def test_missing_bytes_for_a_declared_image_are_typed_unavailable() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Vision/QR independence (review PR #18): the two switches are separate
+# ---------------------------------------------------------------------------
+
+
+def test_vision_disabled_never_stages_pixels_even_with_bytes() -> None:
+    """``vision.enabled=false``: metadata only, no pixel attached (text+QR base)."""
+
+    banner = _fixture("benign_banner.png")
+    parsed, image_bytes = _parsed_with([("png", banner)])
+    disabled = VISION_LIMITS.model_copy(update={"enabled": False})
+    bundle = prepare_visual_bundle(parsed, disabled, image_bytes=image_bytes)
+    assert [visual.status for visual in bundle.visuals] == ["metadata_only"]
+    assert bundle.staged == ()
+    assert bundle.supplied_ids == []
+    assert bundle.pixel_decoder_available is False
+    # Bytes were available but no pixel may be attached: the text-only form
+    # (and its empty SUPPLIED_VISUAL_IDS) stays byte-identical.
+    messages, envelope = build_internal_messages(parsed, ContextLimits(), bundle.staged)
+    assert envelope["SUPPLIED_VISUAL_IDS"] == []
+    assert isinstance(messages[1]["content"], str)
+
+
+def test_qr_only_mode_decodes_without_staging_any_pixel() -> None:
+    """``text+QR``: vision disabled, QR enabled → exact payloads, zero pixels."""
+
+    parsed, image_bytes = _parsed_with([("png", _fixture("qr_https.png"))])
+    disabled = VISION_LIMITS.model_copy(update={"enabled": False})
+    bundle = prepare_visual_bundle(
+        parsed, disabled, image_bytes=image_bytes, qr_enabled=True
+    )
+    assert [visual.status for visual in bundle.visuals] == ["metadata_only"]
+    assert [visual.qr_payloads for visual in bundle.visuals] == [
+        ["https://qr.example.com/verify?id=42"]
+    ]
+    assert bundle.staged == ()
+    assert bundle.supplied_ids == []
+    assert bundle.qr_decode_requested is True
+    links, observables, evidence = qr_contract(bundle.visuals)
+    assert [link.role for link in links] == ["qr_url"]
+    assert all(entry.provenance == "INTERNE" for entry in evidence)
+
+
+def test_vision_only_mode_stages_without_executing_the_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``text+vision``: QR disabled → pixels staged, decoder never executed."""
+
+    import src.vision as vision
+
+    def _forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("QR decoder executed while QR_DECODE_ENABLED=false")
+
+    monkeypatch.setattr(vision, "decode_qr", _forbidden)
+    banner = _fixture("benign_banner.png")
+    parsed, image_bytes = _parsed_with([("png", banner)])
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=image_bytes, qr_enabled=False
+    )
+    assert [visual.status for visual in bundle.visuals] == ["supplied_to_model"]
+    assert [visual.qr_payloads for visual in bundle.visuals] == [[]]
+    assert bundle.staged and bundle.staged[0].visual_id == parsed.images[0].id
+
+
+def test_derived_sha256_is_the_hash_of_the_exact_staged_bytes() -> None:
+    """The staged hash is computed from the bytes, never copied from the parent."""
+
+    banner = _fixture("benign_banner.png")
+    parsed, image_bytes = _parsed_with([("png", banner)])
+    bundle = prepare_visual_bundle(parsed, VISION_LIMITS, image_bytes=image_bytes)
+    staged = bundle.staged[0]
+    assert staged.derived_sha256 == hashlib.sha256(banner).hexdigest()
+    assert staged.derived_sha256 == staged.sha256 == parsed.images[0].sha256
+    assert base64.b64decode(staged.data_uri.split(",", 1)[1]) == banner
+
+
+def test_wrong_bytes_for_a_part_are_refused_never_staged() -> None:
+    """A wrong ``part_id → bytes`` association must not send foreign pixels."""
+
+    banner = _fixture("benign_banner.png")
+    jpeg = _fixture("benign_photo.jpeg")
+    eml = _eml_with_images([("png", banner), ("jpeg", jpeg)])
+    parsed = parse_bytes(eml, "rfc822", ParseLimits())
+    assert isinstance(parsed, ParsedEmail)
+    extracted = load_image_bytes(eml, parsed)
+    tampered = dict(extracted)
+    tampered[parsed.images[0].part_id] = jpeg  # valid JPEG, wrong visual
+    bundle = prepare_visual_bundle(parsed, VISION_LIMITS, image_bytes=tampered)
+    assert bundle.visuals[0].status == "unavailable"
+    assert bundle.visuals[0].sha256 == hashlib.sha256(banner).hexdigest()
+    assert [staged.visual_id for staged in bundle.staged] == [parsed.images[1].id]
+    assert all(
+        staged.derived_sha256 == staged.sha256 for staged in bundle.staged
+    )
+
+
+# ---------------------------------------------------------------------------
 # QR decoding (local only, deterministic)
 # ---------------------------------------------------------------------------
 
@@ -550,6 +646,73 @@ def test_qr_enabled_without_decoder_degrades_typed(
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK" in proc.stdout
+
+
+def test_vision_disabled_with_bytes_never_imports_the_optional_stack(
+    tmp_path: Any, project_root: Path
+) -> None:
+    """``vision.enabled=false`` with bytes loaded: metadata only, no PIL/zxingcpp."""
+
+    code = textwrap.dedent(
+        f"""
+        import sys
+        sys.path.insert(0, r"{project_root}")
+        from pathlib import Path
+
+        from src.config import VisionToolConfig
+        from src.parsing import ParseLimits, parse_bytes
+        from src.vision import load_image_bytes, prepare_visuals
+
+        limits = VisionToolConfig(
+            enabled=False, max_images=4, max_image_bytes=4194304,
+            max_total_bytes=8388608, max_pixels=16000000,
+        )
+        eml = Path(r"{FIXTURES / 'benign_image.eml'}").read_bytes()
+        parsed = parse_bytes(eml, "rfc822", ParseLimits())
+        image_bytes = load_image_bytes(eml, parsed)
+        prepared = prepare_visuals(
+            parsed, limits, image_bytes=image_bytes, qr_enabled=False
+        )
+        assert [visual.status for visual in prepared] == ["metadata_only"]
+        assert all(visual.qr_payloads == [] for visual in prepared)
+        assert "PIL" not in sys.modules, "Pillow imported while vision is disabled"
+        assert "zxingcpp" not in sys.modules, "zxing-cpp imported while QR is disabled"
+        print("OK")
+        """
+    )
+    proc = _run_python(
+        project_root,
+        code,
+        _blocked_env(project_root, _import_blocker(tmp_path, block_pillow=True)),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "OK" in proc.stdout
+
+
+def _load_smoke_module() -> Any:
+    """Import ``scripts/smoke.py`` without running its CLI."""
+
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "smoke.py"
+    spec = importlib.util.spec_from_file_location("smoke_script", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["smoke_script"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_smoke_vision_schema_is_the_frozen_assessment_schema(project_root: Path) -> None:
+    """``smoke.py vision`` must send the real INTERNAL schema (review PR #18)."""
+
+    smoke = _load_smoke_module()
+    schema = smoke._smoke_vision_schema()
+    frozen = json.loads(
+        (project_root / "schemas" / "assessment.schema.json").read_text(encoding="utf-8")
+    )
+    assert schema == frozen
 
 
 # ---------------------------------------------------------------------------

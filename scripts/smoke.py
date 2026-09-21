@@ -1369,9 +1369,16 @@ def smoke_vision(if_configured: bool = False, require_configured: bool = False) 
         if not isinstance(parsed, ParsedEmail) or not parsed.images:
             raise RuntimeError("benign vision fixture did not produce parser images")
         image_bytes = load_image_bytes(eml, parsed)
+        # The smoke runs only when the operator explicitly enabled
+        # MODEL_SUPPORTS_VISION (checked above); the frozen config keeps
+        # vision.enabled=false, so the capability limits are applied IN
+        # MEMORY for this single bounded call (the file is never rewritten).
+        limits = _vision_tool_limits()
+        if not limits.enabled:
+            limits = limits.model_copy(update={"enabled": True})
         bundle = prepare_visual_bundle(
             parsed,
-            _vision_tool_limits(),
+            limits,
             image_bytes=image_bytes,
             qr_enabled=settings.QR_DECODE_ENABLED,
         )
@@ -1496,6 +1503,22 @@ def _vision_tool_limits() -> Any:
     from src.config import ToolsConfig, load_yaml_config
 
     return load_yaml_config(PROJECT_ROOT / "configs" / "tools.yaml", ToolsConfig).vision
+
+
+def _smoke_vision_schema() -> dict[str, object]:
+    """The frozen INTERNAL assessment schema (schemas/ is normative).
+
+    The smoke sends the SAME strict assessment schema as the real INTERNAL
+    phase (``src.verify`` loads this file too): a schema-valid structured
+    answer proves the provider accepted the pixels and answered the actual
+    task, not a toy ``{ok: boolean}`` ping.
+    """
+
+    schema_path = PROJECT_ROOT / "schemas" / "assessment.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    if not isinstance(schema, dict):
+        raise RuntimeError(f"{schema_path} is not a JSON object")
+    return schema
 
 
 def probe_luna_efforts() -> int:
