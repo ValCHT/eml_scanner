@@ -40,7 +40,7 @@ add(cases: list[RagCase]) -> int ; search(query: str, exclusions: set[str], k: i
 
 ## IMPLEMENTATION REQUIREMENTS
 
-Indexer sujet et corps utile, sans label ni justification dans le texte d’embedding. Source publique et validation humaine obligatoires. Au plus 3 cas de 1 200 caractères chacun, un par family_group ; exclure toutes les familles des gold. Seuil initial de distance 0,40, réglé seulement sur dev. Aucun voisin forcé. Les cas entrent comme contexte d’inférence, sans ajouter leurs IOC au registre courant. Flag désactivé : ne pas importer Chroma ni charger les poids.
+Indexer sujet et corps utile, sans label ni justification dans le texte d’embedding. Source publique et label de référence confirmé selon le protocole approuvé obligatoires ; pour le corpus courant Gold-AI (`astra_gold_ai_v1`), `human_validated=false` est explicite et ne doit jamais être présenté comme une validation humaine. Au plus 3 cas de 1 200 caractères chacun, un par family_group ; exclure toutes les familles des gold. Seuil initial de distance 0,40, réglé seulement sur dev. Aucun voisin forcé. Les cas entrent comme contexte d’inférence, sans ajouter leurs IOC au registre courant. Flag désactivé : ne pas importer Chroma ni charger les poids.
 
 ## TESTS REQUIRED
 
