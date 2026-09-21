@@ -1,0 +1,26 @@
+From: Newsletter <newsletter@example.org>
+To: Analyst <analyst@example.test>
+Subject: Scan this banner
+Date: Mon, 21 Sep 2026 08:00:00 +0000
+Message-ID: <t16-banner@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="T16-VISION-BOUNDARY"
+
+--T16-VISION-BOUNDARY
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+See attached banner image.
+
+--T16-VISION-BOUNDARY
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <banner@example.org>
+Content-Disposition: inline; filename="banner.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAHgAAAAoCAIAAAC6iKlyAAAAqUlEQVR4nO3boQ0CMRiA0R6wAUsw
+BBLJQAgkIyEZhCUYgQR3YQD4Ttx7qq7Nl6bq73S83Af/txtj3K+nYKc1O98em6XPsBZCh0/H7Pl6
+V/uuwmG/nddudEToiNARoSNCR4SOCB0ROiJ0ROiI0BGhI0JHhI4IHRE6InRE6IjQEaEjQkeEjggd
+EToidEToiNARoSNCR4SOCL3EfPT3PC+/5UZHhI5Mvr+NxAc6vwljvrOPKwAAAABJRU5ErkJggg==
+
+--T16-VISION-BOUNDARY--

@@ -57,6 +57,7 @@ from src.config import (  # noqa: E402
     load_yaml_config,
 )
 from src.llm import LunaClient, expurgate  # noqa: E402
+from src.verify import validate_assessment_shape_and_refs  # noqa: E402
 
 #: Minimal smoke schema required by TICKET-02 (small {ok:boolean} contract).
 SMOKE_SCHEMA = {
@@ -1237,6 +1238,266 @@ def smoke_luna(if_configured: bool = False, require_configured: bool = False) ->
     return 0
 
 
+# ---------------------------------------------------------------------------
+# TICKET-16 — bounded real Vision capability smoke (capability_smoke ONLY)
+# ---------------------------------------------------------------------------
+
+#: One benign local image fixture; the objective is ONLY to prove that the
+#: real provider accepts actual image pixels and returns a valid structured
+#: response. This is NOT a classification benchmark:
+#: measurement_scope=capability_smoke, performance_claims_allowed=false,
+#: sample_count=1. Visual-79 and gold_test are never touched here.
+SMOKE_VISION_RECEIPT_DIR = PROJECT_ROOT / "runs" / "gates" / "G7-B" / "smoke_vision"
+SMOKE_VISION_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "vision" / "benign_image.eml"
+SMOKE_VISION_QR_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "vision" / "qr_text.png"
+SMOKE_VISION_EFFORT = "medium"
+SMOKE_VISION_DEADLINE_SECONDS = 60.0
+
+
+def _smoke_vision_facts(capture_dir: Path) -> dict[str, object]:
+    """Read the client's per-attempt artifacts (metadata only, expurgated)."""
+
+    metas = sorted(capture_dir.glob("internal_attempt_*_response_meta.json"))
+    meta: dict[str, object] = {}
+    if metas:
+        try:
+            meta = json.loads(metas[-1].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+    errors = sorted(capture_dir.glob("internal_attempt_*_error.txt"))
+    error_lines: list[str] = []
+    for path in errors:
+        try:
+            error_lines.append(expurgate(path.read_text(encoding="utf-8")[:400]))
+        except OSError:
+            continue
+    return {"meta": meta, "errors": error_lines}
+
+
+def smoke_vision(if_configured: bool = False, require_configured: bool = False) -> int:
+    """ONE bounded real Vision capability smoke (TICKET-16).
+
+    Honest outcomes only, never simulated:
+
+    - ``LITELLM_API_KEY`` absent            -> ``unavailable_not_configured``;
+      exit 0 with ``--if-configured`` (limitation recorded), non-zero with
+      ``--require-configured`` (nothing simulated);
+    - ``MODEL_SUPPORTS_VISION=false``       -> ``vision_disabled_in_settings``
+      (the operator must explicitly enable the flag; never bypassed);
+    - optional stack absent                 -> ``vision_dependencies_missing``
+      (install with ``pip install -e ".[vision]"``);
+    - real call rejected the image content  -> ``vision_rejected`` with the
+      real archived error (this is a REAL observed limitation, never hidden);
+    - real pixels accepted + schema-valid structured answer -> ``live_ok``.
+
+    The receipt archives metadata only (requested/returned model, usage,
+    response SHA-256, pixel-block count); no image bytes, no raw response.
+    """
+
+    settings: Settings = load_settings(None)
+    capture_dir = SMOKE_VISION_RECEIPT_DIR
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    limitations: list[str] = []
+
+    if settings.LITELLM_API_KEY is None:
+        payload = {
+            "smoke": "vision",
+            "status": "unavailable_not_configured",
+            "reason": "LITELLM_API_KEY absent: no real call possible; nothing simulated.",
+            "measurement_scope": "capability_smoke",
+            "performance_claims_allowed": False,
+            "sample_count": 1,
+            "requested_model": settings.LITELLM_MODEL,
+            "limitations": ["credentials absent: the real vision capability cannot be exercised"],
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        if require_configured:
+            print("smoke vision: FAILED - credentials absent and --require-configured passed", file=sys.stderr)
+            return 1
+        if if_configured:
+            print("smoke vision: unavailable_not_configured (--if-configured => exit 0)")
+            return 0
+        print("smoke vision: FAILED - credentials absent", file=sys.stderr)
+        return 1
+
+    if not settings.MODEL_SUPPORTS_VISION:
+        payload = {
+            "smoke": "vision",
+            "status": "vision_disabled_in_settings",
+            "reason": (
+                "MODEL_SUPPORTS_VISION=false: the operator has not enabled the "
+                "vision capability; never bypassed by the smoke"
+            ),
+            "measurement_scope": "capability_smoke",
+            "performance_claims_allowed": False,
+            "sample_count": 1,
+            "requested_model": settings.LITELLM_MODEL,
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("smoke vision: FAILED - MODEL_SUPPORTS_VISION=false", file=sys.stderr)
+        return 1
+
+    from src.vision import vision_dependencies
+
+    deps = vision_dependencies()
+    missing = [name for name, present in deps.items() if not present]
+    if missing:
+        payload = {
+            "smoke": "vision",
+            "status": "vision_dependencies_missing",
+            "reason": f"optional Vision stack missing: {', '.join(sorted(missing))}",
+            "limitations": ["install with: python -m pip install -e '.[vision]'"],
+            "measurement_scope": "capability_smoke",
+            "performance_claims_allowed": False,
+            "sample_count": 1,
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("smoke vision: FAILED - missing optional dependencies", file=sys.stderr)
+        return 1
+
+    try:
+        from src.parsing import ParseLimits, parse_bytes
+        from src.prompts import ContextLimits, build_internal_messages
+        from src.state import ParsedEmail
+        from src.vision import load_image_bytes, prepare_visual_bundle
+
+        eml = SMOKE_VISION_FIXTURE.read_bytes()
+        parsed = parse_bytes(eml, "rfc822", ParseLimits())
+        if not isinstance(parsed, ParsedEmail) or not parsed.images:
+            raise RuntimeError("benign vision fixture did not produce parser images")
+        image_bytes = load_image_bytes(eml, parsed)
+        bundle = prepare_visual_bundle(
+            parsed,
+            _vision_tool_limits(),
+            image_bytes=image_bytes,
+            qr_enabled=settings.QR_DECODE_ENABLED,
+        )
+        if not bundle.staged:
+            raise RuntimeError("no visual was staged from the benign fixture")
+        messages, envelope = build_internal_messages(parsed, ContextLimits(), bundle.staged)
+        if envelope["SUPPLIED_VISUAL_IDS"] != bundle.supplied_ids:
+            raise RuntimeError("SUPPLIED_VISUAL_IDS does not match the staged pixels")
+        supplied_count = len(bundle.supplied_ids)
+
+        # Local QR capability demonstration (real local decode; never fetched).
+        qr_payloads: list[str] = []
+        qr_decoded = False
+        if settings.QR_DECODE_ENABLED and SMOKE_VISION_QR_FIXTURE.is_file():
+            from src.vision import decode_qr
+
+            qr_payloads = decode_qr(SMOKE_VISION_QR_FIXTURE.read_bytes())
+            qr_decoded = True
+    except Exception as exc:  # noqa: BLE001 - real local failure, never simulated
+        payload = {
+            "smoke": "vision",
+            "status": "live_failed",
+            "error": expurgate(f"{type(exc).__name__}: {exc}"),
+            "measurement_scope": "capability_smoke",
+            "performance_claims_allowed": False,
+            "sample_count": 1,
+        }
+        _write_receipt(capture_dir / "smoke_result.json", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print("smoke vision: FAILED (local preparation error)", file=sys.stderr)
+        return 1
+
+    schema = _smoke_vision_schema()
+    client = LunaClient(settings, phase="internal", capture_dir=capture_dir)
+    result, record = client.complete_json(
+        messages=messages,
+        schema=schema,
+        effort=SMOKE_VISION_EFFORT,
+        max_output_tokens=settings.INTERNAL_MAX_OUTPUT_TOKENS,
+        deadline=time.monotonic() + SMOKE_VISION_DEADLINE_SECONDS,
+    )
+
+    facts = _smoke_vision_facts(capture_dir)
+    schema_valid = result is not None and record.status == "ok"
+    if schema_valid and isinstance(result, dict):
+        issues = validate_assessment_shape_and_refs(
+            result,
+            {
+                "evidence": envelope["EVIDENCE_REGISTRY"],
+                "observables": envelope["OBSERVABLE_REGISTRY"],
+            },
+            "internal",
+        )
+        schema_valid = not issues
+        if issues:
+            limitations.append(f"assessment validation issues: {issues[:3]}")
+
+    accepted = bool(schema_valid)
+    provider_rejection = any(
+        ("400" in line or "422" in line or "image" in line.lower())
+        for line in facts["errors"]
+    )
+    status = "live_ok" if accepted else ("vision_rejected" if provider_rejection else "live_failed")
+
+    payload = {
+        "smoke": "vision",
+        "status": status,
+        "measurement_scope": "capability_smoke",
+        "performance_claims_allowed": False,
+        "sample_count": 1,
+        "measurement_note": (
+            "capability smoke only: proves the real provider accepted actual "
+            "image pixels and returned a structured response; no performance, "
+            "recall or classification claim is made here (first comparison is T19)"
+        ),
+        "requested_model": record.requested_model,
+        "returned_model": record.returned_model,
+        "reasoning_effort": record.reasoning_effort,
+        "attempts": record.attempts,
+        "usage": {
+            "input_tokens": record.input_tokens,
+            "cached_input_tokens": record.cached_input_tokens,
+            "output_tokens": record.output_tokens,
+            "reasoning_tokens": record.reasoning_tokens,
+        },
+        "supplied_visual_ids": envelope["SUPPLIED_VISUAL_IDS"],
+        "visual_blocks_in_request": supplied_count,
+        "untrusted_email_sha256": facts["meta"].get("untrusted_email_sha256")
+        if isinstance(facts["meta"], dict)
+        else None,
+        "response_sha256": facts["meta"].get("response_sha256") if isinstance(facts["meta"], dict) else None,
+        "response_bytes": facts["meta"].get("response_bytes") if isinstance(facts["meta"], dict) else None,
+        "provider_errors": facts["errors"],
+        "qr_local_decode": {
+            "enabled": settings.QR_DECODE_ENABLED,
+            "executed": qr_decoded,
+            "payloads": qr_payloads,
+            "note": "local zxing-cpp decode only; no navigation, no submission",
+        },
+        "fixture": "tests/fixtures/vision/benign_image.eml",
+        "limitations": limitations,
+    }
+    _write_receipt(capture_dir / "smoke_result.json", payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    if accepted:
+        print(
+            f"smoke vision: live_ok (pixels accepted, supplied_visual_ids="
+            f"{envelope['SUPPLIED_VISUAL_IDS']}; capability smoke only, no performance claim)"
+        )
+        return 0
+    print(
+        f"smoke vision: {status} - real provider did not accept/answer with pixels; "
+        f"see {capture_dir / 'smoke_result.json'}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _vision_tool_limits() -> Any:
+    """Exact frozen vision limits from configs/tools.yaml (§2.7)."""
+
+    from src.config import ToolsConfig, load_yaml_config
+
+    return load_yaml_config(PROJECT_ROOT / "configs" / "tools.yaml", ToolsConfig).vision
+
+
 def probe_luna_efforts() -> int:
     """Real Qwen3.8 MEDIUM/XHIGH probes: facts only, never claims.
 
@@ -1392,7 +1653,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Real smoke tests (no mock mode)")
     parser.add_argument(
         "target",
-        choices=["luna", "luna-efforts", "virustotal", "opencti", "urlscan", "tools"],
+        choices=["luna", "luna-efforts", "virustotal", "opencti", "urlscan", "tools", "vision"],
         help="smoke target",
     )
     parser.add_argument(
@@ -1442,6 +1703,13 @@ def main() -> int:
         # (docs/gates.md §5.2); the explicit flag is accepted for the frozen
         # gate command and there is no weaker mode.
         return smoke_tools(require_all=True)
+    if args.target == "vision":
+        # TICKET-16: ONE bounded real Vision capability smoke
+        # (measurement_scope=capability_smoke; never a benchmark).
+        return smoke_vision(
+            if_configured=args.if_configured,
+            require_configured=args.require_configured,
+        )
     return probe_luna_efforts()
 
 
