@@ -23,7 +23,7 @@
     "config_gate": "d41cb9f4d14c72ceddd7cbaf0d4352d2cddd71beb0a3405a8fed8ee59c02a9ae",
     "config_policy": "e0bf22da81f416667191755138fe243088005b2f2bd1eac22409be6ef1285aee",
     "config_tools": "59a6867e03de960bedf75da5945692bf6372fb7073efa0b7765107907514b564",
-    "evaluation_config": "716c42ad3425039e4746881dc87b5f8dfd54e8f0cbaea42243c02a9badc70ed4",
+    "evaluation_config": "ed109fcccdf55d8f867a81d39acce8d824b38db32802ad332329563861acb2b5",
     "gold_dev": "74f364e2a6624047b20adfa7f08ab67f8bff9a2ec71edb77dc4bb3c3947dd5da",
     "prompts_final": "cfc9ba52a8426e524223cbfbfda53b874f2c4beac5379688bbcb772f6e14f6f7",
     "prompts_internal": "60dc6ee00e0eabfd063638af7f62f9aeb00a919305277d99b64820809469b9ae",
@@ -33,7 +33,7 @@
   },
   "lock_version": 2,
   "measurement_policy": {
-    "note": "amendement opérateur 2026-09-21: aucun benchmark complet avant TICKET-19; T14-T18 utilisent uniquement des samples/smokes bornés; le premier benchmark complet est T19 (--sample-profile full)",
+    "note": "amendement opérateur 2026-09-21 (trajectoire accélérée vers l'agentique): aucun benchmark complet avant T19E; T15/T16 et les étapes T19A-T19D restent sur des samples/smokes bornés ou du développement; la mesure terminale est T19E, premier benchmark complet avec rerun simultané de la V1 fixe (--sample-profile full)",
     "performance_claims_allowed": false,
     "sample_selection_rule": "deterministic_stratified_smoke_v1: for each dev label with support>0 in fixed taxonomy order (menace excluded, support=0 - nothing fabricated), select the lexicographically first sample_id; exactly one record per label",
     "scope": "smoke"
@@ -55,7 +55,7 @@
     "max_llm_attempts": 2
   },
   "rules": [
-    "measure the bounded real smoke exactly (gate 0.90/0.20 R1-R3, prompts V1, frozen policy) — no tuning before the full T19 benchmark",
+    "measure the bounded real smoke exactly (gate 0.90/0.20 R1-R3, prompts V1, frozen policy) — no tuning before the full T19E benchmark",
     "no RAG, no vision, no fine-tuning, no alternate model, no selective retry, no budget change to improve a score",
     "provider failures, timeouts and abstentions stay in every denominator",
     "unknown cost is never turned into zero; provider-billed and estimated values are preserved separately",
@@ -73,6 +73,6 @@
       "internal": "medium"
     }
   },
-  "split_policy": "dev only for TICKET-14; gold_test.jsonl is an internal POC validation partition never opened during development; the terminal test evaluation belongs to the later authorized ticket (T19)",
+  "split_policy": "dev only for TICKET-14; gold_test.jsonl is an internal POC validation partition never opened during development; the terminal test evaluation belongs to the later authorized ticket (T19E)",
   "ticket": "TICKET-14"
 }

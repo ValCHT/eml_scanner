@@ -916,6 +916,18 @@ def test_live_requires_explicit_sample_profile(evaluate_script, tmp_path):
     assert exit_code == evaluate_script.EXIT_FAIL
 
 
+def test_evaluation_config_declares_t19e_terminal_ticket(evaluate_script):
+    """Operator trajectory 2026-09-21: the terminal benchmark ticket is T19E.
+
+    The full-corpus capability stays refused as development validation and the
+    terminal test run is owned by TICKET-19E (first full benchmark with a
+    simultaneous rerun of the fixed V1).
+    """
+    config = evaluate_script.load_evaluation_config(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    assert config.split_policy.get("terminal_test_command_ticket") == "TICKET-19E"
+    assert config.split_policy.get("gold_test_readable_by_ticket_14") is False
+
+
 def test_check_gate_g6_commands_are_smoke_scoped():
     """G6 must run the bounded smoke, not the 83-email benchmark."""
     module = _load_check_gate_module()
@@ -1009,7 +1021,7 @@ def test_recompute_smoke_requires_exact_selection_identity(evaluate_script, monk
 def test_bounded_smoke_never_aborts_on_provider_outcomes(evaluate_script):
     """Five genuine INTERNAL timeouts are honest rows, never a smoke FAIL.
 
-    The consecutive-failure abort is reserved to a FULL-corpus run (T19)
+    The consecutive-failure abort is reserved to a FULL-corpus run (T19E)
     that never saw one successful INTERNAL call; the bounded smoke never
     aborts on provider outcomes (operator amendment 2026-09-21).
     """
@@ -1173,7 +1185,7 @@ def test_run_live_smoke_keeps_all_provider_failures_in_denominators(
 def test_run_live_full_profile_keeps_the_systematic_outage_abort(
     evaluate_script, monkeypatch, tmp_path
 ):
-    """The full-corpus T19 scope still refuses to burn 5 records on a dead
+    """The full-corpus T19E scope still refuses to burn 5 records on a dead
     endpoint when no INTERNAL call ever succeeded."""
 
     gold = [

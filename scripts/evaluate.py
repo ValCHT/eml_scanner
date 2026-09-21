@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """TICKET-14 — dev harness smoke evaluation and exact offline recompute (G6).
 
-Operator amendment 2026-09-21: G6 is a HARNESS-validation gate, not a
-performance benchmark. No full dev benchmark before TICKET-19 — T14–T18 use
-bounded samples/smokes only; the first full benchmark is T19
-(`--sample-profile full` capability preserved but NOT executed as
-validation).
+Operator trajectory 2026-09-21 (accelerated agentic path): G6 is a
+HARNESS-validation gate, not a performance benchmark. No full dev benchmark
+before T19E — T15/T16 and the T19A–T19D development steps use bounded
+samples/smokes only; the first full benchmark is T19E
+(`--sample-profile full` capability preserved but NOT executed before it).
 
 Live mode (``--split dev --mode live --variant baseline --sample-profile smoke``):
 
@@ -22,7 +22,7 @@ Live mode (``--split dev --mode live --variant baseline --sample-profile smoke``
    first ``sample_id`` per dev label with support>0; menace has zero
    support and is never fabricated) and runs live calls ONLY for the
    selected records (``--sample-profile full`` = the complete 83-record
-   capability, reserved for TICKET-19);
+   capability, reserved for TICKET-19E);
 4. runs the frozen pipeline for every selected email and archives the
    authentic per-sample report under ``<out>/<run_id>/report.json``;
 5. for COMPLEX emails runs the A/B/C control: A is the shared INTERNAL of
@@ -115,8 +115,8 @@ FORBIDDEN_SPLIT = "test"
 ABLATION_TOOL_REASON = "ablation_control_b_no_external_evidence"
 
 #: Sample profiles (operator amendment 2026-09-21): no full dev benchmark
-#: before TICKET-19. ``smoke`` = deterministic representative harness smoke;
-#: ``full`` = complete gold_dev evaluation capability, reserved for T19.
+#: before TICKET-19E. ``smoke`` = deterministic representative harness smoke;
+#: ``full`` = complete gold_dev evaluation capability, reserved for T19E.
 SMOKE_PROFILE = "smoke"
 FULL_PROFILE = "full"
 
@@ -128,13 +128,13 @@ SAMPLE_SELECTION_RULE = (
     "validated for all 83 records before any live call; results are "
     "harness diagnostics only (measurement_scope=smoke, "
     "performance_claims_allowed=false); the first full benchmark is "
-    "TICKET-19"
+    "TICKET-19E"
 )
 
 #: Exact filename of the archived FINAL validation rejects (assess_final).
 FINAL_REJECT_FILE = "final_validation_reject.json"
 
-#: Early-abort threshold for a FULL-corpus run (TICKET-19 scope): a hard
+#: Early-abort threshold for a FULL-corpus run (TICKET-19E scope): a hard
 #: endpoint outage fails every INTERNAL attempt from the first record, and
 #: aborting avoids burning the corpus. The bounded smoke NEVER aborts on
 #: provider outcomes (operator amendment 2026-09-21): a timeout/unavailable is
@@ -351,7 +351,7 @@ def select_smoke_sample(gold_rows: list[Mapping[str, Any]]) -> list[dict[str, An
     lexicographically first ``sample_id`` is selected. ``menace`` has zero
     support in this POC: nothing is fabricated for it. The result is the
     bounded T14 smoke set (5 records today); the complete 83-record
-    capability stays untouched for TICKET-19.
+    capability stays untouched for TICKET-19E.
     """
 
     by_label: dict[str, list[Mapping[str, Any]]] = {}
@@ -1076,7 +1076,7 @@ def write_human_report(path: Path, metrics: Mapping[str, Any], manifest: Mapping
             "first sample per dev label with support>0); supports, Macro-F1 "
             "and every rate here are NOT representative and no statistical "
             "validation is claimed. The first full-corpus benchmark is "
-            "TICKET-19."
+            "TICKET-19E."
         )
         lines.append("")
     lines.append(f"- measurement_scope: {scope}")
@@ -1513,7 +1513,7 @@ def _abort_on_systematic_outage(
     Operator amendment 2026-09-21: the bounded smoke is a harness-validation
     gate — provider timeout/unavailable outcomes stay honest rows in the
     denominator and never abort it, even when all smoke records fail (five
-    genuine timeouts must not invalidate G6). The full T19 run keeps the
+    genuine timeouts must not invalidate G6). The full T19E run keeps the
     early abort so a dead endpoint cannot burn 83 emails without a single
     real model result.
     """
@@ -1841,7 +1841,7 @@ def build_parser() -> argparse.ArgumentParser:
             "live measurement scope: 'smoke' = deterministic representative "
             "harness sample (one lexicographically first record per dev "
             "label with support>0; diagnostic only); 'full' = complete "
-            "gold_dev evaluation, reserved for TICKET-19. Required for "
+            "gold_dev evaluation, reserved for TICKET-19E. Required for "
             "--mode live."
         ),
     )
@@ -1883,7 +1883,7 @@ def main(argv: list[str] | None = None) -> int:
             "FAIL: --mode live requires an explicit --sample-profile "
             f"({SMOKE_PROFILE} or {FULL_PROFILE}); an accidental full "
             "corpus benchmark is refused (full scope is reserved for "
-            "TICKET-19)",
+            "TICKET-19E)",
             file=sys.stderr,
         )
         return EXIT_FAIL

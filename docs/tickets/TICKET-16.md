@@ -4,9 +4,9 @@
 
 G7-B
 
-## AMENDEMENT OPÉRATEUR (2026-09-21) — smoke visuel borné uniquement
+## AMENDEMENT OPÉRATEUR (2026-09-21, trajectoire accélérée) — développement parallèle, smoke visuel borné
 
-Aucun benchmark complet avant TICKET-19 : T16 exécute un **smoke visuel borné uniquement** — préférer le subset visual-essential (`essential_visual_content`) une fois matérialisé, sinon le smoke dev T14 ; jamais le run complet Visual-79 avant T19. Sortie sous `runs/eval/dev_vision_smoke`. Les métriques restent diagnostiques (`performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Le premier benchmark complet (texte seul / texte+QR / texte+QR+vision sur les cas visuels) est T19.
+Aucun benchmark complet avant T19E : T16 exécute un **smoke visuel borné uniquement** — préférer le subset visual-essential (`essential_visual_content`) une fois matérialisé, sinon le smoke dev T14 ; jamais le run complet Visual-79 avant T19E. Le développement de T16 est **parallèle à T15 et à la chaîne T19A→T19B** (indépendant du RAG, de l'agentique et de G7-A) ; la fermeture expérimentale G7-B peut être enregistrée plus tard. Sortie sous `runs/eval/dev_vision_smoke`. Les métriques restent diagnostiques (`performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Les résultats alimentent T19C ; le premier benchmark complet (texte seul / texte+QR / texte+QR+vision sur les cas visuels, rerun simultané de la V1 fixe) est T19E.
 
 ## OBJECTIF
 
@@ -14,7 +14,7 @@ Mesurer l’apport des images et du décodage QR.
 
 ## PRECONDITIONS / DÉPENDANCES
 
-PASS G6 ; capacité vision réellement démontrable sur le proxy ; corpus visuel validé ; G7-A terminée ou explicitement non retenue.
+Développement autorisé en parallèle de T15 et T19A/B, indépendant de G7-A ; la fermeture expérimentale G7-B peut attendre l'état G6/synchronisation approprié ; capacité vision réellement démontrable sur le proxy ; corpus visuel validé ; décision explicite de lancer l'expérience optionnelle.
 
 ## IN SCOPE
 
@@ -36,7 +36,7 @@ prepare_visuals(parsed, limits) -> list[VisualEvidence] ; decode_qr(image_bytes:
 - le run apparié est un run baseline archivé (`runs/eval/dev_smoke`) : il est LU seul, jamais rejoué, et ses lignes/reports ne sont jamais modifiés ;
 - la comparaison apparie exactement les mêmes `sample_id` (identité de sélection vérifiée) et exige des dénominateurs identiques ; une ligne manquante ou surnuméraire = FAIL ;
 - `measurement_scope=smoke` et `performance_claims_allowed=false` restent archivés ; les métriques restent diagnostiques, INCONCLUSIVE valide ;
-- aucun tuning sur les résultats ; le premier benchmark complet texte/QR/vision sur les cas visuels est T19.
+- aucun tuning sur les résultats ; les résultats alimentent T19C ; le premier benchmark complet texte/QR/vision sur les cas visuels est T19E.
 
 ## IMPLEMENTATION REQUIREMENTS
 

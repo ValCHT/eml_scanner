@@ -4,9 +4,9 @@
 
 G7-A
 
-## AMENDEMENT OPÉRATEUR (2026-09-21) — sample borné uniquement
+## AMENDEMENT OPÉRATEUR (2026-09-21, trajectoire accélérée) — développement parallèle, sample borné
 
-Aucun benchmark complet avant TICKET-19 : T15 exécute l'ablation RAG **uniquement sur le sample/smoke dev borné** (le smoke T14 de `runs/eval/dev_smoke`, ou un sample borné équivalent documenté dans le manifest), jamais sur les 83 emails. `--paired-with runs/eval/dev_smoke` ; sortie sous `runs/eval/dev_rag_smoke`. Les métriques restent diagnostiques (`measurement_scope` archivé, `performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Le premier benchmark complet (avec et sans RAG) est T19.
+Aucun benchmark complet avant T19E : T15 exécute l'ablation RAG **uniquement sur le sample/smoke dev borné** (le smoke T14 de `runs/eval/dev_smoke`, ou un sample borné équivalent documenté dans le manifest), jamais sur les 83 emails. Le développement de T15 est **parallèle à T16 et à la chaîne T19A→T19B** (indépendant de la vision et de l'agentique) ; la fermeture expérimentale G7-A peut être enregistrée plus tard. `--paired-with runs/eval/dev_smoke` ; sortie sous `runs/eval/dev_rag_smoke`. Les métriques restent diagnostiques (`measurement_scope` archivé, `performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Les résultats alimentent T19C ; le premier benchmark complet (avec et sans RAG, rerun simultané de la V1 fixe) est T19E.
 
 ## OBJECTIF
 
@@ -14,7 +14,7 @@ Tester si des précédents publics améliorent le classement.
 
 ## PRECONDITIONS / DÉPENDANCES
 
-PASS G6 ; public_cases.jsonl validé/hors gold ; embedding local disponible avec empreinte ; décision explicite de lancer expérience optionnelle.
+Développement autorisé en parallèle de T16 et T19A/B ; la fermeture expérimentale G7-A peut attendre l'état G6/synchronisation approprié ; public_cases.jsonl validé/hors gold ; embedding local disponible avec empreinte ; décision explicite de lancer l'expérience optionnelle.
 
 ## IN SCOPE
 
@@ -36,7 +36,7 @@ add(cases: list[RagCase]) -> int ; search(query: str, exclusions: set[str], k: i
 - le run apparié est un run baseline archivé (`runs/eval/dev_smoke`) : il est LU seul, jamais rejoué, et ses lignes/reports ne sont jamais modifiés ;
 - la comparaison apparie exactement les mêmes `sample_id` (identité de sélection vérifiée) et exige des dénominateurs identiques ; une ligne manquante ou surnuméraire = FAIL ;
 - `measurement_scope=smoke` et `performance_claims_allowed=false` restent archivés ; les métriques restent diagnostiques, INCONCLUSIVE valide ;
-- aucun tuning sur les résultats ; le premier benchmark complet avec/sans RAG est T19.
+- aucun tuning sur les résultats ; les résultats alimentent T19C ; le premier benchmark complet avec/sans RAG est T19E.
 
 ## IMPLEMENTATION REQUIREMENTS
 

@@ -7,11 +7,13 @@ implemented; gate receipts G0–G5 are recorded under `runs/gates/`. TICKET-14
 (G6 harness-validation gate) implements the bounded real dev smoke and its
 exact offline recompute: `src/metrics.py`, `scripts/evaluate.py`,
 `configs/evaluation.yaml`, `configs/experiment_lock.json`, documented in
-`docs/evaluation.md` §8.6. Per the operator amendment, T15–T18 use bounded
-samples/smokes only (RAG sample, visual smoke, accumulated diagnostics,
-pre-T19 readiness/reproducibility); the first **full benchmark** (complete dev,
-sealed test, Visual-79) is **TICKET-19**, and `gold_test` is never opened
-before it.
+`docs/evaluation.md` §8.6. Operator trajectory (2026-09-21, accelerated
+agentic path): after T14, three parallel development tracks — T15 (RAG), T16
+(vision/QR), T19A→T19B (agentic chain, independent of RAG and Vision) —
+converge in T19C → T19D → **T19E**. T19E is the first **full benchmark**
+(complete dev, sealed test, Visual-79) and reruns the fixed V1 in the same
+experiment window; `gold_test` is never opened before it. T17 is optional
+after T19E; T18 is SUPERSEDED BY T19E.
 
 ## Real dev baseline (TICKET-14)
 
@@ -32,7 +34,7 @@ python scripts/check_gate.py G6 --record
 
 Per the operator amendment (2026-09-21), **G6 is a harness-validation gate, not a
 performance benchmark**: the full 83-record dev benchmark is executed for the
-first time in **TICKET-19** (`--sample-profile full`; the complete evaluation
+first time in **T19E** (`--sample-profile full`; the complete evaluation
 capability is implemented and tested here but NOT run as T14–T18 validation).
 The smoke validates plumbing only (offline Gold/raw integrity over all 83
 records, then live calls for exactly one lexicographically first record per
@@ -112,7 +114,7 @@ an `sk-*` key. No provider-specific credential mapping exists.
 - `CLAUDE.md` — Claude Code entry point importing `AGENTS.md`.
 - `opencode.jsonc` — project permissions for OpenCode V2; no model is hard-coded.
 - `docs/` — active normative architecture/contracts/gates and domain documents.
-- `docs/tickets/` — TICKET-01 … TICKET-18 (TICKET-19 = terminal sealed evaluation). Execute one ticket per agent session.
+- `docs/tickets/` — TICKET-01 … TICKET-18 plus the T19A–T19E chain (T18 superseded; T19E = terminal sealed evaluation). Execute one ticket per agent session.
 - `docs/spec/` — frozen V1.2 audit snapshot, changelog, QA, matrix and research inspections.
 - `prompts/` — runtime INTERNAL / FINAL prompts.
 - `schemas/` — runtime JSON schemas.
@@ -130,9 +132,11 @@ Use one Git branch per implementation gate and one commit per ticket:
 - `gate/g4`: TICKET-06 → 08
 - `gate/g5`: TICKET-09 → 11
 - `gate/g6`: TICKET-12 → 14
-- optional G7 branches only if selected
-- TICKET-18: pre-T19 freeze/readiness/reproducibility smoke only (no gold_test read)
-- TICKET-19: terminal sealed evaluation — the first full benchmark, only after the experiment is frozen and the holdout is released by the evaluator
+- after T14, three parallel tracks: T15 (RAG), T16 (vision/QR), T19A → T19B (agentic; independent of RAG and Vision)
+- convergence: T19C → T19D → T19E
+- T19E: terminal sealed evaluation — first full benchmark with a simultaneous rerun of the fixed V1; only after the experiment is frozen and the holdout is released by the evaluator
+- optional G7-A/G7-B closures may be recorded later; TICKET-17 is optional after T19E
+- TICKET-18: SUPERSEDED BY T19E (not executed as a standalone ticket)
 
 Start a fresh OpenCode session for every ticket. Do not reuse the previous ticket's conversational context as a source of truth; the filesystem, Git history and ticket are the state.
 

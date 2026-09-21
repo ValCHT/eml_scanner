@@ -6,7 +6,7 @@ G6
 
 ## OBJECTIF
 
-**Amendement opérateur (2026-09-21) : G6 est une gate de validation du HARNESS, pas un benchmark de performance.** Mesurer que le harness est exécutable et auditable sur un smoke live borné (5 Gold dev représentatifs) et rendre les métriques auditables ; aucun benchmark complet avant TICKET-19 (T14–T18 utilisent uniquement des samples/smokes bornés).
+**Amendement opérateur (2026-09-21) : G6 est une gate de validation du HARNESS, pas un benchmark de performance.** Mesurer que le harness est exécutable et auditable sur un smoke live borné (5 Gold dev représentatifs) et rendre les métriques auditables ; aucun benchmark complet avant T19E (les pistes T15/T16 restent sur des samples bornés ; T19A–T19D sont du développement et la mesure terminale est T19E).
 
 ## PRECONDITIONS / DÉPENDANCES
 
@@ -18,7 +18,7 @@ Scripts evaluate/recompute, métriques, confusion, coûts, latence, internal/fin
 
 ## OUT OF SCOPE
 
-Lecture test, RAG actif, vision active, fine-tuning, métriques issues de réponses inventées, **benchmark complet des 83 emails (réservé à T19)**, toute présentation du smoke comme baseline performance/Macro-F1 représentatif/validation statistique.
+Lecture test, RAG actif, vision active, fine-tuning, métriques issues de réponses inventées, **benchmark complet des 83 emails (réservé à T19E)**, toute présentation du smoke comme baseline performance/Macro-F1 représentatif/validation statistique.
 
 ## FILES ALLOWED
 
@@ -30,7 +30,7 @@ evaluate(rows: list[GoldRecord], reports: list[TriageReport])->Metrics ; compare
 
 ## IMPLEMENTATION REQUIREMENTS
 
-Valider les gold sans contenu et charger raw_path avec vérification raw_sha256 conformément à docs/contracts.md §2.8 avant tout appel : l'intégrité des **83** records/raw est vérifiée hors ligne, puis seuls les records sélectionnés reçoivent des appels live ; mismatch ou champ interdit fait échouer G6. Implémenter toutes métriques obligatoires et supports, dont % SIMPLE/COMPLEX, qualité et coût par chemin. Le smoke utilise le gate BASELINE V0 et les prompts V1 ; réglages dev seulement ensuite ; aucun benchmark complet avant T19. Un run produit une ligne par sample_id ; réponses authentiques/empreintes gelées. recompute lit les réponses capturées sans réseau, reproduit exactement les lignes archivées, vérifie leur identité contre la sélection déterministe (pas d'exigence len==83 pour un run smoke) et ne remplace pas le run live. Les échecs/outages/timeout restent dans dénominateurs et ne bloquent pas G6 par eux-mêmes : l'abort d'outage systématique (`_abort_on_systematic_outage`) ne s'applique qu'à un run full-corpus (T19) sans un seul succès INTERNAL, jamais au smoke borné (5 timeouts réels = 5 lignes honnêtes). Exposer FPR strict/malveillant, validité première tentative, coût inconnu, couverture AUTO. La commande `--variant baseline --sample-profile smoke` réalise aussi A/B/C sur les complexes du smoke : A=MEDIUM email seul partagé, B=XHIGH avec preuves internes seules, C=XHIGH avec enrichissements réels. Archiver et recalculer B−A et C−B selon docs/evaluation.md §8.3 ; A−C seul ne prouve pas un gain externe. Valider les audits FINAL avant calcul : B doit avoir `external_evidence_count_sent=0`, `evidence_count_sent=internal_evidence_count_sent`, `rag_case_count_sent=0`, `visual_count_sent=0`; C doit transmettre les evidences externes admissibles lorsque le bundle en a produit et conserver `tool_status_digest`. Mismatch d'audit = comparaison B/C invalide et G6 FAIL, sans réparation silencieuse. VT unavailable reste dans les résultats/couverture/limites et ne bloque pas G6. Les métriques du smoke sont diagnostiques uniquement : jamais présentées comme baseline performance, Macro-F1 représentatif ou validation statistique ; aucun tuning à partir d'elles. G7-D facultatif hors baseline/PASS G6, sans ticket supplémentaire.
+Valider les gold sans contenu et charger raw_path avec vérification raw_sha256 conformément à docs/contracts.md §2.8 avant tout appel : l'intégrité des **83** records/raw est vérifiée hors ligne, puis seuls les records sélectionnés reçoivent des appels live ; mismatch ou champ interdit fait échouer G6. Implémenter toutes métriques obligatoires et supports, dont % SIMPLE/COMPLEX, qualité et coût par chemin. Le smoke utilise le gate BASELINE V0 et les prompts V1 ; réglages dev seulement ensuite ; aucun benchmark complet avant T19E. Un run produit une ligne par sample_id ; réponses authentiques/empreintes gelées. recompute lit les réponses capturées sans réseau, reproduit exactement les lignes archivées, vérifie leur identité contre la sélection déterministe (pas d'exigence len==83 pour un run smoke) et ne remplace pas le run live. Les échecs/outages/timeout restent dans dénominateurs et ne bloquent pas G6 par eux-mêmes : l'abort d'outage systématique (`_abort_on_systematic_outage`) ne s'applique qu'à un run full-corpus (T19E) sans un seul succès INTERNAL, jamais au smoke borné (5 timeouts réels = 5 lignes honnêtes). Exposer FPR strict/malveillant, validité première tentative, coût inconnu, couverture AUTO. La commande `--variant baseline --sample-profile smoke` réalise aussi A/B/C sur les complexes du smoke : A=MEDIUM email seul partagé, B=XHIGH avec preuves internes seules, C=XHIGH avec enrichissements réels. Archiver et recalculer B−A et C−B selon docs/evaluation.md §8.3 ; A−C seul ne prouve pas un gain externe. Valider les audits FINAL avant calcul : B doit avoir `external_evidence_count_sent=0`, `evidence_count_sent=internal_evidence_count_sent`, `rag_case_count_sent=0`, `visual_count_sent=0`; C doit transmettre les evidences externes admissibles lorsque le bundle en a produit et conserver `tool_status_digest`. Mismatch d'audit = comparaison B/C invalide et G6 FAIL, sans réparation silencieuse. VT unavailable reste dans les résultats/couverture/limites et ne bloque pas G6. Les métriques du smoke sont diagnostiques uniquement : jamais présentées comme baseline performance, Macro-F1 représentatif ou validation statistique ; aucun tuning à partir d'elles. G7-D facultatif hors baseline/PASS G6, sans ticket supplémentaire.
 
 ## TESTS REQUIRED
 
@@ -49,7 +49,7 @@ python scripts/check_gate.py G6 --record
 
 ## EXPECTED RESULTS
 
-Exit 0 ; rapports complets avec métriques diagnostiques/support/couverture et preuve d'audit A/B/C ; recompute identique ; aucun benchmark complet exécuté (T19). PASS G6 signifie : harness réel exécuté sur le smoke, aucune simulation, Gold/raw intègres, audit A/B/C valide lorsqu'applicable, sorties/reports valides, recompute exact, tests déterministes verts. PASS G6 NE signifie PAS que la qualité du modèle est démontrée. Performance insuffisante n'annule pas la validité de mesure. Test non ouvert.
+Exit 0 ; rapports complets avec métriques diagnostiques/support/couverture et preuve d'audit A/B/C ; recompute identique ; aucun benchmark complet exécuté (T19E). PASS G6 signifie : harness réel exécuté sur le smoke, aucune simulation, Gold/raw intègres, audit A/B/C valide lorsqu'applicable, sorties/reports valides, recompute exact, tests déterministes verts. PASS G6 NE signifie PAS que la qualité du modèle est démontrée. Performance insuffisante n'annule pas la validité de mesure. Test non ouvert.
 
 ## SECURITY INVARIANTS
 
@@ -57,11 +57,11 @@ Aucune réponse Luna/VT/OpenCTI/urlscan simulée. Fixtures = données d'entrée 
 
 ## ACCEPTANCE CRITERIA
 
-G6 PASS sur protocole et harness validé par smoke réel borné ; corpus/labels insuffisants explicités ; aucune promesse statistique excessive ; premier benchmark complet = T19.
+G6 PASS sur protocole et harness validé par smoke réel borné ; corpus/labels insuffisants explicités ; aucune promesse statistique excessive ; premier benchmark complet = T19E.
 
 ## FAIL CONDITIONS
 
-Erreurs omises du dénominateur, prédictions simulées, confusion des coûts/temps offline-live, sélection des seuls outils disponibles, tuning sur test ou sur le smoke, présentation du smoke comme performance, lancement du benchmark 83 emails avant T19.
+Erreurs omises du dénominateur, prédictions simulées, confusion des coûts/temps offline-live, sélection des seuls outils disponibles, tuning sur test ou sur le smoke, présentation du smoke comme performance, lancement du benchmark 83 emails avant T19E.
 
 ## ARTEFACTS PRODUCED
 
@@ -69,4 +69,4 @@ Résultats smoke réels (5 cas), matrice/deltas/coûts, manifest avec scope, sé
 
 ## CODEX EXECUTION PROMPT
 
-Exécute uniquement TICKET-14 — Évaluation baseline réelle et fermeture G6, gate G6 (amendement opérateur 2026-09-21 : validation du harness par smoke borné, aucun benchmark complet avant T19). Le présent fichier complet est ton prompt autonome. Lis AGENTS.md s'il existe, puis docs/architecture.md, docs/contracts.md, docs/decisions.md, docs/gates.md et les documents de domaine cités ici. Vérifie les préconditions ci-dessus, implémente exactement le périmètre dans FILES ALLOWED, lance toutes les commandes VALIDATION COMMANDS et conserve les preuves réelles. Si un prérequis est absent, rends BLOCKED avec le fichier/capacité manquant ; ne le remplace pas par une hypothèse, un skipped ou une simulation. Corrige les échecs sans abaisser les tests. Termine par les fichiers changés, commandes et résultats effectifs, artefacts, statut du ticket et statut de la gate. Ne commence aucun autre ticket. Aucun accès à un échange antérieur avec l'utilisateur n'est nécessaire.
+Exécute uniquement TICKET-14 — Évaluation baseline réelle et fermeture G6, gate G6 (amendement opérateur 2026-09-21 : validation du harness par smoke borné, aucun benchmark complet avant T19E). Le présent fichier complet est ton prompt autonome. Lis AGENTS.md s'il existe, puis docs/architecture.md, docs/contracts.md, docs/decisions.md, docs/gates.md et les documents de domaine cités ici. Vérifie les préconditions ci-dessus, implémente exactement le périmètre dans FILES ALLOWED, lance toutes les commandes VALIDATION COMMANDS et conserve les preuves réelles. Si un prérequis est absent, rends BLOCKED avec le fichier/capacité manquant ; ne le remplace pas par une hypothèse, un skipped ou une simulation. Corrige les échecs sans abaisser les tests. Termine par les fichiers changés, commandes et résultats effectifs, artefacts, statut du ticket et statut de la gate. Ne commence aucun autre ticket. Aucun accès à un échange antérieur avec l'utilisateur n'est nécessaire.
