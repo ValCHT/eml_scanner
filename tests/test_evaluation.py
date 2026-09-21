@@ -1131,7 +1131,10 @@ def _stub_offline_run_live(evaluate_script, monkeypatch, tmp_path, gold_rows):
 
     order: dict[str, object] = {"rows": []}
 
-    def _fake_pipeline(settings, email_file, profile):
+    def _fake_pipeline(settings, email_file, profile, **kwargs):
+        # The frozen baseline call site must not pass any ablation override.
+        assert kwargs.get("tools_override") is None
+        assert kwargs.get("rag_adapter") is None
         done = order.setdefault("done", [])
         rows = order["rows"]
         assert isinstance(rows, list) and len(done) < len(rows)
@@ -1218,3 +1221,530 @@ def test_run_live_full_profile_keeps_the_systematic_outage_abort(
     exit_code = evaluate_script.run_live(args, config, {})
     assert exit_code == evaluate_script.EXIT_FAIL
     assert not (out / "predictions.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# TICKET-15 paired RAG interface (offline, docs/evaluation.md §8.7)
+# ---------------------------------------------------------------------------
+
+
+def _rag_gold_rows() -> list[dict]:
+    rows = [
+        _gold_row("u1", "a" * 64, "phishing"),
+        _gold_row("u2", "b" * 64, "legitime"),
+        _gold_row("u3", "c" * 64, "spam"),
+    ]
+    rows[0].update(
+        family_group="fam:u1", duplicate_group="dup:u1", campaign_id="camp:u1"
+    )
+    rows[1].update(
+        family_group="fam:u2", duplicate_group="dup:u2", campaign_id=None
+    )
+    rows[2].update(
+        family_group="fam:u3", duplicate_group="dup:u3", campaign_id="camp:u3"
+    )
+    return rows
+
+
+def _write_paired_baseline_run(
+    evaluate_script,
+    root: Path,
+    gold_rows: list[dict],
+    predictions: dict[str, str | None],
+) -> Path:
+    """Archive a minimal baseline run used as the read-only paired reference."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for gold in gold_rows:
+        sample_id = str(gold["sample_id"])
+        report = _synthetic_report(
+            sample_id,
+            str(gold["raw_sha256"]),
+            gate="complex",
+            final_verdict=predictions[sample_id],
+            internal_verdict="phishing",
+            action="AUTO",
+        )
+        report_dir = root / ("run_" + sample_id)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_bytes = json.dumps(report, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        (report_dir / "report.json").write_bytes(report_bytes)
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "split": "dev",
+                "variant": "baseline",
+                "measurement_scope": "smoke",
+                "label": gold["normalized_label"],
+                "raw_sha256": gold["raw_sha256"],
+                "predicted": predictions[sample_id],
+                "gate_decision": "complex",
+                "report_dir": str(report_dir.relative_to(root)),
+                "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            }
+        )
+    evaluate_script.write_predictions_atomic(root / "predictions.jsonl", rows)
+    manifest = {
+        "run_id": root.name,
+        "variant": "baseline",
+        "split": "dev",
+        "sample_count": len(rows),
+        "measurement_scope": "smoke",
+        "performance_claims_allowed": False,
+        "sample_selection_rule": evaluate_script.SAMPLE_SELECTION_RULE,
+        "selected_sample_ids": sorted(predictions),
+        "full_dev_label_support": {},
+    }
+    evaluate_script.write_json_atomic(root / "manifest.json", manifest)
+    return root
+
+
+def _rag_variant_args(evaluate_script, tmp_path: Path, paired_dir: Path | None):
+    argv = [
+        "--split", "dev",
+        "--mode", "live",
+        "--variant", "rag",
+        "--sample-profile", "smoke",
+        "--out", str(tmp_path / "dev_rag_smoke"),
+    ]
+    if paired_dir is not None:
+        argv += ["--paired-with", str(paired_dir)]
+    return evaluate_script.build_parser().parse_args(argv)
+
+
+def test_rag_variant_requires_paired_with(evaluate_script, monkeypatch, tmp_path):
+    """--variant rag without --paired-with is a FAIL before anything runs."""
+
+    def _never(*args: object, **kwargs: object) -> None:
+        pytest.fail("no pipeline call without --paired-with")
+
+    monkeypatch.setattr(evaluate_script, "run_nominal_pipeline", _never)
+    args = _rag_variant_args(evaluate_script, tmp_path, None)
+    config = _make_cfg(evaluate_script, tmp_path)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+    assert not (tmp_path / "dev_rag_smoke").exists()
+
+
+def test_paired_with_refused_for_the_baseline_variant(evaluate_script, tmp_path):
+    args = evaluate_script.build_parser().parse_args(
+        [
+            "--split", "dev",
+            "--mode", "live",
+            "--variant", "baseline",
+            "--sample-profile", "smoke",
+            "--paired-with", str(tmp_path),
+            "--out", str(tmp_path / "out"),
+        ]
+    )
+    config = _make_cfg(evaluate_script, tmp_path)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+
+
+def test_paired_run_with_missing_row_fails_before_any_call(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """A paired run whose rows miss its own selection is refused (no call)."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    _stub_offline_run_live(evaluate_script, monkeypatch, tmp_path, gold)
+    monkeypatch.setattr(
+        evaluate_script,
+        "run_nominal_pipeline",
+        lambda *args, **kwargs: pytest.fail("no pipeline call for an invalid paired run"),
+    )
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    lines = [
+        json.loads(line)
+        for line in (paired_dir / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    evaluate_script.write_predictions_atomic(paired_dir / "predictions.jsonl", lines[:-1])
+    args = _rag_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+    assert not (tmp_path / "dev_rag_smoke").exists()
+
+
+def test_paired_selection_mismatch_fails_before_any_call(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """Different sample ids between the two runs: FAIL, no provider call."""
+
+    gold = _rag_gold_rows()  # deterministic selection: u1, u2, u3
+    other_gold = [
+        _gold_row("u1", "a" * 64, "phishing"),
+        _gold_row("u2", "b" * 64, "legitime"),
+        _gold_row("u4", "d" * 64, "spam"),
+    ]
+    config = _make_cfg(evaluate_script, tmp_path)
+    _stub_offline_run_live(evaluate_script, monkeypatch, tmp_path, gold)
+    monkeypatch.setattr(
+        evaluate_script,
+        "run_nominal_pipeline",
+        lambda *args, **kwargs: pytest.fail("no pipeline call on a selection mismatch"),
+    )
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        other_gold,
+        {"u1": "phishing", "u2": "legitime", "u4": "spam"},
+    )
+    args = _rag_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+
+
+def _stub_offline_rag_run(
+    evaluate_script,
+    monkeypatch,
+    tmp_path,
+    gold_rows,
+    *,
+    verdicts: dict[str, str | None],
+    rag_context: dict[str, list[dict]],
+    index_count: int = 2,
+) -> dict[str, list]:
+    """Offline paired-RAG wiring: no network, no chromadb, no ONNX weights.
+
+    The REAL effective-config construction runs (``prepare_rag_ablation``);
+    only the adapter factory is replaced by a stub that records the
+    effective flags and returns a fake adapter. The real manifest/report
+    writers run against a copied config/prompts/schemas fixture so the
+    archived artifacts are exercised end to end.
+    """
+
+    import shutil
+    import types
+
+    from pydantic import SecretStr
+
+    from src.config import load_settings as real_load_settings
+
+    real_root = SCRIPTS_DIR.parent
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    for relative in ("prompts", "schemas", "configs"):
+        shutil.copytree(real_root / relative, tmp_path / relative, dirs_exist_ok=True)
+    gold_path = tmp_path / "corpus" / "gold" / "gold_dev.jsonl"
+    gold_path.parent.mkdir(parents=True, exist_ok=True)
+    gold_path.write_text("", encoding="utf-8")
+
+    settings = real_load_settings(None).model_copy(
+        update={
+            "RUNS_DIR": tmp_path / "runs",
+            "CONFIG_DIR": real_root / "configs",
+            "RAG_ENABLED": False,
+            "RAG_DIR": tmp_path / "chroma",
+            "LITELLM_API_KEY": SecretStr("placeholder-key-not-a-real-credential"),
+        }
+    )
+    monkeypatch.setattr(evaluate_script, "load_settings", lambda: settings)
+    monkeypatch.setattr(evaluate_script, "verify_experiment_lock", lambda lock: [])
+    monkeypatch.setattr(evaluate_script, "check_runtime_ready", lambda settings, lock: [])
+    monkeypatch.setattr(
+        evaluate_script, "load_gold_records", lambda config, split: (gold_rows, gold_path)
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "validate_gold_raw_files",
+        lambda rows: ({row["sample_id"]: b"raw email bytes" for row in rows}, []),
+    )
+    stub_audit = {
+        "attempt": 1,
+        "phase": "final",
+        "external_evidence_count_sent": 0,
+        "internal_evidence_count_sent": 1,
+        "evidence_count_sent": 1,
+        "rag_case_count_sent": 0,
+        "visual_count_sent": 0,
+        "tool_status_digest": "d" * 64,
+    }
+    monkeypatch.setattr(
+        evaluate_script, "read_final_audits", lambda capture_dir: [dict(stub_audit)]
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "run_control_b",
+        lambda settings, final_state, capture_dir, pricing: {
+            "attempted": True,
+            "reason_not_attempted": None,
+            "verdict": None,
+            "confidence": None,
+            "probabilities": None,
+            "call": {
+                "phase": "final",
+                "status": "error",
+                "attempts": 1,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_usd": None,
+                "cost_status": "unknown",
+            },
+            "latency_ms": None,
+            "capture_dir": "responses_control_b",
+            "cost_usd": None,
+            "cost_status": "unknown",
+        },
+    )
+
+    factory_calls: list[dict] = []
+
+    class _FakeAdapter:
+        def count(self) -> int:
+            return index_count
+
+        def describe(self) -> dict:
+            return {
+                "collection": "public_rag_reference",
+                "index_dir": str(tmp_path / "chroma"),
+                "count": index_count,
+                "distance_space": "cosine",
+                "embedding_model_id": "all-MiniLM-L6-v2@sha256:" + "a" * 16,
+                "embedding_model_sha256": "a" * 64,
+                "max_cases": 150,
+                "k": 3,
+                "max_distance": 0.4,
+            }
+
+    def _factory(effective_settings, rag_config):
+        factory_calls.append(
+            {
+                "rag_enabled": bool(effective_settings.RAG_ENABLED),
+                "tools_rag_enabled": bool(rag_config.enabled),
+                "rag_dir": str(effective_settings.RAG_DIR),
+            }
+        )
+        return _FakeAdapter()
+
+    monkeypatch.setattr(evaluate_script, "create_rag_adapter_if_enabled", _factory)
+
+    pipeline_calls: list[dict] = []
+
+    def _fake_pipeline(settings, email_file, profile, **kwargs):
+        assert kwargs.get("tools_override") is not None, "the ablation must pass the effective tools"
+        assert kwargs["tools_override"].rag.enabled is True
+        assert kwargs.get("rag_adapter") is not None, "the validated adapter must be reused"
+        assert settings.RAG_ENABLED is True
+        sample_id = Path(email_file).stem.split("_", 1)[1]
+        gold_row = next(row for row in gold_rows if row["sample_id"] == sample_id)
+        pipeline_calls.append(
+            {
+                "sample_id": sample_id,
+                "profile": profile,
+                "rag_exclusions": set(kwargs.get("rag_exclusions") or ()),
+                "current_family_group": kwargs.get("current_family_group"),
+                "current_duplicate_group": kwargs.get("current_duplicate_group"),
+                "current_campaign_id": kwargs.get("current_campaign_id"),
+            }
+        )
+        verdict = verdicts[sample_id]
+        sha = str(gold_row["raw_sha256"])
+        report = _synthetic_report(
+            sample_id,
+            sha,
+            gate="complex",
+            final_verdict=verdict,
+            internal_verdict="phishing",
+            action="AUTO",
+        )
+        cases = [dict(case) for case in rag_context.get(sample_id, [])]
+        report["enrichment"]["rag"] = cases
+        report_dir = tmp_path / "rag_reports" / sample_id
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_file = report_dir / "report.json"
+        report_file.write_text(
+            json.dumps(report, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+        )
+        final_state = {
+            "parsed": types.SimpleNamespace(email_sha256=sha),
+            "internal": None,
+            "final_validated": None,
+            "evidence": {},
+            "enrichment": types.SimpleNamespace(
+                rag=[types.SimpleNamespace(**case) for case in cases]
+            ),
+            "report_path": str(report_file),
+        }
+        return report, final_state
+
+    monkeypatch.setattr(evaluate_script, "run_nominal_pipeline", _fake_pipeline)
+    return {"factory": factory_calls, "pipeline": pipeline_calls}
+
+
+def test_rag_variant_refuses_an_empty_public_index(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """An empty index is refused: never a silently always-empty ablation."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    state = _stub_offline_rag_run(
+        evaluate_script,
+        monkeypatch,
+        tmp_path,
+        gold,
+        verdicts={"u1": "phishing", "u2": "legitime", "u3": "spam"},
+        rag_context={},
+        index_count=0,
+    )
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    args = _rag_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+    assert state["factory"], "the effective factory is still probed"
+    assert state["pipeline"] == []
+    assert not (tmp_path / "dev_rag_smoke").exists()
+
+
+def test_paired_rag_run_pairs_read_only_and_archives_diagnostics(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """Happy path: exact pairing, read-only baseline, diagnostic artifacts."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    before = {
+        str(path.relative_to(paired_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paired_dir.rglob("*"))
+        if path.is_file()
+    }
+    embedding_id = "all-MiniLM-L6-v2@sha256:" + "a" * 16
+    rag_context = {
+        "u1": [
+            {
+                "case_id": "rag_public_1",
+                "family_group": "fam:rag_1",
+                "distance": 0.12,
+                "embedding_model_id": embedding_id,
+            }
+        ],
+        "u2": [],
+        "u3": [
+            {
+                "case_id": "rag_public_2",
+                "family_group": "fam:rag_2",
+                "distance": 0.2,
+                "embedding_model_id": embedding_id,
+            },
+            {
+                "case_id": "rag_public_3",
+                "family_group": "fam:rag_3",
+                "distance": 0.31,
+                "embedding_model_id": embedding_id,
+            },
+        ],
+    }
+    state = _stub_offline_rag_run(
+        evaluate_script,
+        monkeypatch,
+        tmp_path,
+        gold,
+        verdicts={"u1": "phishing", "u2": None, "u3": "spam"},
+        rag_context=rag_context,
+    )
+    args = _rag_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_OK
+
+    out = tmp_path / "dev_rag_smoke"
+    # The effective configuration is built in memory; the frozen tools.yaml
+    # (copied fixture) still says rag.enabled=false.
+    assert state["factory"] == [
+        {
+            "rag_enabled": True,
+            "tools_rag_enabled": True,
+            "rag_dir": str(tmp_path / "chroma"),
+        }
+    ]
+    tools_yaml = (tmp_path / "configs" / "tools.yaml").read_text(encoding="utf-8")
+    assert "rag:\n  # Globally piloted by RAG_ENABLED (default false); inactive before G7-A.\n  enabled: false" in tools_yaml
+    assert len(state["pipeline"]) == 3
+    pipeline_by_id = {entry["sample_id"]: entry for entry in state["pipeline"]}
+    for gold_row in gold:
+        sample_id = str(gold_row["sample_id"])
+        expected_groups = {
+            value
+            for value in (
+                gold_row["family_group"],
+                gold_row["duplicate_group"],
+                gold_row["campaign_id"],
+            )
+            if value is not None
+        }
+        assert pipeline_by_id[sample_id]["rag_exclusions"] == expected_groups
+        assert pipeline_by_id[sample_id]["current_family_group"] == gold_row["family_group"]
+        assert pipeline_by_id[sample_id]["current_duplicate_group"] == gold_row["duplicate_group"]
+        assert pipeline_by_id[sample_id]["current_campaign_id"] == gold_row["campaign_id"]
+
+    rows = [
+        json.loads(line)
+        for line in (out / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert sorted(row["sample_id"] for row in rows) == ["u1", "u2", "u3"]
+    assert all(row["variant"] == "rag" for row in rows)
+    assert next(row for row in rows if row["sample_id"] == "u3")["rag_cases"]
+    assert next(row for row in rows if row["sample_id"] == "u2")["rag_cases"] == []
+
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["variant"] == "rag"
+    assert manifest["measurement_scope"] == "smoke"
+    assert manifest["performance_claims_allowed"] is False
+    assert manifest["rag_ablation"]["capability"]["in_memory_overrides"] == [
+        "tools.rag.enabled=true",
+        "RAG_ENABLED=true",
+    ]
+    assert manifest["rag_ablation"]["capability"]["frozen_tools_yaml_unchanged"] is True
+    assert manifest["rag_ablation"]["index"]["count"] == 2
+    assert manifest["rag_ablation"]["paired_with"] == "paired"
+    assert manifest["rag_ablation"]["paired_baseline_artifact"] == "paired_baseline.json"
+    assert manifest["paired_baseline"]["comparison"]["performance_claims_allowed"] is False
+
+    paired = json.loads((out / "paired_baseline.json").read_text(encoding="utf-8"))
+    assert paired["paired_variant"] == "baseline"
+    assert paired["paired_with"] == "paired"
+    assert paired["selection_identity"]["sample_ids"] == ["u1", "u2", "u3"]
+    assert paired["denominators"] == {
+        "current_run": 3,
+        "paired_run": 3,
+        "selection": 3,
+        "identical": True,
+    }
+    comparison = paired["comparison"]
+    assert comparison["n_comparable"] == 3
+    assert comparison["buckets"]["right_to_right"] == 2
+    assert comparison["buckets"]["right_to_wrong"] == 1
+    assert comparison["denominators_paired"] is True
+    assert paired["rag_usage"]["samples_with_neighbour"] == 2
+    assert paired["rag_usage"]["samples_without_neighbour"] == 1
+    assert paired["rag_usage"]["total_neighbours"] == 3
+    per_sample = {entry["sample_id"]: entry for entry in paired["per_sample"]}
+    assert per_sample["u2"]["baseline_predicted"] == "legitime"
+    assert per_sample["u2"]["rag_predicted"] is None
+    assert per_sample["u2"]["prediction_changed"] is True
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "Paired baseline" in report
+    assert "performance_claims_allowed=false" in report
+
+    # The paired baseline run was never modified.
+    after = {
+        str(path.relative_to(paired_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paired_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert before == after

@@ -19,6 +19,7 @@ from src.metrics import (
     evaluate,
     fpr_block,
     latency_stats,
+    paired_variant_block,
     sample_cost,
     validate_control_audits,
 )
@@ -541,3 +542,50 @@ def test_ioc_rate_null_when_denominator_zero():
     metrics = evaluate(rows, reports, sample_extras=[{"proposals_total": 0, "proposals_invalid": 0}])
     assert metrics["ioc"]["fabricated_rate_before_verifier"] is None
     assert metrics["ioc"]["proposals_total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Paired baseline -> variant block (TICKET-15, docs/evaluation.md §8.7)
+# ---------------------------------------------------------------------------
+
+
+def test_paired_variant_block_stays_paired_and_diagnostic():
+    labels = ["phishing", "legitime", "spam"]
+    baseline = ["phishing", "legitime", "spam"]
+    rag = ["phishing", None, "spam"]  # one technical failure on legitime
+    block = paired_variant_block(
+        labels, baseline, rag, baseline_variant="baseline", variant="rag"
+    )
+    assert block["n_comparable"] == 3
+    assert block["buckets"] == {
+        "right_to_right": 2,
+        "wrong_to_right": 0,
+        "right_to_wrong": 1,
+        "wrong_to_wrong": 0,
+    }
+    assert block["n_changed_verdict"] == 1
+    assert block["b_technical_failures"] == 1
+    assert block["a_technical_failures"] == 0
+    assert block["denominators_paired"] is True
+    assert block["a_role"] == "baseline"
+    assert block["b_role"] == "variant"
+    assert block["baseline_variant"] == "baseline"
+    assert block["variant"] == "rag"
+    assert block["diagnostic_only"] is True
+    assert block["performance_claims_allowed"] is False
+
+
+def test_paired_variant_block_improvement_and_regression_buckets():
+    labels = ["phishing", "legitime"]
+    baseline = [None, "legitime"]  # one baseline failure, one baseline hit
+    rag = ["phishing", "spam"]  # corrected one, broke the other
+    block = paired_variant_block(labels, baseline, rag)
+    assert block["buckets"]["wrong_to_right"] == 1
+    assert block["buckets"]["right_to_wrong"] == 1
+    assert block["a_technical_failures"] == 1
+    assert block["delta_macro_f1"] is not None
+
+
+def test_paired_variant_block_refuses_length_mismatch():
+    with pytest.raises(ValueError):
+        paired_variant_block(["phishing"], ["phishing", "spam"], ["phishing"])

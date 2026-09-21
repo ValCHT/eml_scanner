@@ -50,6 +50,18 @@ result must equal the live metrics exactly (metrics carry no wall-clock
 data); only the recompute manifest differs (explicit recomputation
 metadata, original observation timestamps preserved).
 
+Paired variant mode (TICKET-15, docs/evaluation.md §8.7):
+``--variant rag --paired-with <archived baseline run>`` runs the SAME
+bounded deterministic smoke through the frozen pipeline with the public RAG
+context enabled IN MEMORY (the frozen ``configs/tools.yaml`` is never
+rewritten) and writes the paired diagnostic comparison. The archived
+baseline run is read only: its files are never modified, its rows/reports
+are never replayed, and the exact ``sample_id`` identity + denominators are
+verified before any provider call (missing/extra row = FAIL). The result
+stays diagnostic (``measurement_scope=smoke``,
+``performance_claims_allowed=false``, INCONCLUSIVE valid): the RAG
+ablation is an experimental closure, never a performance claim.
+
 Security: no secret is ever read or printed (settings expose presence
 booleans only); gold_test.jsonl is NEVER opened by this script — the
 terminal test evaluation belongs to a later authorized ticket; email
@@ -68,6 +80,7 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -95,14 +108,20 @@ from src.graph import build_graph, build_services, config_sha256
 from src.llm import LunaClient
 from src.metrics import (
     LABELS,
-    compare_internal_final,
     estimate_cost_usd,
     evaluate as evaluate_metrics,
     latency_stats,
+    paired_variant_block,
     validate_control_audits,
 )
 from src.prompts import canonical_bytes
 from src.state import EmailTriageState, Enrichment, ToolResult, new_state
+from src.tools.rag import (
+    RagAdapter,
+    RagError,
+    RagUnavailableError,
+    create_rag_adapter_if_enabled,
+)
 from src.verify import compute_verdict_confidence
 
 EXIT_OK = 0
@@ -111,6 +130,11 @@ EXIT_BLOCKED = 2
 
 #: The TICKET-14 dev workflow never opens gold_test.jsonl (operator rule).
 FORBIDDEN_SPLIT = "test"
+
+#: Variants of the frozen pipeline (docs/evaluation.md §8.7). TICKET-15
+#: implements the RAG paired ablation; TICKET-16 will add the vision one.
+BASELINE_VARIANT = "baseline"
+RAG_VARIANT = "rag"
 
 ABLATION_TOOL_REASON = "ablation_control_b_no_external_evidence"
 
@@ -150,6 +174,10 @@ class GoldTestAccessRefused(RuntimeError):
 
 class ExperimentLockError(RuntimeError):
     """The frozen experiment configuration no longer matches the lock."""
+
+
+class PairedRunError(RuntimeError):
+    """The archived paired run cannot be paired with the current run (§8.7)."""
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +414,224 @@ def derive_source_profile(row: Mapping[str, Any], config: EvaluationConfig) -> s
 
 
 # ---------------------------------------------------------------------------
+# Paired variant interface (docs/evaluation.md §8.7, TICKET-15)
+# ---------------------------------------------------------------------------
+
+
+def _project_relative(path: Path) -> str:
+    """Project-relative display path when possible (never fails loudly)."""
+
+    try:
+        return str(Path(path).resolve().relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(path)
+
+
+@dataclass(frozen=True)
+class PairedBaseline:
+    """Read-only view of the archived baseline run used for pairing (§8.7).
+
+    The paired run is LOADED, never replayed and never written: its rows and
+    reports stay untouched provenance. ``manifest_sha256`` /
+    ``predictions_sha256`` are the exact bytes read (recorded in the paired
+    artifact so a later reader can prove which archived run was compared).
+    """
+
+    run_dir: Path
+    manifest: dict[str, Any]
+    rows: list[dict[str, Any]]
+    manifest_sha256: str
+    predictions_sha256: str
+
+    @property
+    def selected_sample_ids(self) -> list[str]:
+        return [str(value) for value in self.manifest["selected_sample_ids"]]
+
+    @property
+    def by_sample_id(self) -> dict[str, dict[str, Any]]:
+        return {str(row["sample_id"]): row for row in self.rows}
+
+
+def load_paired_baseline(run_dir: Path, *, expected_scope: str) -> PairedBaseline:
+    """Load an archived baseline run READ-ONLY and verify its identity.
+
+    Fails closed (``PairedRunError``) on a missing run, a non-baseline
+    variant, a split/scope/selection-rule mismatch, a row set that does not
+    reproduce ``selected_sample_ids`` exactly (missing or extra row = FAIL)
+    or duplicated sample ids. No file is ever written.
+    """
+
+    if not run_dir.is_dir():
+        raise PairedRunError(f"paired run directory missing: {run_dir}")
+    manifest_path = run_dir / "manifest.json"
+    predictions_path = run_dir / "predictions.jsonl"
+    if not manifest_path.is_file() or not predictions_path.is_file():
+        raise PairedRunError(
+            f"paired run {run_dir} is not an archived evaluation run "
+            "(manifest.json/predictions.jsonl missing)"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PairedRunError(f"paired run manifest unreadable: {error}") from error
+    if not isinstance(manifest, dict):
+        raise PairedRunError("paired run manifest is not a JSON object")
+
+    problems: list[str] = []
+    if manifest.get("variant") != BASELINE_VARIANT:
+        problems.append(
+            f"variant must be {BASELINE_VARIANT!r} (got {manifest.get('variant')!r})"
+        )
+    if manifest.get("split") != "dev":
+        problems.append(f"split must be 'dev' (got {manifest.get('split')!r})")
+    if manifest.get("measurement_scope") != expected_scope:
+        problems.append(
+            "measurement_scope must match the current run "
+            f"({expected_scope!r} vs {manifest.get('measurement_scope')!r})"
+        )
+    if expected_scope == "smoke" and manifest.get(
+        "performance_claims_allowed"
+    ) is not False:
+        problems.append("a smoke paired run must archive performance_claims_allowed=false")
+    if manifest.get("sample_selection_rule") != SAMPLE_SELECTION_RULE:
+        problems.append("sample_selection_rule differs from the deterministic smoke rule")
+    selected = manifest.get("selected_sample_ids")
+    if not isinstance(selected, list) or not selected:
+        problems.append("selected_sample_ids must be a non-empty list")
+
+    rows: list[dict[str, Any]] = []
+    try:
+        with predictions_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise PairedRunError("paired run row is not a JSON object")
+                rows.append(row)
+    except (OSError, json.JSONDecodeError) as error:
+        raise PairedRunError(f"paired run predictions unreadable: {error}") from error
+    if not rows:
+        problems.append("paired run has no archived rows")
+    ids = [str(row.get("sample_id")) for row in rows]
+    if len(set(ids)) != len(ids):
+        problems.append("paired run rows contain duplicated sample_id values")
+    if isinstance(selected, list) and selected and sorted(ids) != sorted(
+        str(value) for value in selected
+    ):
+        problems.append(
+            "paired run rows do not reproduce its selected_sample_ids exactly "
+            "(missing or extra row)"
+        )
+    if manifest.get("sample_count") != len(rows):
+        problems.append(
+            f"paired manifest sample_count {manifest.get('sample_count')!r} != "
+            f"{len(rows)} archived rows"
+        )
+    for row in rows:
+        sample_id = row.get("sample_id")
+        if row.get("variant") != BASELINE_VARIANT:
+            problems.append(f"row {sample_id!r}: variant must be {BASELINE_VARIANT!r}")
+            break
+        if row.get("split") != "dev":
+            problems.append(f"row {sample_id!r}: split must be 'dev'")
+            break
+        if row.get("measurement_scope") != expected_scope:
+            problems.append(f"row {sample_id!r}: measurement_scope mismatch")
+            break
+    if problems:
+        raise PairedRunError("paired run invalid: " + "; ".join(problems))
+    return PairedBaseline(
+        run_dir=run_dir,
+        manifest=manifest,
+        rows=rows,
+        manifest_sha256=_file_sha256(manifest_path),
+        predictions_sha256=_file_sha256(predictions_path),
+    )
+
+
+def verify_paired_selection(
+    paired: PairedBaseline, selected_rows: list[Mapping[str, Any]]
+) -> None:
+    """Exact sample-id identity between the paired run and the current selection.
+
+    The paired rows must describe the SAME gold records (same ``sample_id``,
+    same label, same raw bytes hash): a sample_id that names a different
+    record makes the comparison meaningless and is refused before any call.
+    """
+
+    current_ids = sorted(str(row["sample_id"]) for row in selected_rows)
+    paired_ids = sorted(paired.selected_sample_ids)
+    if current_ids != paired_ids:
+        raise PairedRunError(
+            "sample-id identity mismatch: current deterministic selection "
+            f"{current_ids} differs from the paired run selection {paired_ids}"
+        )
+    gold_by_id = {str(row["sample_id"]): row for row in selected_rows}
+    for row in paired.rows:
+        sample_id = str(row["sample_id"])
+        gold = gold_by_id[sample_id]
+        if str(row.get("label")) != str(gold["normalized_label"]):
+            raise PairedRunError(
+                f"sample {sample_id}: paired label {row.get('label')!r} != gold "
+                f"label {gold['normalized_label']!r}"
+            )
+        if str(row.get("raw_sha256")) != str(gold["raw_sha256"]):
+            raise PairedRunError(
+                f"sample {sample_id}: paired raw_sha256 differs from the gold record"
+            )
+
+
+@dataclass(frozen=True)
+class RagAblation:
+    """Effective RAG-enabled configuration + the validated adapter (§8.7)."""
+
+    effective_settings: Settings
+    effective_tools: ToolsConfig
+    adapter: RagAdapter
+    description: dict[str, Any]
+
+
+def prepare_rag_ablation(settings: Settings, tools: ToolsConfig) -> RagAblation:
+    """Build the effective RAG-enabled configuration and the ONE adapter.
+
+    The frozen ``configs/tools.yaml`` keeps ``rag.enabled=false`` (the G6
+    baseline file is never rewritten, so its lock hash stays valid); the
+    ablation applies the capability IN MEMORY for this run only and the
+    manifest records the explicit overrides. The adapter verifies the frozen
+    embedding fingerprint on open and its index must be non-empty: an empty
+    index is refused instead of silently measuring an always-empty context.
+    """
+
+    rag_dir = Path(settings.RAG_DIR)
+    if not rag_dir.is_absolute():
+        rag_dir = (PROJECT_ROOT / rag_dir).resolve()
+    effective_settings = settings.model_copy(
+        update={"RAG_ENABLED": True, "RAG_DIR": rag_dir}
+    )
+    effective_tools = tools.model_copy(
+        update={"rag": tools.rag.model_copy(update={"enabled": True})}
+    )
+    adapter = create_rag_adapter_if_enabled(effective_settings, effective_tools.rag)
+    if adapter is None:  # pragma: no cover - both switches are forced true above
+        raise RagError("RAG ablation factory returned no adapter")
+    count = adapter.count()
+    description = adapter.describe()
+    if count <= 0:
+        raise RagError(
+            f"public RAG index is empty ({description['index_dir']}): build it "
+            "first (python scripts/manage_rag.py add --input "
+            "corpus/rag/public_cases.jsonl)"
+        )
+    return RagAblation(
+        effective_settings=effective_settings,
+        effective_tools=effective_tools,
+        adapter=adapter,
+        description=description,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Frozen pipeline runner (same nodes/graph as run_email, state kept)
 # ---------------------------------------------------------------------------
 
@@ -394,6 +640,13 @@ def run_nominal_pipeline(
     settings: Settings,
     email_path: Path,
     source_profile: str,
+    *,
+    tools_override: ToolsConfig | None = None,
+    rag_adapter: RagAdapter | None = None,
+    rag_exclusions: set[str] | None = None,
+    current_duplicate_group: str | None = None,
+    current_family_group: str | None = None,
+    current_campaign_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run the frozen sequential StateGraph for one email.
 
@@ -402,9 +655,16 @@ def run_nominal_pipeline(
     ``RUNS_DIR/<run_id>/report.json``) but keeps the FULL final state so the
     shared INTERNAL assessment (A) and the merged evidence bundle are
     available to the A/B/C control and audit.
+
+    ``tools_override`` / ``rag_adapter`` are the paired-ablation seam
+    (§8.7): the run executes under the effective configuration and reuses
+    the already-validated adapter; the frozen baseline call site passes
+    neither and is byte-identical to the T14 harness.
     """
 
     tools = load_yaml_config(Path(settings.CONFIG_DIR) / "tools.yaml", ToolsConfig)
+    if tools_override is not None:
+        tools = tools_override
     gate = load_yaml_config(Path(settings.CONFIG_DIR) / "gate.yaml", GateConfig)
     policy = load_yaml_config(Path(settings.CONFIG_DIR) / "policy.yaml", PolicyConfig)
     started = time.monotonic()
@@ -414,6 +674,12 @@ def run_nominal_pipeline(
         source_profile=source_profile,  # type: ignore[arg-type]
         run_id=state.run_id,
         started_monotonic=started,
+        tools_override=tools_override,
+        rag=rag_adapter,
+        rag_exclusions=rag_exclusions,
+        current_duplicate_group=current_duplicate_group,
+        current_family_group=current_family_group,
+        current_campaign_id=current_campaign_id,
     )
     graph = build_graph(services)
     final_state = graph.invoke(state, config={"configurable": {"thread_id": state.run_id}})
@@ -675,6 +941,17 @@ def build_evaluation_row(
         accepted.model_dump() if accepted is not None else None
     )
     refusals = count_attempt_refusals([capture_dir, b_capture_dir])
+    rag_cases: list[dict[str, Any]] = []
+    enrichment = final_state.get("enrichment")
+    for case in getattr(enrichment, "rag", None) or []:
+        rag_cases.append(
+            {
+                "case_id": str(getattr(case, "case_id", "")),
+                "family_group": str(getattr(case, "family_group", "")),
+                "distance": getattr(case, "distance", None),
+                "embedding_model_id": str(getattr(case, "embedding_model_id", "")),
+            }
+        )
 
     row_out: dict[str, Any] = {
         "sample_id": row["sample_id"],
@@ -717,6 +994,7 @@ def build_evaluation_row(
         "tool_status_digest_c": (c_audits[-1].get("tool_status_digest") if c_audits else None),
         "evidence_provenance_counts": provenance_counts,
         "bundle_external_evidence": bundle_external,
+        "rag_cases": rag_cases,
         "extras": {
             "rejected_final_candidates": rejects,
             "proposals_total": proposals_total,
@@ -839,6 +1117,177 @@ def extras_from_rows(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Paired baseline artifact (docs/evaluation.md §8.7, TICKET-15)
+# ---------------------------------------------------------------------------
+
+
+def _row_prediction(row: Mapping[str, Any]) -> str | None:
+    """Typed delivered prediction of one archived evaluation row."""
+
+    value = row.get("predicted")
+    return value if isinstance(value, str) and value in LABELS else None
+
+
+def build_paired_baseline_payload(
+    paired: PairedBaseline,
+    run_rows: list[Mapping[str, Any]],
+    rows: list[Mapping[str, Any]],
+    ablation: RagAblation,
+) -> dict[str, Any]:
+    """Full paired artifact: identity, denominators, comparison, RAG usage.
+
+    Built only after BOTH series were validated. A missing/extra/duplicated
+    sample_id or a denominator mismatch raises ``PairedRunError``: no delta
+    is published from two series that are not exactly the same samples. The
+    comparison reuses the §8.3 paired engine through
+    ``src.metrics.paired_variant_block`` and stays diagnostic
+    (``performance_claims_allowed=false``, INCONCLUSIVE valid).
+    """
+
+    gold_by_id = {str(row["sample_id"]): row for row in run_rows}
+    expected_ids = sorted(gold_by_id)
+    current_by_id = {str(row["sample_id"]): row for row in rows}
+    if len(current_by_id) != len(rows):
+        raise PairedRunError("current run contains duplicated sample_id rows")
+    paired_by_id = paired.by_sample_id
+    if len(paired_by_id) != len(paired.rows):
+        raise PairedRunError("paired run contains duplicated sample_id rows")
+    for name, present in (
+        ("current", sorted(current_by_id)),
+        ("paired", sorted(paired_by_id)),
+    ):
+        if present != expected_ids:
+            raise PairedRunError(
+                f"{name} run does not reproduce the deterministic selection "
+                f"(missing={sorted(set(expected_ids) - set(present))}, "
+                f"extra={sorted(set(present) - set(expected_ids))})"
+            )
+    if len(rows) != len(paired.rows) or len(rows) != len(expected_ids):
+        raise PairedRunError(
+            "denominators differ: "
+            f"current={len(rows)}, paired={len(paired.rows)}, "
+            f"selection={len(expected_ids)}"
+        )
+
+    labels = [str(gold_by_id[sample_id]["normalized_label"]) for sample_id in expected_ids]
+    baseline_predictions = [
+        _row_prediction(paired_by_id[sample_id]) for sample_id in expected_ids
+    ]
+    rag_predictions = [
+        _row_prediction(current_by_id[sample_id]) for sample_id in expected_ids
+    ]
+    comparison = paired_variant_block(
+        labels,
+        baseline_predictions,
+        rag_predictions,
+        baseline_variant=BASELINE_VARIANT,
+        variant=RAG_VARIANT,
+    )
+    usage_rows = [
+        list(current_by_id[sample_id].get("rag_cases") or []) for sample_id in expected_ids
+    ]
+    per_sample: list[dict[str, Any]] = []
+    for index, sample_id in enumerate(expected_ids):
+        baseline_row = paired_by_id[sample_id]
+        current_row = current_by_id[sample_id]
+        per_sample.append(
+            {
+                "sample_id": sample_id,
+                "label": gold_by_id[sample_id]["normalized_label"],
+                "baseline_predicted": baseline_row.get("predicted"),
+                "rag_predicted": current_row.get("predicted"),
+                "prediction_changed": (
+                    baseline_row.get("predicted") != current_row.get("predicted")
+                ),
+                "baseline_gate_decision": baseline_row.get("gate_decision"),
+                "rag_gate_decision": current_row.get("gate_decision"),
+                "rag_cases": usage_rows[index],
+            }
+        )
+    return {
+        "schema_version": "paired-baseline-1.0",
+        "variant": RAG_VARIANT,
+        "paired_variant": BASELINE_VARIANT,
+        "paired_with": _project_relative(paired.run_dir),
+        "paired_manifest_sha256": paired.manifest_sha256,
+        "paired_predictions_sha256": paired.predictions_sha256,
+        "measurement_scope": paired.manifest.get("measurement_scope"),
+        "performance_claims_allowed": False,
+        "selection_identity": {
+            "verified": True,
+            "sample_selection_rule": SAMPLE_SELECTION_RULE,
+            "sample_ids": expected_ids,
+        },
+        "denominators": {
+            "current_run": len(rows),
+            "paired_run": len(paired.rows),
+            "selection": len(expected_ids),
+            "identical": True,
+        },
+        "comparison": comparison,
+        "per_sample": per_sample,
+        "rag_usage": {
+            "sample_count": len(expected_ids),
+            "samples_with_neighbour": sum(1 for cases in usage_rows if cases),
+            "samples_without_neighbour": sum(1 for cases in usage_rows if not cases),
+            "total_neighbours": sum(len(cases) for cases in usage_rows),
+            "per_sample": [
+                {
+                    "sample_id": sample_id,
+                    "n_cases": len(usage_rows[index]),
+                    "case_ids": [
+                        str(case.get("case_id")) for case in usage_rows[index]
+                    ],
+                    "distances": [
+                        case.get("distance") for case in usage_rows[index]
+                    ],
+                }
+                for index, sample_id in enumerate(expected_ids)
+            ],
+        },
+        "rag_index": ablation.description,
+        "baseline_run_read_only": True,
+        "note": (
+            "paired diagnostic ablation of the bounded smoke (docs/evaluation.md "
+            "§8.7): never a performance claim (performance_claims_allowed=false), "
+            "INCONCLUSIVE is a valid outcome, feeds T19C; the first full "
+            "benchmark including RAG is TICKET-19E"
+        ),
+    }
+
+
+def build_rag_ablation_block(
+    ablation: RagAblation, paired: PairedBaseline
+) -> dict[str, Any]:
+    """Manifest block describing how the RAG ablation was enabled and paired."""
+
+    return {
+        "capability": {
+            "tools_rag_enabled_effective": True,
+            "rag_enabled_effective": True,
+            "in_memory_overrides": [
+                "tools.rag.enabled=true",
+                "RAG_ENABLED=true",
+            ],
+            "frozen_tools_yaml_unchanged": True,
+            "note": (
+                "the frozen configs/tools.yaml keeps rag.enabled=false (the G6 "
+                "baseline file is never rewritten); the paired ablation applies "
+                "the capability in memory for this run only"
+            ),
+        },
+        "index": ablation.description,
+        "paired_with": _project_relative(paired.run_dir),
+        "paired_baseline_artifact": "paired_baseline.json",
+        "policy": (
+            "diagnostic smoke only (performance_claims_allowed=false); "
+            "INCONCLUSIVE is a valid outcome; results feed T19C; the first "
+            "full benchmark including RAG is TICKET-19E"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Artifact writers
 # ---------------------------------------------------------------------------
 
@@ -912,8 +1361,14 @@ def build_manifest(
     sample_selection_rule: str,
     selected_ids: list[str],
     full_support: dict[str, int],
+    rag_ablation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run manifest: identity, frozen inputs, pricing, tool/config status."""
+    """Run manifest: identity, frozen inputs, pricing, tool/config status.
+
+    ``rag_ablation`` (TICKET-15, §8.7) describes the in-memory RAG
+    capability override, the frozen index identity and the read-only paired
+    baseline; it is absent for the frozen baseline variant.
+    """
 
     commit = None
     try:
@@ -945,7 +1400,7 @@ def build_manifest(
         "rag_enabled": bool(settings.RAG_ENABLED),
         "qr_decode_enabled": bool(settings.QR_DECODE_ENABLED),
     }
-    return {
+    manifest: dict[str, Any] = {
         "schema_version": "eval-manifest-1.0",
         "mode": mode,
         "run_id": out_dir.name,
@@ -1013,6 +1468,9 @@ def build_manifest(
         "completed_at_utc": datetime.now(UTC).isoformat(),
         "secrets_included": False,
     }
+    if rag_ablation is not None:
+        manifest["rag_ablation"] = dict(rag_ablation)
+    return manifest
 
 
 def _egress_allow_real_urls(settings: Settings) -> bool:
@@ -1223,6 +1681,30 @@ def write_human_report(path: Path, metrics: Mapping[str, Any], manifest: Mapping
         f"benign AUTO precision={_fmt_opt(metrics['policy']['benign_auto']['precision'])} "
         f"(support {metrics['policy']['benign_auto']['support']})"
     )
+    paired = manifest.get("paired_baseline")
+    if paired:
+        comparison = paired.get("comparison") or {}
+        buckets = comparison.get("buckets") or {}
+        usage = paired.get("rag_usage") or {}
+        lines.append("")
+        lines.append("## Paired baseline → RAG (diagnostic smoke, §8.7)")
+        lines.append(f"- paired_with: {paired.get('paired_with')} (read-only)")
+        lines.append(
+            f"- paired n={comparison.get('n_comparable')}, "
+            f"changed={comparison.get('n_changed_verdict')}, "
+            f"wrong→right={buckets.get('wrong_to_right')}, "
+            f"right→wrong={buckets.get('right_to_wrong')}, "
+            f"Δmacro-F1={_fmt_opt(comparison.get('delta_macro_f1'))}"
+        )
+        lines.append(
+            f"- RAG context: {usage.get('samples_with_neighbour')}/"
+            f"{usage.get('sample_count')} samples received at least one public "
+            f"neighbour, total={usage.get('total_neighbours')}"
+        )
+        lines.append(
+            "- diagnostic only (performance_claims_allowed=false); INCONCLUSIVE "
+            "valid; feeds T19C; the first full benchmark including RAG is TICKET-19E"
+        )
     lines.append("")
     lines.append("## Limitations")
     for limitation in metrics["limitations"]:
@@ -1277,8 +1759,27 @@ def run_live(
 
     split = args.split
     variant = args.variant
-    if variant != evaluation_config.abc.get("variant"):
-        print(f"FAIL: unknown variant {variant!r}", file=sys.stderr)
+    if variant not in (BASELINE_VARIANT, RAG_VARIANT):
+        print(
+            f"FAIL: unknown variant {variant!r} (supported: "
+            f"{BASELINE_VARIANT!r}, {RAG_VARIANT!r})",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
+    paired_with = args.paired_with
+    if variant == RAG_VARIANT and not paired_with:
+        print(
+            f"FAIL: --variant {RAG_VARIANT} requires --paired-with "
+            "<archived baseline run dir> (docs/evaluation.md §8.7): the "
+            "baseline is read only, never replayed",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
+    if variant != RAG_VARIANT and paired_with:
+        print(
+            f"FAIL: --paired-with is only valid with --variant {RAG_VARIANT}",
+            file=sys.stderr,
+        )
         return EXIT_FAIL
     if split == FORBIDDEN_SPLIT:
         print(
@@ -1291,6 +1792,13 @@ def run_live(
     if split != "dev":
         print(f"FAIL: unsupported split {split!r}", file=sys.stderr)
         return EXIT_FAIL
+
+    sample_profile = args.sample_profile
+    if sample_profile not in (SMOKE_PROFILE, FULL_PROFILE):
+        print(f"FAIL: unknown sample profile {sample_profile!r}", file=sys.stderr)
+        return EXIT_FAIL
+    measurement_scope = "smoke" if sample_profile == SMOKE_PROFILE else "full_dev_baseline"
+    performance_claims_allowed = sample_profile == FULL_PROFILE
 
     out_dir = Path(args.out)
     if not out_dir.is_absolute():
@@ -1322,6 +1830,18 @@ def run_live(
             print(f"BLOCKED: {problem}", file=sys.stderr)
         return EXIT_BLOCKED
 
+    # --- paired baseline (READ ONLY) BEFORE any call -------------------------
+    paired: PairedBaseline | None = None
+    if variant == RAG_VARIANT:
+        paired_dir = Path(paired_with)
+        if not paired_dir.is_absolute():
+            paired_dir = PROJECT_ROOT / paired_dir
+        try:
+            paired = load_paired_baseline(paired_dir, expected_scope=measurement_scope)
+        except PairedRunError as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return EXIT_FAIL
+
     # --- gold validation BEFORE any call -------------------------------------
     # The FULL partition integrity is always validated (all 83 records),
     # whatever the live measurement scope is.
@@ -1333,19 +1853,48 @@ def run_live(
         return EXIT_FAIL
 
     full_support = _label_support(gold_rows)
-    sample_profile = args.sample_profile
     if sample_profile == SMOKE_PROFILE:
         run_rows = select_smoke_sample(gold_rows)
-    elif sample_profile == FULL_PROFILE:
-        run_rows = gold_rows
     else:
-        print(f"FAIL: unknown sample profile {sample_profile!r}", file=sys.stderr)
-        return EXIT_FAIL
+        run_rows = gold_rows
     selected_ids = [str(row["sample_id"]) for row in run_rows]
+    if paired is not None:
+        # Exact sample-id identity + label/hash identity (§8.7): a missing or
+        # extra sample makes the paired delta meaningless.
+        try:
+            verify_paired_selection(paired, run_rows)
+        except PairedRunError as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return EXIT_FAIL
+
+    # --- RAG ablation preparation BEFORE any provider call -------------------
+    tools_override: ToolsConfig | None = None
+    rag_adapter: RagAdapter | None = None
+    rag_ablation: RagAblation | None = None
+    if variant == RAG_VARIANT:
+        tools_config = load_yaml_config(
+            Path(settings.CONFIG_DIR) / "tools.yaml", ToolsConfig
+        )
+        try:
+            rag_ablation = prepare_rag_ablation(settings, tools_config)
+        except RagUnavailableError as error:
+            print(f"BLOCKED: {error}", file=sys.stderr)
+            return EXIT_BLOCKED
+        except RagError as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return EXIT_FAIL
+        settings = rag_ablation.effective_settings
+        tools_override = rag_ablation.effective_tools
+        rag_adapter = rag_ablation.adapter
+        description = rag_ablation.description
+        print(
+            f"[rag] paired ablation: index={description['index_dir']} "
+            f"count={description['count']} "
+            f"model={description['embedding_model_id']} "
+            f"paired_with={_project_relative(paired.run_dir)}"
+        )
 
     pricing = evaluation_config.pricing_snapshot
-    measurement_scope = "smoke" if sample_profile == SMOKE_PROFILE else "full_dev_baseline"
-    performance_claims_allowed = sample_profile == FULL_PROFILE
     if sample_profile == SMOKE_PROFILE:
         print(
             f"[smoke] measurement_scope=smoke: {len(selected_ids)} live "
@@ -1372,8 +1921,35 @@ def run_live(
             profile = derive_source_profile(gold_row, evaluation_config)
             email_file = Path(temp_dir.name) / f"{index:04d}_{safe_name}.eml"
             email_file.write_bytes(verified_bytes[sample_id])
+            rag_identity_kwargs: dict[str, Any] = {}
+            if variant == RAG_VARIANT:
+                current_family_group = str(gold_row.get("family_group") or "").strip() or None
+                current_duplicate_group = str(gold_row.get("duplicate_group") or "").strip() or None
+                current_campaign_id = str(gold_row.get("campaign_id") or "").strip() or None
+                rag_exclusions = {
+                    value
+                    for value in (
+                        current_family_group,
+                        current_duplicate_group,
+                        current_campaign_id,
+                    )
+                    if value is not None
+                }
+                rag_identity_kwargs = {
+                    "rag_exclusions": rag_exclusions,
+                    "current_duplicate_group": current_duplicate_group,
+                    "current_family_group": current_family_group,
+                    "current_campaign_id": current_campaign_id,
+                }
             try:
-                report, final_state = run_nominal_pipeline(settings, email_file, profile)
+                report, final_state = run_nominal_pipeline(
+                    settings,
+                    email_file,
+                    profile,
+                    tools_override=tools_override,
+                    rag_adapter=rag_adapter,
+                    **rag_identity_kwargs,
+                )
             except Exception as error:
                 # A pipeline exception is an implementation/infrastructure
                 # failure, not a provider outcome: abort loudly instead of
@@ -1465,6 +2041,17 @@ def run_live(
         evaluation_config.published_limitations
     )
 
+    # --- paired artifact: ONLY when both series are exactly the same samples --
+    paired_payload: dict[str, Any] | None = None
+    if paired is not None and rag_ablation is not None:
+        try:
+            paired_payload = build_paired_baseline_payload(
+                paired, run_rows, rows, rag_ablation
+            )
+        except PairedRunError as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return EXIT_FAIL
+
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_manifest(
         settings=settings,
@@ -1484,12 +2071,23 @@ def run_live(
         sample_selection_rule=SAMPLE_SELECTION_RULE,
         selected_ids=selected_ids,
         full_support=full_support,
+        rag_ablation=(
+            build_rag_ablation_block(rag_ablation, paired)
+            if rag_ablation is not None and paired is not None
+            else None
+        ),
     )
+    if paired_payload is not None:
+        # The full paired diagnostic is also embedded in the manifest/report;
+        # the standalone artifact carries the exact read-only provenance.
+        manifest["paired_baseline"] = paired_payload
     write_predictions_atomic(out_dir / "predictions.jsonl", rows)
     write_json_atomic(out_dir / "metrics.json", metrics)
     write_json_atomic(out_dir / "manifest.json", manifest)
     write_matrix_csv(out_dir / "matrix.csv", metrics)
     write_human_report(out_dir / "report.md", metrics, manifest)
+    if paired_payload is not None:
+        write_json_atomic(out_dir / "paired_baseline.json", paired_payload)
     invalid_abc = [
         row["sample_id"]
         for row in rows
@@ -1501,7 +2099,7 @@ def run_live(
             file=sys.stderr,
         )
         return EXIT_FAIL
-    print(f"live baseline complete: {out_dir}")
+    print(f"live {variant} complete: {out_dir}")
     return EXIT_OK
 
 
@@ -1832,7 +2430,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--split", choices=["dev", FORBIDDEN_SPLIT], default="dev")
     parser.add_argument("--mode", choices=["live", "recompute"], default="live")
-    parser.add_argument("--variant", default="baseline")
+    parser.add_argument("--variant", default=BASELINE_VARIANT)
+    parser.add_argument(
+        "--paired-with",
+        default=None,
+        help=(
+            "archived baseline run directory compared against --variant rag "
+            "(read-only: never replayed, never modified). Required for "
+            "--variant rag; refused otherwise (docs/evaluation.md §8.7)."
+        ),
+    )
     parser.add_argument(
         "--sample-profile",
         default=None,
