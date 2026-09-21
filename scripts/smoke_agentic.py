@@ -51,6 +51,7 @@ from src.agent.client import AgentChatClient  # noqa: E402
 from src.agent.models import (  # noqa: E402
     AGENT_REASONING_EFFORT,
     ARCHITECTURE_NAME,
+    DEFAULT_AGENT_LIMITS,
     MAX_AGENT_SECONDS,
     MAX_SINGLE_LLM_SECONDS,
     MEASUREMENT_SCOPE,
@@ -188,7 +189,9 @@ def run_capability(args: argparse.Namespace) -> int:
         "This observable_id exists in OBSERVABLE_REGISTRY below. "
         "Do not call any other tool."
     )
-    messages = build_capability_probe_messages(observable.id, objective, parsed)
+    messages = build_capability_probe_messages(
+        observable.id, objective, parsed, agent_limits=DEFAULT_AGENT_LIMITS
+    )
     client = AgentChatClient(
         settings,
         capture_dir=capture_dir,
@@ -246,7 +249,7 @@ def run_capability(args: argparse.Namespace) -> int:
         "completed_at": datetime.now(UTC).isoformat(),
         "requested_model": response.requested_model,
         "returned_model": response.returned_model,
-        "effective_prompt_sha256": agent_system_prompt_sha256(),
+        "effective_prompt_sha256": agent_system_prompt_sha256(DEFAULT_AGENT_LIMITS),
         "tool_choice": "auto",
         "provider_lookup_executed": False,
         "native_tool_call_observed": observed,
@@ -438,7 +441,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         "completed_at": datetime.now(UTC).isoformat(),
         "selected_sample_ids": selected_ids,
         "model_requested": settings.LITELLM_MODEL,
-        "effective_prompt_sha256": agent_system_prompt_sha256(),
+        "effective_prompt_sha256": agent_system_prompt_sha256(DEFAULT_AGENT_LIMITS),
         "limits": {
             "max_llm_turns": 5,
             "max_tool_calls": 4,

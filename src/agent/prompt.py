@@ -29,6 +29,7 @@ from typing import Any
 
 from ..prompts import ContextLimits, build_final_envelope, load_final_prompt
 from ..state import Evidence, Observable, ParsedEmail
+from .models import DEFAULT_AGENT_LIMITS, AgentLimits
 
 #: Appended agentic tool policy (§12: the ten mandatory rules).
 AGENT_TOOL_POLICY = """AGENTIC TOOL POLICY (T19A/B) — THIS SECTION SUPERSEDES the statements
@@ -74,25 +75,31 @@ honest coverage limits in `missing_information`.
 """
 
 
-def build_agent_system_prompt() -> str:
-    """Deterministic effective system prompt of the agentic runner."""
+def build_agent_system_prompt(limits: AgentLimits | None = None) -> str:
+    """Deterministic effective system prompt bound to the APPLIED limits.
 
-    from .models import DEFAULT_AGENT_LIMITS
+    The budget sentence is formatted from the exact ``AgentLimits`` used by
+    the run, so the effective prompt, its SHA-256 and the archived limits can
+    never diverge (T19E auditability). With the default limits the output is
+    byte-identical to the historical default prompt.
+    """
 
-    limits = DEFAULT_AGENT_LIMITS
+    effective = limits if limits is not None else DEFAULT_AGENT_LIMITS
     policy = AGENT_TOOL_POLICY.format(
-        max_llm_turns=limits.max_llm_turns,
-        max_tool_calls=limits.max_tool_calls,
-        max_urlscan_calls=limits.max_urlscan_calls,
-        max_agent_seconds=limits.max_agent_seconds,
+        max_llm_turns=effective.max_llm_turns,
+        max_tool_calls=effective.max_tool_calls,
+        max_urlscan_calls=effective.max_urlscan_calls,
+        max_agent_seconds=effective.max_agent_seconds,
     )
     return load_final_prompt().rstrip() + "\n\n" + policy.rstrip() + "\n"
 
 
-def agent_system_prompt_sha256() -> str:
+def agent_system_prompt_sha256(limits: AgentLimits | None = None) -> str:
     """SHA-256 of the effective system prompt archived in the manifest."""
 
-    return hashlib.sha256(build_agent_system_prompt().encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        build_agent_system_prompt(limits).encode("utf-8")
+    ).hexdigest()
 
 
 def build_initial_envelope(
@@ -121,13 +128,18 @@ def build_initial_envelope(
 def initial_messages(
     parsed: ParsedEmail,
     limits: ContextLimits | None = None,
+    agent_limits: AgentLimits | None = None,
 ) -> list[dict[str, Any]]:
-    """System prompt + deterministic user envelope JSON (exact projection)."""
+    """System prompt + deterministic user envelope JSON (exact projection).
+
+    ``agent_limits`` is the exact limits object enforced by the run: the
+    system prompt budget sentence and its hash are built from it.
+    """
 
     envelope = build_initial_envelope(parsed, limits)
     user_payload = json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False)
     return [
-        {"role": "system", "content": build_agent_system_prompt()},
+        {"role": "system", "content": build_agent_system_prompt(agent_limits)},
         {"role": "user", "content": user_payload},
     ]
 
@@ -137,6 +149,7 @@ def build_capability_probe_messages(
     objective: str,
     parsed: ParsedEmail | None = None,
     limits: ContextLimits | None = None,
+    agent_limits: AgentLimits | None = None,
 ) -> list[dict[str, Any]]:
     """T19A-only probe messages: explicitly require one named tool call.
 
@@ -145,11 +158,12 @@ def build_capability_probe_messages(
     is the real deterministic envelope when ``parsed`` is provided, so the
     required ``observable_id`` genuinely exists in OBSERVABLE_REGISTRY. The
     controlled probe never executes the provider lookup; it only proves that
-    the real configured runtime returns native ``tool_calls``.
+    the real configured runtime returns native ``tool_calls``. The system
+    prompt is built from the same ``agent_limits`` the run enforces.
     """
 
     system = (
-        build_agent_system_prompt().rstrip()
+        build_agent_system_prompt(agent_limits).rstrip()
         + "\n\nCAPABILITY PROBE (this run only, trusted harness instruction)\n"
         + objective
         + "\nCall no other tool and do not finalize in this probe run."

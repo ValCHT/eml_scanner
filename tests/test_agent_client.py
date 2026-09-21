@@ -119,6 +119,45 @@ def test_effective_agent_prompt_contains_the_ten_rules_and_four_tools() -> None:
         assert fragment in prompt
 
 
+def test_default_prompt_and_hash_are_frozen_for_the_archived_smoke() -> None:
+    """The default prompt must not drift: the archived smoke artifacts carry
+    this exact effective_prompt_sha256 for the default limits."""
+
+    from src.agent.models import DEFAULT_AGENT_LIMITS
+    from src.agent.prompt import agent_system_prompt_sha256
+
+    default_hash = agent_system_prompt_sha256()
+    assert default_hash == agent_system_prompt_sha256(DEFAULT_AGENT_LIMITS)
+    assert default_hash == (
+        "86fd2b8973e76af9d3a678f25166d4be30111626e1d3017abe8191cce51fc6af"
+    )
+
+
+def test_prompt_and_hash_follow_the_applied_limits() -> None:
+    """Prompt text and hash are bound to the exact AgentLimits enforced."""
+
+    import hashlib
+
+    from src.agent.models import AgentLimits
+    from src.agent.prompt import agent_system_prompt_sha256
+
+    custom = AgentLimits(
+        max_llm_turns=3,
+        max_tool_calls=1,
+        max_urlscan_calls=1,
+        max_agent_seconds=120.0,
+    )
+    prompt = build_agent_system_prompt(custom)
+    normalized = " ".join(prompt.split())
+    assert "at most 3 assistant turns" in normalized
+    assert "at most 1 provider calls in total" in normalized
+    assert "within 120 seconds" in normalized
+    assert agent_system_prompt_sha256(custom) == hashlib.sha256(
+        prompt.encode("utf-8")
+    ).hexdigest()
+    assert agent_system_prompt_sha256(custom) != agent_system_prompt_sha256()
+
+
 def test_capability_probe_instruction_is_trusted_and_registry_backed(
     project_root: Path,
 ) -> None:

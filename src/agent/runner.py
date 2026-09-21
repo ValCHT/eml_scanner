@@ -276,7 +276,7 @@ def run_agentic_email(
     capture_dir.mkdir(parents=True, exist_ok=True)
     trace = _RunTrace(started_monotonic=started, clock=clock)
 
-    prompt_sha = agent_system_prompt_sha256()
+    prompt_sha = agent_system_prompt_sha256(limits)
     tools_config = load_yaml_config(Path(settings.CONFIG_DIR) / "tools.yaml", ToolsConfig)
     policy_config = load_yaml_config(Path(settings.CONFIG_DIR) / "policy.yaml", PolicyConfig)
     assert isinstance(tools_config, ToolsConfig) and isinstance(policy_config, PolicyConfig)
@@ -336,7 +336,7 @@ def run_agentic_email(
                     persist_request_body=(source_profile == "fixture"),
                 )
         if agent_client is not None:
-            messages = initial_messages(parsed, ContextLimits())
+            messages = initial_messages(parsed, ContextLimits(), limits)
             assessment, status, llm_error, agent_error, turns_meta = _run_loop(
                 parsed=parsed,
                 executor=executor,
@@ -354,6 +354,7 @@ def run_agentic_email(
                     )
                 ),
                 finalize_attempts=finalize_attempts,
+                include_content_excerpt=(source_profile == "fixture"),
             )
 
     if executor is not None:
@@ -655,6 +656,7 @@ def _run_loop(
     effort: str,
     max_output_tokens: int,
     finalize_attempts: list[dict[str, Any]],
+    include_content_excerpt: bool,
 ) -> tuple[
     Assessment | None,
     Literal["finalized", "incomplete", "error"],
@@ -708,6 +710,7 @@ def _run_loop(
             "error": response.error,
         }
         turns.append(turn_meta)
+        content = response.content or ""
         trace.add(
             "llm_turn",
             turn=turn_index,
@@ -724,8 +727,13 @@ def _run_loop(
                 }
                 for call in response.tool_calls
             ],
-            content_chars=len(response.content or ""),
-            content_excerpt=(response.content or "")[:1000],
+            content_chars=len(content),
+            # Minimization: free-form model prose may quote email content, so
+            # only its length and hash are persisted unless the source profile
+            # explicitly allows fixture retention. The in-memory message keeps
+            # the full content for the protocol.
+            content_sha256=_sha256_text(content) if content else None,
+            content_excerpt=(content[:1000] if include_content_excerpt else None),
             usage={
                 "input_tokens": response.input_tokens,
                 "cached_input_tokens": response.cached_input_tokens,
@@ -743,15 +751,18 @@ def _run_loop(
             status = "error"
             break
 
-        # Echo the native assistant message (OpenAI tool protocol).
+        # Native tool protocol: only calls carrying a provider id can be
+        # echoed and answered with a role=tool message. A call without an id
+        # is a protocol error and is refused below, never executed.
+        echoed_calls = [call for call in response.tool_calls if call.call_id]
         assistant_message: dict[str, Any] = {
             "role": "assistant",
             "content": response.content or "",
         }
-        if response.tool_calls:
+        if echoed_calls:
             assistant_message["tool_calls"] = [
                 {
-                    "id": call.call_id or "",
+                    "id": call.call_id,
                     "type": "function",
                     "function": {
                         "name": call.name or "",
@@ -764,11 +775,11 @@ def _run_loop(
                         ),
                     },
                 }
-                for call in response.tool_calls
+                for call in echoed_calls
             ]
         messages.append(assistant_message)
 
-        answered_calls = [call for call in response.tool_calls if call.call_id]
+        answered_calls = echoed_calls
         unanswered_refusals: list[ToolExecution] = []
         finalized_this_turn = False
 
@@ -782,6 +793,43 @@ def _run_loop(
                 arguments_error=call.arguments_error,
             )
             if call.name == FINALIZE_TOOL:
+                if not call.call_id:
+                    # Native tool protocol: a terminal finalize without a
+                    # provider tool_call_id is not attributable/auditable and
+                    # must NEVER produce status=finalized. It is a typed
+                    # protocol refusal; the loop may continue if budget
+                    # remains, otherwise the run ends incomplete/REVIEW.
+                    issue = (
+                        "missing_tool_call_id: a finalize_assessment without a "
+                        "native provider tool_call_id cannot be attributed and is "
+                        "refused; it never finalizes the run"
+                    )
+                    finalize_attempts.append(
+                        {
+                            "turn": turn_index,
+                            "call_id": None,
+                            "valid": False,
+                            "issues": [issue],
+                        }
+                    )
+                    trace.add(
+                        "finalization",
+                        turn=turn_index,
+                        call_id=None,
+                        valid=False,
+                        issues=[issue],
+                    )
+                    unanswered_refusals.append(
+                        ToolExecution(
+                            tool=FINALIZE_TOOL,
+                            provider=None,
+                            call_id=None,
+                            observable_id=None,
+                            outcome="refused",
+                            refusal_reason="missing_tool_call_id",
+                        )
+                    )
+                    continue
                 candidate, issues = parse_finalize_arguments(call.arguments)
                 finalize_attempts.append(
                     {

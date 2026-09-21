@@ -203,6 +203,28 @@ def _finalize_response(
     )
 
 
+def _idless_finalize_response(
+    assessment: dict[str, Any] | None = None,
+) -> AgentLLMResponse:
+    """Schema-valid finalize with NO provider tool_call_id (protocol error)."""
+
+    arguments = {"assessment": assessment or _valid_assessment()}
+    return AgentLLMResponse(
+        status="ok",
+        requested_model=STUB_MODEL,
+        returned_model=STUB_MODEL,
+        finish_reason="tool_calls",
+        tool_calls=[
+            ToolCall(
+                call_id=None,
+                name="finalize_assessment",
+                arguments_raw=json.dumps(arguments),
+                arguments=arguments,
+            )
+        ],
+    )
+
+
 def _ok_result(
     tool: str,
     observable_id: str,
@@ -263,13 +285,14 @@ def _run(
     tmp_path: Path,
     *,
     email_name: str = "malicious_url_redirect.eml",
+    source_profile: str = "fixture",
     **kwargs: Any,
 ) -> Any:
     email_path = settings.CONFIG_DIR.parent / "tests" / "fixtures" / email_name
     return run_agentic_email(
         email_path,
         settings,
-        source_profile="fixture",
+        source_profile=source_profile,  # type: ignore[arg-type]
         client=client,
         adapters=adapters,
         run_root=tmp_path / "agentic",
@@ -582,6 +605,153 @@ def test_parse_failure_is_explicit_and_reviewed(
     assert result.action == "REVIEW"
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["parse_error"]
+
+
+def test_finalize_without_tool_call_id_is_refused_and_never_finalizes(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """PR #17 blocker 2: schema-valid finalize + call_id=None must be a typed
+    protocol refusal, never a terminal success. The loop may continue if
+    budget remains, but only a later attributable finalize can end the run."""
+
+    client = ScriptedClient(
+        [
+            _idless_finalize_response(),
+            _finalize_response(call_id="good_1"),
+        ]
+    )
+    result = _run(runner_settings, client, _adapters(), tmp_path)
+    assert result.status == "finalized"
+    final_document = json.loads((result.run_dir / "final.json").read_text(encoding="utf-8"))
+    attempts = final_document["finalize_attempts"]
+    assert [attempt["valid"] for attempt in attempts] == [False, True]
+    assert attempts[0]["call_id"] is None
+    assert any(
+        "missing_tool_call_id" in issue for issue in attempts[0]["issues"]
+    )
+    # The id-less call is never echoed as an attributable assistant tool_call
+    # and the model receives a typed protocol-error message.
+    second_call_messages = client.calls[1]["messages"]
+    assistant_messages = [
+        message for message in second_call_messages if message.get("role") == "assistant"
+    ]
+    assert assistant_messages[-1].get("tool_calls", []) == []
+    assert any(
+        message.get("role") == "user"
+        and "agent_protocol_error" in str(message.get("content"))
+        for message in second_call_messages
+    )
+    # No provider lookup was executed either.
+    assert result.provider_tool_call_count == 0
+
+
+def test_finalize_without_tool_call_id_alone_is_incomplete_review(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    client = ScriptedClient([_idless_finalize_response()])
+    result = _run(
+        runner_settings,
+        client,
+        _adapters(),
+        tmp_path,
+        limits=AgentLimits(max_llm_turns=1),
+    )
+    assert result.status == "incomplete"
+    assert result.assessment is None
+    assert result.verdict is None
+    assert result.action == "REVIEW"
+    final_document = json.loads((result.run_dir / "final.json").read_text(encoding="utf-8"))
+    assert final_document["verification"]["accepted"] is False
+    assert final_document["assessment"] is None
+
+
+def test_custom_limits_drive_the_prompt_hash_and_the_manifest(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """PR #17 blocker 3: prompt text/hash and archived limits must be the
+    exact AgentLimits the run enforced (T19E auditability)."""
+
+    from src.agent.prompt import agent_system_prompt_sha256
+
+    custom = AgentLimits(
+        max_llm_turns=4,
+        max_tool_calls=2,
+        max_urlscan_calls=1,
+        max_agent_seconds=120.0,
+        max_single_llm_seconds=45.0,
+        max_tool_result_chars=4000,
+    )
+    client = ScriptedClient([_finalize_response()])
+    result = _run(runner_settings, client, _adapters(), tmp_path, limits=custom)
+    system_prompt = " ".join(client.calls[0]["messages"][0]["content"].split())
+    assert "at most 4 assistant turns" in system_prompt
+    assert "at most 2 provider calls in total" in system_prompt
+    assert "within 120 seconds" in system_prompt
+    manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["limits"] == {
+        "max_llm_turns": 4,
+        "max_tool_calls": 2,
+        "max_urlscan_calls": 1,
+        "max_agent_seconds": 120.0,
+        "max_single_llm_seconds": 45.0,
+        "max_tool_result_chars": 4000,
+    }
+    assert manifest["effective_prompt_sha256"] == agent_system_prompt_sha256(custom)
+    assert manifest["effective_prompt_sha256"] != agent_system_prompt_sha256()
+    assert manifest["effective_prompt_sha256"] == result.prompt_sha256
+
+
+def test_non_fixture_trace_keeps_only_prose_length_and_hash(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """PR #17 security hardening: free-form model prose is not persisted for
+    public_corpus/private_authorized, only its length and SHA-256."""
+
+    import hashlib
+
+    marker = "QUOTED-EMAIL-PROSE-MUST-NOT-BE-PERSISTED"
+    client = ScriptedClient([_text_response(marker), _text_response(marker)])
+    result = _run(
+        runner_settings,
+        client,
+        _adapters(),
+        tmp_path,
+        source_profile="public_corpus",
+        limits=AgentLimits(max_llm_turns=2),
+    )
+    trace_text = (result.run_dir / "trace.jsonl").read_text(encoding="utf-8")
+    assert marker not in trace_text
+    events = [
+        json.loads(line) for line in trace_text.splitlines() if line.strip()
+    ]
+    llm_turns = [event for event in events if event["event"] == "llm_turn"]
+    assert llm_turns
+    for event in llm_turns:
+        assert event["content_excerpt"] is None
+        assert event["content_chars"] == len(marker)
+        assert event["content_sha256"] == hashlib.sha256(
+            marker.encode("utf-8")
+        ).hexdigest()
+    # The protocol still carries the full prose in memory (nudge was sent).
+    assert _tool_messages(client) == []
+    assert any(
+        message.get("role") == "user" and "finalize_assessment" in str(message.get("content"))
+        for message in client.calls[1]["messages"]
+    )
+
+
+def test_fixture_trace_keeps_the_bounded_excerpt(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    client = ScriptedClient([_text_response("fixture prose"), _finalize_response()])
+    result = _run(runner_settings, client, _adapters(), tmp_path)
+    events = [
+        json.loads(line)
+        for line in (result.run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    llm_turn = next(event for event in events if event["event"] == "llm_turn")
+    assert llm_turn["content_excerpt"] == "fixture prose"
 
 
 # ---------------------------------------------------------------------------
