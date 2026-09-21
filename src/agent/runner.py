@@ -910,7 +910,9 @@ def _run_loop(
                     mode=execution.result.mode,
                     elapsed_ms=execution.result.elapsed_ms,
                 )
-            payload = execution_payload(execution, limits.max_tool_result_chars)
+            payload = execution_payload(
+                execution, limits.max_tool_result_chars, limits
+            )
             trace.add(
                 "tool_result",
                 turn=turn_index,

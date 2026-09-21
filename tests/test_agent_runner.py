@@ -457,6 +457,62 @@ def test_provider_tool_calls_never_exceed_four(
     payloads = [json.loads(message["content"]) for message in _tool_messages(client)]
     assert payloads[-1]["refused"] is True
     assert payloads[-1]["reason"] == "tool_budget_exhausted"
+    assert payloads[-1]["message"] == (
+        "provider tool-call budget exhausted (at most 4 provider calls in total): "
+        "no provider call was made; finalize with the evidence already available"
+    )
+
+
+def test_custom_tool_budget_is_reflected_in_the_model_visible_refusal(
+    runner_settings: Settings, tmp_path: Path, parsed_email: ParsedEmail
+) -> None:
+    """PR #17 review: with a non-default max_tool_calls, the refusal the model
+    receives announces the applied budget, never the default one."""
+
+    domain = next(o for o in parsed_email.observables if o.type == "domain")
+    ipv4 = next(o for o in parsed_email.observables if o.type == "ipv4")
+    vt = RecordingAdapter(
+        lambda query, _ctx: _unavailable_result("virustotal", query.id)
+    )
+    client = ScriptedClient(
+        [
+            AgentLLMResponse(
+                status="ok",
+                requested_model=STUB_MODEL,
+                returned_model=STUB_MODEL,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        "c0",
+                        "lookup_virustotal",
+                        json.dumps({"observable_id": domain.id}),
+                        {"observable_id": domain.id},
+                    ),
+                    ToolCall(
+                        "c1",
+                        "lookup_virustotal",
+                        json.dumps({"observable_id": ipv4.id}),
+                        {"observable_id": ipv4.id},
+                    ),
+                ],
+            ),
+            _finalize_response(),
+        ]
+    )
+    result = _run(
+        runner_settings,
+        client,
+        _adapters(vt=vt),
+        tmp_path,
+        limits=AgentLimits(max_tool_calls=1),
+    )
+    assert result.status == "finalized"
+    assert result.provider_tool_call_count == 1
+    payloads = [json.loads(message["content"]) for message in _tool_messages(client)]
+    assert payloads[-1]["refused"] is True
+    assert payloads[-1]["reason"] == "tool_budget_exhausted"
+    assert "at most 1 provider calls in total" in payloads[-1]["message"]
+    assert "at most 4" not in payloads[-1]["message"]
 
 
 def test_llm_turns_never_exceed_five(

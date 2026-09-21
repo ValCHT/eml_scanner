@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from src.agent.models import DEFAULT_AGENT_LIMITS, AgentLimits
 from src.agent.tools import (
     AGENT_TOOLS,
     ProviderAdapterSet,
@@ -161,6 +162,7 @@ def _executor(
     tools_config: ToolsConfig,
     *,
     egress: Any = None,
+    limits: AgentLimits | None = None,
 ) -> ProviderToolExecutor:
     import time
 
@@ -173,6 +175,7 @@ def _executor(
         egress=egress if egress is not None else tools_config.egress,
         capture_dir=Path("."),
         deadline=time.monotonic() + 60,
+        limits=limits if limits is not None else DEFAULT_AGENT_LIMITS,
     )
 
 
@@ -361,6 +364,11 @@ def test_urlscan_is_limited_to_one_call(
     assert second.outcome == "refused"
     assert second.refusal_reason == "urlscan_budget_exhausted"
     assert len(urlscan.calls) == 1
+    payload = json.loads(execution_payload(second, 12_000, DEFAULT_AGENT_LIMITS))
+    assert payload["message"] == (
+        "urlscan budget exhausted (at most 1 submission): no provider call was "
+        "made; finalize with the evidence already available"
+    )
 
 
 def test_provider_tool_budget_is_four(
@@ -392,6 +400,65 @@ def test_provider_tool_budget_is_four(
     ]
     assert outcomes[-1].refusal_reason == "tool_budget_exhausted"
     assert executor.provider_tool_call_count == 4
+    payload = json.loads(execution_payload(outcomes[-1], 12_000, DEFAULT_AGENT_LIMITS))
+    assert payload["message"] == (
+        "provider tool-call budget exhausted (at most 4 provider calls in total): "
+        "no provider call was made; finalize with the evidence already available"
+    )
+
+
+def test_tool_budget_refusal_message_matches_applied_limits(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    """PR #17 review: a model-visible refusal derives its numbers from the
+    exact AgentLimits the executor enforces, never from the defaults."""
+
+    observables = [
+        _observable_by(parsed_email, type="domain"),
+        _observable_by(parsed_email, type="ipv4"),
+    ]
+    vt = RecordingAdapter(lambda query, _ctx: _unavailable(query, _ctx))
+    limits = AgentLimits(max_tool_calls=1)
+    executor = _executor(
+        parsed_email,
+        ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt),
+        tools_config,
+        limits=limits,
+    )
+    first = executor.execute(
+        _call("lookup_virustotal", observables[0].id, call_id="c0")
+    )
+    second = executor.execute(
+        _call("lookup_virustotal", observables[1].id, call_id="c1")
+    )
+    assert first.outcome == "executed"
+    assert second.outcome == "refused"
+    assert second.refusal_reason == "tool_budget_exhausted"
+    assert executor.provider_tool_call_count == 1
+    payload = json.loads(
+        execution_payload(second, limits.max_tool_result_chars, limits)
+    )
+    assert "at most 1 provider calls in total" in payload["message"]
+    assert "at most 4" not in payload["message"]
+
+
+def test_urlscan_limit_is_structurally_frozen_to_one() -> None:
+    """PR #17 review: max_urlscan_calls cannot take a non-default value, so
+    every model-visible urlscan text matches the enforced limit by
+    construction."""
+
+    with pytest.raises(ValueError, match="max_urlscan_calls"):
+        AgentLimits(max_urlscan_calls=2)
+    scan_tool = next(
+        tool for tool in AGENT_TOOLS if tool["function"]["name"] == "scan_urlscan"
+    )
+    assert (
+        "at most one submission exists per run"
+        in scan_tool["function"]["description"]
+    )
+    from src.agent.prompt import build_agent_system_prompt
+
+    assert "at most one submission per run" in build_agent_system_prompt()
 
 
 def test_recipient_observable_is_never_a_query_target(

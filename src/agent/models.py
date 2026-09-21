@@ -68,7 +68,14 @@ TOOL_PROVIDER: dict[str, str] = {
 
 @dataclass
 class AgentLimits:
-    """Bounded-loop limits; the defaults are the frozen §15 values."""
+    """Bounded-loop limits; the defaults are the frozen §15 values.
+
+    ``max_urlscan_calls`` is STRUCTURALLY frozen to ``MAX_URLSCAN_CALLS`` (1):
+    the frozen T19B contract allows exactly one urlscan submission per run and
+    the model-visible urlscan texts (tool schema, system prompt, refusal
+    vocabulary) all state "at most one submission". Any other value is a
+    programming error, so no constructible run can contradict them.
+    """
 
     max_llm_turns: int = MAX_LLM_TURNS
     max_tool_calls: int = MAX_TOOL_CALLS
@@ -76,6 +83,15 @@ class AgentLimits:
     max_agent_seconds: float = MAX_AGENT_SECONDS
     max_single_llm_seconds: float = MAX_SINGLE_LLM_SECONDS
     max_tool_result_chars: int = MAX_TOOL_RESULT_CHARS
+
+    def __post_init__(self) -> None:
+        if self.max_urlscan_calls != MAX_URLSCAN_CALLS:
+            raise ValueError(
+                "max_urlscan_calls is structurally frozen to "
+                f"{MAX_URLSCAN_CALLS} (T19B §15): the model-visible urlscan "
+                "tool schema, prompt and refusal messages state 'at most one "
+                "submission per run'"
+            )
 
 
 DEFAULT_AGENT_LIMITS = AgentLimits()

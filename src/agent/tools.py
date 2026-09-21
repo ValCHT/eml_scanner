@@ -62,6 +62,9 @@ REFUSAL_REASONS: tuple[str, ...] = (
 )
 
 #: Human-readable messages for the model (deterministic, content-free).
+#: The two budget reasons live in ``_refusal_message`` instead: their numeric
+#: claims are derived from the applied ``AgentLimits`` so a model-visible
+#: refusal can never announce a different budget than the executor enforces.
 _REFUSAL_MESSAGES: dict[str, str] = {
     "missing_tool_call_id": (
         "the provider tool call has no id: it cannot be executed or answered"
@@ -90,17 +93,39 @@ _REFUSAL_MESSAGES: dict[str, str] = {
         "duplicate request refused: this (tool, observable_id) pair was already "
         "executed; no provider call was made"
     ),
-    "tool_budget_exhausted": (
-        "provider tool-call budget exhausted (at most 4 provider calls in total): "
-        "no provider call was made; finalize with the evidence already available"
-    ),
-    "urlscan_budget_exhausted": (
-        "urlscan budget exhausted (at most 1 submission): no provider call was "
-        "made; finalize with the evidence already available"
-    ),
 }
 
-#: The exact four tool schemas exposed to the model (§9).
+
+def _refusal_message(reason: str, limits: AgentLimits | None = None) -> str:
+    """Model-facing refusal text bound to the APPLIED limits.
+
+    ``ProviderToolExecutor`` enforces ``self.limits``; the refusal payload it
+    returns to the model derives its numeric claims from the same object.
+    ``max_urlscan_calls`` is structurally frozen to 1 (``AgentLimits``), so
+    the urlscan claim is exact for every constructible run.
+    """
+
+    effective = limits if limits is not None else DEFAULT_AGENT_LIMITS
+    if reason == "tool_budget_exhausted":
+        return (
+            "provider tool-call budget exhausted (at most "
+            f"{effective.max_tool_calls} provider calls in total): no provider "
+            "call was made; finalize with the evidence already available"
+        )
+    if reason == "urlscan_budget_exhausted":
+        return (
+            "urlscan budget exhausted (at most "
+            f"{effective.max_urlscan_calls} submission): no provider call was "
+            "made; finalize with the evidence already available"
+        )
+    return _REFUSAL_MESSAGES.get(reason, "request refused")
+
+
+#: The exact four tool schemas exposed to the model (§9). No description
+#: carries a configurable number: the urlscan claim ("at most one submission
+#: exists per run") matches the structurally frozen
+#: ``AgentLimits.max_urlscan_calls``, so the schema is valid for every
+#: constructible run.
 AGENT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -273,26 +298,34 @@ def normalize_result_payload(
     return json.dumps(core, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
-def refusal_payload(execution: ToolExecution) -> str:
-    """Model-facing typed refusal payload (canonical JSON)."""
+def refusal_payload(
+    execution: ToolExecution, limits: AgentLimits | None = None
+) -> str:
+    """Model-facing typed refusal payload (canonical JSON).
+
+    ``limits`` must be the executor's effective ``AgentLimits``: the budget
+    claims in the message are derived from it.
+    """
 
     payload = {
         "refused": True,
         "tool": execution.tool,
         "observable_id": execution.observable_id,
         "reason": execution.refusal_reason,
-        "message": _REFUSAL_MESSAGES.get(
-            execution.refusal_reason or "", "request refused"
-        ),
+        "message": _refusal_message(execution.refusal_reason or "", limits),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
-def execution_payload(execution: ToolExecution, max_chars: int = 12_000) -> str:
+def execution_payload(
+    execution: ToolExecution,
+    max_chars: int = 12_000,
+    limits: AgentLimits | None = None,
+) -> str:
     """Exact role=tool content for one execution."""
 
     if execution.outcome == "refused" or execution.result is None:
-        return refusal_payload(execution)
+        return refusal_payload(execution, limits)
     return normalize_result_payload(execution.result, max_chars)
 
 
