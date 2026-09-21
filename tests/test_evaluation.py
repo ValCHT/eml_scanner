@@ -1229,11 +1229,21 @@ def test_run_live_full_profile_keeps_the_systematic_outage_abort(
 
 
 def _rag_gold_rows() -> list[dict]:
-    return [
+    rows = [
         _gold_row("u1", "a" * 64, "phishing"),
         _gold_row("u2", "b" * 64, "legitime"),
         _gold_row("u3", "c" * 64, "spam"),
     ]
+    rows[0].update(
+        family_group="fam:u1", duplicate_group="dup:u1", campaign_id="camp:u1"
+    )
+    rows[1].update(
+        family_group="fam:u2", duplicate_group="dup:u2", campaign_id=None
+    )
+    rows[2].update(
+        family_group="fam:u3", duplicate_group="dup:u3", campaign_id="camp:u3"
+    )
+    return rows
 
 
 def _write_paired_baseline_run(
@@ -1522,11 +1532,19 @@ def _stub_offline_rag_run(
         assert kwargs.get("rag_adapter") is not None, "the validated adapter must be reused"
         assert settings.RAG_ENABLED is True
         sample_id = Path(email_file).stem.split("_", 1)[1]
-        pipeline_calls.append({"sample_id": sample_id, "profile": profile})
-        verdict = verdicts[sample_id]
-        sha = next(
-            str(row["raw_sha256"]) for row in gold_rows if row["sample_id"] == sample_id
+        gold_row = next(row for row in gold_rows if row["sample_id"] == sample_id)
+        pipeline_calls.append(
+            {
+                "sample_id": sample_id,
+                "profile": profile,
+                "rag_exclusions": set(kwargs.get("rag_exclusions") or ()),
+                "current_family_group": kwargs.get("current_family_group"),
+                "current_duplicate_group": kwargs.get("current_duplicate_group"),
+                "current_campaign_id": kwargs.get("current_campaign_id"),
+            }
         )
+        verdict = verdicts[sample_id]
+        sha = str(gold_row["raw_sha256"])
         report = _synthetic_report(
             sample_id,
             sha,
@@ -1656,6 +1674,22 @@ def test_paired_rag_run_pairs_read_only_and_archives_diagnostics(
     tools_yaml = (tmp_path / "configs" / "tools.yaml").read_text(encoding="utf-8")
     assert "rag:\n  # Globally piloted by RAG_ENABLED (default false); inactive before G7-A.\n  enabled: false" in tools_yaml
     assert len(state["pipeline"]) == 3
+    pipeline_by_id = {entry["sample_id"]: entry for entry in state["pipeline"]}
+    for gold_row in gold:
+        sample_id = str(gold_row["sample_id"])
+        expected_groups = {
+            value
+            for value in (
+                gold_row["family_group"],
+                gold_row["duplicate_group"],
+                gold_row["campaign_id"],
+            )
+            if value is not None
+        }
+        assert pipeline_by_id[sample_id]["rag_exclusions"] == expected_groups
+        assert pipeline_by_id[sample_id]["current_family_group"] == gold_row["family_group"]
+        assert pipeline_by_id[sample_id]["current_duplicate_group"] == gold_row["duplicate_group"]
+        assert pipeline_by_id[sample_id]["current_campaign_id"] == gold_row["campaign_id"]
 
     rows = [
         json.loads(line)
