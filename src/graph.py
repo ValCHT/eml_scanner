@@ -1,4 +1,5 @@
-"""Sequential StateGraph pipeline (TICKET-11, docs/architecture.md §1.2).
+"""Sequential StateGraph pipeline (TICKET-11, docs/architecture.md §1.2), with the
+TICKET-15 public-only local RAG node replacing the G6 no-op.
 
 Exactly one ``add_conditional_edges`` exists, on ``complexity_gate``, with the
 frozen mapping ``simple: verify`` / ``complex: virustotal``; every other link
@@ -68,6 +69,13 @@ from .state import (
 )
 from .tools import ToolContext
 from .tools.opencti import OpenCTIAdapter
+from .tools.rag import (
+    RagAdapter,
+    RagError,
+    RagUnavailableError,
+    create_rag_adapter_if_enabled,
+    rag_query_from_parsed,
+)
 from .tools.urlscan import UrlscanAdapter
 from .tools.virustotal import VirusTotalAdapter, plan_vt_targets
 from .verify import (
@@ -107,7 +115,13 @@ class Services:
     clock: Callable[[], float]
     started_monotonic: float
     mode: Literal["live", "recorded"] = "live"
-    rag: Any | None = None
+    rag: RagAdapter | None = None
+    #: RAG isolation facts of the CURRENT email (caller-owned metadata):
+    #: groups excluded from retrieval and re-checked by V15 at verification.
+    rag_exclusions: set[str] = field(default_factory=set)
+    current_duplicate_group: str | None = None
+    current_family_group: str | None = None
+    current_campaign_id: str | None = None
     call_log: list[str] = field(default_factory=list)
 
 
@@ -426,27 +440,56 @@ def node_urlscan(state: EmailTriageState, services: Services) -> dict[str, Any]:
 
 
 def node_rag_lookup(state: EmailTriageState, services: Services) -> dict[str, Any]:
-    """Documented no-op before G7-A (or when disabled): no context is invented.
+    """Public-only local RAG retrieval (TICKET-15) — the G6 no-op replacement.
 
-    ``RAG_ENABLED`` is false in the frozen baseline; TICKET-15 replaces this
-    node. An injected adapter is refused explicitly instead of being ignored,
-    so an unfinished RAG path can never look enabled.
+    ``services.rag`` is ``None`` unless BOTH ``RAG_ENABLED`` and
+    ``tools.rag.enabled`` are true (docs/contracts.md §2.7): the disabled
+    mode stays the documented no-op (empty context, nothing invented, no
+    Chroma import and no weights loaded — the factory refuses earlier).
+    With an adapter present, the query is the deterministic subject/body
+    projection of THIS email; the exclusions carry the current email's own
+    family/duplicate/campaign identity, and the adapter returns at most
+    ``k`` public validated neighbours (one per family, distance threshold,
+    never a forced neighbour). A RAG failure is typed state data: the
+    context stays empty and the failure is recorded, never simulated.
     """
 
     start = services.clock()
     errors = list(state.errors)
+    rag_cases: list[Any] = []
     if services.rag is not None:
-        errors.append(
-            _issue(
-                "rag_not_implemented_before_g7a",
-                "error",
-                "runtime",
-                "a RAG adapter was injected but rag_lookup is a documented "
-                "no-op before G7-A: context stays empty",
-            )
+        query = rag_query_from_parsed(
+            state.parsed, services.tools_config.rag.max_case_chars
         )
+        if query:
+            try:
+                rag_cases = services.rag.search(
+                    query,
+                    exclusions=services.rag_exclusions,
+                    k=services.tools_config.rag.k,
+                )
+            except RagUnavailableError as error:  # typed, fail-closed: no fabricated context
+                errors.append(
+                    _issue("rag_unavailable", "error", "runtime", f"{type(error).__name__}: {error}")
+                )
+                rag_cases = []
+            except RagError as error:  # typed, fail-closed: no fabricated context
+                errors.append(
+                    _issue("rag_lookup_failed", "error", "runtime", f"{type(error).__name__}: {error}")
+                )
+                rag_cases = []
+            except Exception as error:  # unexpected: recorded, never simulated
+                errors.append(
+                    _issue(
+                        "rag_lookup_failed",
+                        "error",
+                        "runtime",
+                        f"{type(error).__name__}: {error}",
+                    )
+                )
+                rag_cases = []
     return {
-        "enrichment": state.enrichment.model_copy(update={"rag": []}),
+        "enrichment": state.enrichment.model_copy(update={"rag": rag_cases}),
         "errors": errors,
         "timings": _timings(state, rag_ms=_ms(start, services.clock)),
     }
@@ -560,6 +603,9 @@ def node_verify(state: EmailTriageState, services: Services) -> dict[str, Any]:
         timings=state.timings,
         external_evidence_count_sent=external_count,
         visual_count_sent=visual_count,
+        current_duplicate_group=services.current_duplicate_group,
+        current_family_group=services.current_family_group,
+        current_campaign_id=services.current_campaign_id,
     )
     result = verify_assessment(
         state.final_candidate,
@@ -748,8 +794,19 @@ def build_services(
     started_monotonic: float,
     mode: Literal["live", "recorded"] = "live",
     egress: EgressConfig | None = None,
+    rag_exclusions: set[str] | None = None,
+    current_duplicate_group: str | None = None,
+    current_family_group: str | None = None,
+    current_campaign_id: str | None = None,
 ) -> Services:
-    """Build the per-run dependency container from Settings + configs."""
+    """Build the per-run dependency container from Settings + configs.
+
+    The RAG adapter exists only when BOTH ``tools.rag.enabled`` and
+    ``RAG_ENABLED`` are true; otherwise it stays ``None`` and nothing
+    (chromadb, ONNX weights) is imported or loaded (TICKET-15 disabled
+    mode). ``rag_exclusions`` and the current group identities are
+    caller-owned metadata (evaluation harness); they never enter the state.
+    """
 
     tools, gate, policy = _load_configs(settings)
     run_dir = Path(settings.RUNS_DIR) / run_id
@@ -786,6 +843,11 @@ def build_services(
         clock=time.monotonic,
         started_monotonic=started_monotonic,
         mode=mode,
+        rag=create_rag_adapter_if_enabled(settings, tools.rag),
+        rag_exclusions=set(rag_exclusions) if rag_exclusions is not None else set(),
+        current_duplicate_group=current_duplicate_group,
+        current_family_group=current_family_group,
+        current_campaign_id=current_campaign_id,
     )
 
 
