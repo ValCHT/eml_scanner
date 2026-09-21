@@ -50,7 +50,7 @@ result must equal the live metrics exactly (metrics carry no wall-clock
 data); only the recompute manifest differs (explicit recomputation
 metadata, original observation timestamps preserved).
 
-Paired variant mode (TICKET-15, docs/evaluation.md §8.7):
+Paired variant mode (TICKET-15/TICKET-16, docs/evaluation.md §8.7):
 ``--variant rag --paired-with <archived baseline run>`` runs the SAME
 bounded deterministic smoke through the frozen pipeline with the public RAG
 context enabled IN MEMORY (the frozen ``configs/tools.yaml`` is never
@@ -61,6 +61,19 @@ verified before any provider call (missing/extra row = FAIL). The result
 stays diagnostic (``measurement_scope=smoke``,
 ``performance_claims_allowed=false``, INCONCLUSIVE valid): the RAG
 ablation is an experimental closure, never a performance claim.
+
+``--variant vision --paired-with <archived baseline run>`` applies the same
+contract to the bounded local Vision/QR capability (TICKET-16): the
+effective run enables ``MODEL_SUPPORTS_VISION``/``tools.vision.enabled`` IN
+MEMORY only (frozen files and lock hashes untouched, recorded in the
+manifest), the archived reports carry the real per-image ``visual_cases``
+statuses and the exact §2.6.1 ``visual_count_sent`` audits, and the paired
+artifact is published ONLY when pixels were actually prepared and their
+transmission is proven by the archived audits — otherwise the run is
+explicitly INCONCLUSIVE (``delta_published=false``, no comparison) instead
+of pretending a vision ablation. Pixel attachment into the graph calls is
+wired by T19C; the first full text/text+QR/text+QR+vision benchmark is
+TICKET-19E.
 
 Security: no secret is ever read or printed (settings expose presence
 booleans only); gold_test.jsonl is NEVER opened by this script — the
@@ -83,7 +96,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
@@ -123,6 +136,7 @@ from src.tools.rag import (
     create_rag_adapter_if_enabled,
 )
 from src.verify import compute_verdict_confidence
+from src.vision import VisionDependencyError, vision_dependencies
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -132,9 +146,13 @@ EXIT_BLOCKED = 2
 FORBIDDEN_SPLIT = "test"
 
 #: Variants of the frozen pipeline (docs/evaluation.md §8.7). TICKET-15
-#: implements the RAG paired ablation; TICKET-16 will add the vision one.
+#: implements the RAG paired ablation; TICKET-16 adds the vision one.
 BASELINE_VARIANT = "baseline"
 RAG_VARIANT = "rag"
+VISION_VARIANT = "vision"
+
+#: Variants that REQUIRE a read-only ``--paired-with`` archived baseline.
+PAIRED_VARIANTS = (RAG_VARIANT, VISION_VARIANT)
 
 ABLATION_TOOL_REASON = "ablation_control_b_no_external_evidence"
 
@@ -631,6 +649,65 @@ def prepare_rag_ablation(settings: Settings, tools: ToolsConfig) -> RagAblation:
     )
 
 
+@dataclass(frozen=True)
+class VisionAblation:
+    """Effective Vision-enabled configuration of the paired run (§8.7)."""
+
+    effective_settings: Settings
+    effective_tools: ToolsConfig
+    description: dict[str, Any]
+
+
+def prepare_vision_ablation(settings: Settings, tools: ToolsConfig) -> VisionAblation:
+    """Build the effective Vision-enabled configuration of the ablation.
+
+    The frozen ``configs/tools.yaml`` keeps ``vision.enabled=false`` (the G6
+    baseline file is never rewritten, so its lock hash stays valid); the
+    paired run applies ``tools.vision.enabled=true`` and
+    ``MODEL_SUPPORTS_VISION=true`` IN MEMORY only and the manifest records
+    the explicit overrides. QR decoding stays piloted by its own
+    ``QR_DECODE_ENABLED`` switch: the vision variant must never implicitly
+    enable (or require) the QR decoder.
+
+    Only the dependencies actually needed are required: Pillow for pixels,
+    plus zxing-cpp only when QR decoding is requested. A missing optional
+    stack is refused BEFORE any provider call (BLOCKED), never silently
+    measured as an always-metadata run.
+    """
+
+    dependencies = vision_dependencies()
+    required = {"pillow": dependencies["pillow"]}
+    if settings.QR_DECODE_ENABLED:
+        required["zxingcpp"] = dependencies["zxingcpp"]
+    missing = sorted(name for name, present in required.items() if not present)
+    if missing:
+        raise VisionDependencyError(
+            "optional Vision stack missing: "
+            + ", ".join(missing)
+            + " (install with: python -m pip install -e '.[vision]')"
+        )
+    effective_settings = settings.model_copy(update={"MODEL_SUPPORTS_VISION": True})
+    effective_tools = tools.model_copy(
+        update={"vision": tools.vision.model_copy(update={"enabled": True})}
+    )
+    description = {
+        "limits": {
+            "max_images": effective_tools.vision.max_images,
+            "max_image_bytes": effective_tools.vision.max_image_bytes,
+            "max_total_bytes": effective_tools.vision.max_total_bytes,
+            "max_pixels": effective_tools.vision.max_pixels,
+        },
+        "dependencies": dict(dependencies),
+        "qr_decode_requested": bool(settings.QR_DECODE_ENABLED),
+        "formats": ["image/png", "image/jpeg"],
+    }
+    return VisionAblation(
+        effective_settings=effective_settings,
+        effective_tools=effective_tools,
+        description=description,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Frozen pipeline runner (same nodes/graph as run_email, state kept)
 # ---------------------------------------------------------------------------
@@ -808,13 +885,13 @@ def run_control_b(
     return payload
 
 
-def read_final_audits(capture_dir: Path) -> list[dict[str, Any]]:
-    """Every archived §2.6.1 FINAL input audit of one capture directory."""
+def read_input_audits(capture_dir: Path, phase: str) -> list[dict[str, Any]]:
+    """Every archived §2.6.1 input audit of one phase of a capture directory."""
 
     audits: list[dict[str, Any]] = []
     if not capture_dir.is_dir():
         return audits
-    for path in sorted(capture_dir.glob("final_attempt_*.input_audit.json")):
+    for path in sorted(capture_dir.glob(f"{phase}_attempt_*.input_audit.json")):
         try:
             audit = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -822,6 +899,12 @@ def read_final_audits(capture_dir: Path) -> list[dict[str, Any]]:
         if isinstance(audit, dict):
             audits.append(audit)
     return audits
+
+
+def read_final_audits(capture_dir: Path) -> list[dict[str, Any]]:
+    """Every archived §2.6.1 FINAL input audit of one capture directory."""
+
+    return read_input_audits(capture_dir, "final")
 
 
 def count_final_rejects(capture_dir: Path) -> tuple[int, int, int]:
@@ -869,6 +952,17 @@ def count_candidate_proposals(candidate: Mapping[str, Any] | None) -> int:
         total += 1  # the observable itself is proposed for categorization
         total += len(assessment.get("evidence_ids") or [])
     total += len(candidate.get("decisive_evidence_ids") or [])
+    return total
+
+
+def _sum_visual_count_sent(audits: Sequence[Mapping[str, Any]]) -> int:
+    """Exact §2.6.1 ``visual_count_sent`` total of archived input audits."""
+
+    total = 0
+    for audit in audits:
+        value = audit.get("visual_count_sent")
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
     return total
 
 
@@ -923,6 +1017,7 @@ def build_evaluation_row(
 
     b_audits = read_final_audits(b_capture_dir) if control_b else []
     c_audits = read_final_audits(capture_dir)
+    internal_audits = read_input_audits(capture_dir, "internal")
     gate_decision = report.get("gate_decision")
     is_complex = gate_decision == "complex"
     audit_valid, audit_problems, no_new_external = (True, [], False)
@@ -952,6 +1047,25 @@ def build_evaluation_row(
                 "embedding_model_id": str(getattr(case, "embedding_model_id", "")),
             }
         )
+    visual_cases: list[dict[str, Any]] = []
+    for visual in report.get("visual_evidence") or []:
+        if not isinstance(visual, Mapping):
+            continue
+        visual_cases.append(
+            {
+                "visual_id": str(visual.get("id", "")),
+                "mime_type": str(visual.get("mime_type", "")),
+                "status": str(visual.get("status", "")),
+                "sha256": str(visual.get("sha256", "")),
+                "width": visual.get("width"),
+                "height": visual.get("height"),
+                "qr_payloads": [
+                    str(payload) for payload in (visual.get("qr_payloads") or [])
+                ],
+            }
+        )
+    visual_count_sent_internal = _sum_visual_count_sent(internal_audits)
+    visual_count_sent_final = _sum_visual_count_sent(c_audits)
 
     row_out: dict[str, Any] = {
         "sample_id": row["sample_id"],
@@ -995,6 +1109,9 @@ def build_evaluation_row(
         "evidence_provenance_counts": provenance_counts,
         "bundle_external_evidence": bundle_external,
         "rag_cases": rag_cases,
+        "visual_cases": visual_cases,
+        "visual_count_sent_internal": visual_count_sent_internal,
+        "visual_count_sent_final": visual_count_sent_final,
         "extras": {
             "rejected_final_candidates": rejects,
             "proposals_total": proposals_total,
@@ -1128,13 +1245,18 @@ def _row_prediction(row: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value in LABELS else None
 
 
-def build_paired_baseline_payload(
+def _paired_payload_core(
     paired: PairedBaseline,
     run_rows: list[Mapping[str, Any]],
     rows: list[Mapping[str, Any]],
-    ablation: RagAblation,
+    *,
+    variant: str,
+    usage_key: str,
+    usage_fn: Callable[[Mapping[str, Any]], Any],
+    note: str,
+    include_comparison: bool = True,
 ) -> dict[str, Any]:
-    """Full paired artifact: identity, denominators, comparison, RAG usage.
+    """Shared identity/denominator checks and paired comparison (§8.7).
 
     Built only after BOTH series were validated. A missing/extra/duplicated
     sample_id or a denominator mismatch raises ``PairedRunError``: no delta
@@ -1173,21 +1295,22 @@ def build_paired_baseline_payload(
     baseline_predictions = [
         _row_prediction(paired_by_id[sample_id]) for sample_id in expected_ids
     ]
-    rag_predictions = [
+    variant_predictions = [
         _row_prediction(current_by_id[sample_id]) for sample_id in expected_ids
     ]
-    comparison = paired_variant_block(
-        labels,
-        baseline_predictions,
-        rag_predictions,
-        baseline_variant=BASELINE_VARIANT,
-        variant=RAG_VARIANT,
+    comparison = (
+        paired_variant_block(
+            labels,
+            baseline_predictions,
+            variant_predictions,
+            baseline_variant=BASELINE_VARIANT,
+            variant=variant,
+        )
+        if include_comparison
+        else None
     )
-    usage_rows = [
-        list(current_by_id[sample_id].get("rag_cases") or []) for sample_id in expected_ids
-    ]
     per_sample: list[dict[str, Any]] = []
-    for index, sample_id in enumerate(expected_ids):
+    for sample_id in expected_ids:
         baseline_row = paired_by_id[sample_id]
         current_row = current_by_id[sample_id]
         per_sample.append(
@@ -1195,18 +1318,18 @@ def build_paired_baseline_payload(
                 "sample_id": sample_id,
                 "label": gold_by_id[sample_id]["normalized_label"],
                 "baseline_predicted": baseline_row.get("predicted"),
-                "rag_predicted": current_row.get("predicted"),
+                f"{variant}_predicted": current_row.get("predicted"),
                 "prediction_changed": (
                     baseline_row.get("predicted") != current_row.get("predicted")
                 ),
                 "baseline_gate_decision": baseline_row.get("gate_decision"),
-                "rag_gate_decision": current_row.get("gate_decision"),
-                "rag_cases": usage_rows[index],
+                f"{variant}_gate_decision": current_row.get("gate_decision"),
+                usage_key: usage_fn(current_row),
             }
         )
     return {
         "schema_version": "paired-baseline-1.0",
-        "variant": RAG_VARIANT,
+        "variant": variant,
         "paired_variant": BASELINE_VARIANT,
         "paired_with": _project_relative(paired.run_dir),
         "paired_manifest_sha256": paired.manifest_sha256,
@@ -1226,34 +1349,211 @@ def build_paired_baseline_payload(
         },
         "comparison": comparison,
         "per_sample": per_sample,
-        "rag_usage": {
-            "sample_count": len(expected_ids),
-            "samples_with_neighbour": sum(1 for cases in usage_rows if cases),
-            "samples_without_neighbour": sum(1 for cases in usage_rows if not cases),
-            "total_neighbours": sum(len(cases) for cases in usage_rows),
-            "per_sample": [
-                {
-                    "sample_id": sample_id,
-                    "n_cases": len(usage_rows[index]),
-                    "case_ids": [
-                        str(case.get("case_id")) for case in usage_rows[index]
-                    ],
-                    "distances": [
-                        case.get("distance") for case in usage_rows[index]
-                    ],
-                }
-                for index, sample_id in enumerate(expected_ids)
-            ],
-        },
-        "rag_index": ablation.description,
         "baseline_run_read_only": True,
-        "note": (
+        "note": note,
+    }
+
+
+def build_paired_baseline_payload(
+    paired: PairedBaseline,
+    run_rows: list[Mapping[str, Any]],
+    rows: list[Mapping[str, Any]],
+    ablation: RagAblation,
+) -> dict[str, Any]:
+    """Full paired artifact: identity, denominators, comparison, RAG usage."""
+
+    payload = _paired_payload_core(
+        paired,
+        run_rows,
+        rows,
+        variant=RAG_VARIANT,
+        usage_key="rag_cases",
+        usage_fn=lambda row: list(row.get("rag_cases") or []),
+        note=(
             "paired diagnostic ablation of the bounded smoke (docs/evaluation.md "
             "§8.7): never a performance claim (performance_claims_allowed=false), "
             "INCONCLUSIVE is a valid outcome, feeds T19C; the first full "
             "benchmark including RAG is TICKET-19E"
         ),
+    )
+    usage_rows = [list(entry["rag_cases"]) for entry in payload["per_sample"]]
+    expected_ids = [str(entry["sample_id"]) for entry in payload["per_sample"]]
+    payload["rag_usage"] = {
+        "sample_count": len(expected_ids),
+        "samples_with_neighbour": sum(1 for cases in usage_rows if cases),
+        "samples_without_neighbour": sum(1 for cases in usage_rows if not cases),
+        "total_neighbours": sum(len(cases) for cases in usage_rows),
+        "per_sample": [
+            {
+                "sample_id": sample_id,
+                "n_cases": len(usage_rows[index]),
+                "case_ids": [
+                    str(case.get("case_id")) for case in usage_rows[index]
+                ],
+                "distances": [
+                    case.get("distance") for case in usage_rows[index]
+                ],
+            }
+            for index, sample_id in enumerate(expected_ids)
+        ],
     }
+    payload["rag_index"] = ablation.description
+    return payload
+
+
+def build_vision_usage(
+    per_sample: list[Mapping[str, Any]],
+    rows_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Vision facts of the paired run: prepared pixels, QR payloads, audits.
+
+    ``visual_cases`` are the real per-image statuses archived in each
+    report (§2.7.3): a ``supplied_to_model`` status means the bounded
+    preparation actually produced pixels for that visual. Transmission is
+    only ever claimed from the archived §2.6.1 ``visual_count_sent``
+    counters of the run's own input audits (INTERNAL + FINAL), never from
+    the preparation alone.
+    """
+
+    per_sample_usage: list[dict[str, Any]] = []
+    samples_with_supported = 0
+    samples_with_supplied = 0
+    samples_with_transmitted = 0
+    samples_with_qr = 0
+    total_supported = 0
+    total_supplied = 0
+    total_qr = 0
+    sent_internal_total = 0
+    sent_final_total = 0
+    for entry in per_sample:
+        sample_id = str(entry["sample_id"])
+        row = rows_by_id[sample_id]
+        cases = [case for case in (entry.get("visual_cases") or []) if isinstance(case, Mapping)]
+        supported = [
+            case
+            for case in cases
+            if str(case.get("mime_type")) in ("image/png", "image/jpeg")
+        ]
+        supplied = [
+            case for case in supported if str(case.get("status")) == "supplied_to_model"
+        ]
+        payloads = [
+            str(payload)
+            for case in supported
+            for payload in (case.get("qr_payloads") or [])
+        ]
+        sent_internal = int(row.get("visual_count_sent_internal") or 0)
+        sent_final = int(row.get("visual_count_sent_final") or 0)
+        if supported:
+            samples_with_supported += 1
+        if supplied:
+            samples_with_supplied += 1
+        if sent_internal + sent_final > 0:
+            samples_with_transmitted += 1
+        if payloads:
+            samples_with_qr += 1
+        total_supported += len(supported)
+        total_supplied += len(supplied)
+        total_qr += len(payloads)
+        sent_internal_total += sent_internal
+        sent_final_total += sent_final
+        per_sample_usage.append(
+            {
+                "sample_id": sample_id,
+                "supported_visuals": len(supported),
+                "supplied_pixels": len(supplied),
+                "qr_payloads": payloads,
+                "visual_count_sent_internal": sent_internal,
+                "visual_count_sent_final": sent_final,
+                "statuses": [str(case.get("status")) for case in cases],
+            }
+        )
+    return {
+        "sample_count": len(per_sample),
+        "samples_with_supported_visuals": samples_with_supported,
+        "samples_with_supplied_pixels": samples_with_supplied,
+        "samples_with_transmitted_pixels": samples_with_transmitted,
+        "samples_with_qr_payloads": samples_with_qr,
+        "total_supported_visuals": total_supported,
+        "total_supplied_pixels": total_supplied,
+        "total_qr_payloads": total_qr,
+        "visual_count_sent_internal_total": sent_internal_total,
+        "visual_count_sent_final_total": sent_final_total,
+        "visual_count_sent_total": sent_internal_total + sent_final_total,
+        "per_sample": per_sample_usage,
+    }
+
+
+def build_paired_vision_payload(
+    paired: PairedBaseline,
+    run_rows: list[Mapping[str, Any]],
+    rows: list[Mapping[str, Any]],
+    ablation: VisionAblation,
+) -> dict[str, Any]:
+    """Full paired artifact of the vision variant: identity, usage, comparison.
+
+    The comparison is published ONLY when the run actually prepared supplied
+    pixels and the archived audits prove their transmission: with zero
+    supplied pixels the artifact is explicitly INCONCLUSIVE
+    (``delta_published=false``, ``comparison=null``) and no delta is
+    invented; prepared pixels missing from the audits are a hard FAIL
+    (wiring/audit inconsistency, never silently dropped).
+    """
+
+    payload = _paired_payload_core(
+        paired,
+        run_rows,
+        rows,
+        variant=VISION_VARIANT,
+        usage_key="visual_cases",
+        usage_fn=lambda row: list(row.get("visual_cases") or []),
+        note=(
+            "paired diagnostic ablation of the bounded smoke (docs/evaluation.md "
+            "§8.7): never a performance claim (performance_claims_allowed=false), "
+            "INCONCLUSIVE is a valid outcome, feeds T19C; the first full "
+            "text/text+QR/text+QR+vision benchmark is TICKET-19E"
+        ),
+        include_comparison=True,
+    )
+    rows_by_id = {str(row["sample_id"]): row for row in rows}
+    usage = build_vision_usage(payload["per_sample"], rows_by_id)
+    if usage["samples_with_supplied_pixels"] > usage["samples_with_transmitted_pixels"]:
+        raise PairedRunError(
+            "vision ablation prepared supplied pixels for "
+            f"{usage['samples_with_supplied_pixels']} sample(s) but the archived "
+            "input audits prove transmission for only "
+            f"{usage['samples_with_transmitted_pixels']}: refusing to publish a "
+            "paired delta (wiring/audit inconsistency)"
+        )
+    if usage["samples_with_supplied_pixels"] == 0:
+        # No sample produced a supplied pixel (no supported image, or the
+        # runtime does not attach pixels yet — wired by T19C): the run is
+        # archived as INCONCLUSIVE, never as a vision ablation delta.
+        payload["comparison"] = None
+        payload["delta_published"] = False
+        payload["inconclusive"] = True
+        payload["reason_no_delta"] = (
+            "no selected sample prepared a supplied pixel (statuses: "
+            f"{sorted({status for entry in usage['per_sample'] for status in entry['statuses']})}); "
+            "no vision delta is published — INCONCLUSIVE is a valid outcome"
+        )
+    else:
+        payload["delta_published"] = True
+        payload["inconclusive"] = False
+    payload["vision_usage"] = usage
+    payload["vision_capability"] = {
+        "tools_vision_enabled_effective": True,
+        "model_supports_vision_effective": True,
+        "qr_decode_enabled_effective": bool(ablation.effective_settings.QR_DECODE_ENABLED),
+        "in_memory_overrides": [
+            "tools.vision.enabled=true",
+            "MODEL_SUPPORTS_VISION=true",
+        ],
+        "frozen_tools_yaml_unchanged": True,
+        "dependencies": dict(ablation.description["dependencies"]),
+    }
+    payload["vision_limits"] = ablation.description["limits"]
+    return payload
 
 
 def build_rag_ablation_block(
@@ -1283,6 +1583,43 @@ def build_rag_ablation_block(
             "diagnostic smoke only (performance_claims_allowed=false); "
             "INCONCLUSIVE is a valid outcome; results feed T19C; the first "
             "full benchmark including RAG is TICKET-19E"
+        ),
+    }
+
+
+def build_vision_ablation_block(
+    ablation: VisionAblation, paired: PairedBaseline
+) -> dict[str, Any]:
+    """Manifest block describing how the vision ablation was enabled and paired."""
+
+    return {
+        "capability": {
+            "tools_vision_enabled_effective": True,
+            "model_supports_vision_effective": True,
+            "qr_decode_enabled_effective": bool(ablation.effective_settings.QR_DECODE_ENABLED),
+            "in_memory_overrides": [
+                "tools.vision.enabled=true",
+                "MODEL_SUPPORTS_VISION=true",
+            ],
+            "frozen_tools_yaml_unchanged": True,
+            "note": (
+                "the frozen configs/tools.yaml keeps vision.enabled=false and the "
+                "QR switch stays piloted separately by QR_DECODE_ENABLED (the G6 "
+                "baseline file is never rewritten); the paired ablation applies "
+                "the capability in memory for this run only"
+            ),
+        },
+        "limits": ablation.description["limits"],
+        "dependencies": dict(ablation.description["dependencies"]),
+        "qr_decode_requested": bool(ablation.description["qr_decode_requested"]),
+        "paired_with": _project_relative(paired.run_dir),
+        "paired_baseline_artifact": "paired_baseline.json",
+        "policy": (
+            "diagnostic smoke only (performance_claims_allowed=false); INCONCLUSIVE "
+            "is a valid outcome; pixel attachment into the graph calls is wired by "
+            "T19C and no paired delta is published unless the archived input audits "
+            "prove the pixels were transmitted; the first full text/text+QR/"
+            "text+QR+vision benchmark is TICKET-19E"
         ),
     }
 
@@ -1362,12 +1699,15 @@ def build_manifest(
     selected_ids: list[str],
     full_support: dict[str, int],
     rag_ablation: Mapping[str, Any] | None = None,
+    vision_ablation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run manifest: identity, frozen inputs, pricing, tool/config status.
 
     ``rag_ablation`` (TICKET-15, §8.7) describes the in-memory RAG
     capability override, the frozen index identity and the read-only paired
-    baseline; it is absent for the frozen baseline variant.
+    baseline; ``vision_ablation`` (TICKET-16, §8.7) describes the in-memory
+    Vision override (limits, dependencies, QR switch) of the paired run.
+    Both are absent for the frozen baseline variant.
     """
 
     commit = None
@@ -1470,6 +1810,8 @@ def build_manifest(
     }
     if rag_ablation is not None:
         manifest["rag_ablation"] = dict(rag_ablation)
+    if vision_ablation is not None:
+        manifest["vision_ablation"] = dict(vision_ablation)
     return manifest
 
 
@@ -1683,27 +2025,44 @@ def write_human_report(path: Path, metrics: Mapping[str, Any], manifest: Mapping
     )
     paired = manifest.get("paired_baseline")
     if paired:
+        variant = str(paired.get("variant") or "")
         comparison = paired.get("comparison") or {}
-        buckets = comparison.get("buckets") or {}
-        usage = paired.get("rag_usage") or {}
         lines.append("")
-        lines.append("## Paired baseline → RAG (diagnostic smoke, §8.7)")
+        lines.append(f"## Paired baseline → {variant} (diagnostic smoke, §8.7)")
         lines.append(f"- paired_with: {paired.get('paired_with')} (read-only)")
-        lines.append(
-            f"- paired n={comparison.get('n_comparable')}, "
-            f"changed={comparison.get('n_changed_verdict')}, "
-            f"wrong→right={buckets.get('wrong_to_right')}, "
-            f"right→wrong={buckets.get('right_to_wrong')}, "
-            f"Δmacro-F1={_fmt_opt(comparison.get('delta_macro_f1'))}"
-        )
-        lines.append(
-            f"- RAG context: {usage.get('samples_with_neighbour')}/"
-            f"{usage.get('sample_count')} samples received at least one public "
-            f"neighbour, total={usage.get('total_neighbours')}"
-        )
+        if comparison:
+            buckets = comparison.get("buckets") or {}
+            lines.append(
+                f"- paired n={comparison.get('n_comparable')}, "
+                f"changed={comparison.get('n_changed_verdict')}, "
+                f"wrong→right={buckets.get('wrong_to_right')}, "
+                f"right→wrong={buckets.get('right_to_wrong')}, "
+                f"Δmacro-F1={_fmt_opt(comparison.get('delta_macro_f1'))}"
+            )
+        else:
+            lines.append(
+                "- delta not published: "
+                f"{paired.get('reason_no_delta') or 'inconclusive run'}"
+            )
+        if variant == RAG_VARIANT:
+            usage = paired.get("rag_usage") or {}
+            lines.append(
+                f"- RAG context: {usage.get('samples_with_neighbour')}/"
+                f"{usage.get('sample_count')} samples received at least one public "
+                f"neighbour, total={usage.get('total_neighbours')}"
+            )
+        elif variant == VISION_VARIANT:
+            usage = paired.get("vision_usage") or {}
+            lines.append(
+                f"- Vision: {usage.get('samples_with_supplied_pixels')}/"
+                f"{usage.get('sample_count')} samples prepared supplied pixels "
+                f"(total={usage.get('total_supplied_pixels')}), transmitted pixel "
+                f"blocks={usage.get('visual_count_sent_total')}, QR payloads="
+                f"{usage.get('total_qr_payloads')}"
+            )
         lines.append(
             "- diagnostic only (performance_claims_allowed=false); INCONCLUSIVE "
-            "valid; feeds T19C; the first full benchmark including RAG is TICKET-19E"
+            "valid; feeds T19C; the first full benchmark of the variants is TICKET-19E"
         )
     lines.append("")
     lines.append("## Limitations")
@@ -1759,25 +2118,26 @@ def run_live(
 
     split = args.split
     variant = args.variant
-    if variant not in (BASELINE_VARIANT, RAG_VARIANT):
+    if variant not in (BASELINE_VARIANT, RAG_VARIANT, VISION_VARIANT):
         print(
             f"FAIL: unknown variant {variant!r} (supported: "
-            f"{BASELINE_VARIANT!r}, {RAG_VARIANT!r})",
+            f"{BASELINE_VARIANT!r}, {RAG_VARIANT!r}, {VISION_VARIANT!r})",
             file=sys.stderr,
         )
         return EXIT_FAIL
     paired_with = args.paired_with
-    if variant == RAG_VARIANT and not paired_with:
+    if variant in PAIRED_VARIANTS and not paired_with:
         print(
-            f"FAIL: --variant {RAG_VARIANT} requires --paired-with "
+            f"FAIL: --variant {variant} requires --paired-with "
             "<archived baseline run dir> (docs/evaluation.md §8.7): the "
             "baseline is read only, never replayed",
             file=sys.stderr,
         )
         return EXIT_FAIL
-    if variant != RAG_VARIANT and paired_with:
+    if variant not in PAIRED_VARIANTS and paired_with:
         print(
-            f"FAIL: --paired-with is only valid with --variant {RAG_VARIANT}",
+            f"FAIL: --paired-with is only valid with --variant "
+            f"{' or '.join(PAIRED_VARIANTS)}",
             file=sys.stderr,
         )
         return EXIT_FAIL
@@ -1832,7 +2192,7 @@ def run_live(
 
     # --- paired baseline (READ ONLY) BEFORE any call -------------------------
     paired: PairedBaseline | None = None
-    if variant == RAG_VARIANT:
+    if variant in PAIRED_VARIANTS:
         paired_dir = Path(paired_with)
         if not paired_dir.is_absolute():
             paired_dir = PROJECT_ROOT / paired_dir
@@ -1867,10 +2227,11 @@ def run_live(
             print(f"FAIL: {error}", file=sys.stderr)
             return EXIT_FAIL
 
-    # --- RAG ablation preparation BEFORE any provider call -------------------
+    # --- variant capability preparation BEFORE any provider call -------------
     tools_override: ToolsConfig | None = None
     rag_adapter: RagAdapter | None = None
     rag_ablation: RagAblation | None = None
+    vision_ablation: VisionAblation | None = None
     if variant == RAG_VARIANT:
         tools_config = load_yaml_config(
             Path(settings.CONFIG_DIR) / "tools.yaml", ToolsConfig
@@ -1891,6 +2252,23 @@ def run_live(
             f"[rag] paired ablation: index={description['index_dir']} "
             f"count={description['count']} "
             f"model={description['embedding_model_id']} "
+            f"paired_with={_project_relative(paired.run_dir)}"
+        )
+    elif variant == VISION_VARIANT:
+        tools_config = load_yaml_config(
+            Path(settings.CONFIG_DIR) / "tools.yaml", ToolsConfig
+        )
+        try:
+            vision_ablation = prepare_vision_ablation(settings, tools_config)
+        except VisionDependencyError as error:
+            print(f"BLOCKED: {error}", file=sys.stderr)
+            return EXIT_BLOCKED
+        settings = vision_ablation.effective_settings
+        tools_override = vision_ablation.effective_tools
+        description = vision_ablation.description
+        print(
+            f"[vision] paired ablation: limits={description['limits']} "
+            f"qr_decode_requested={description['qr_decode_requested']} "
             f"paired_with={_project_relative(paired.run_dir)}"
         )
 
@@ -2051,6 +2429,14 @@ def run_live(
         except PairedRunError as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return EXIT_FAIL
+    elif paired is not None and vision_ablation is not None:
+        try:
+            paired_payload = build_paired_vision_payload(
+                paired, run_rows, rows, vision_ablation
+            )
+        except PairedRunError as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return EXIT_FAIL
 
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_manifest(
@@ -2074,6 +2460,11 @@ def run_live(
         rag_ablation=(
             build_rag_ablation_block(rag_ablation, paired)
             if rag_ablation is not None and paired is not None
+            else None
+        ),
+        vision_ablation=(
+            build_vision_ablation_block(vision_ablation, paired)
+            if vision_ablation is not None and paired is not None
             else None
         ),
     )
@@ -2430,14 +2821,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--split", choices=["dev", FORBIDDEN_SPLIT], default="dev")
     parser.add_argument("--mode", choices=["live", "recompute"], default="live")
-    parser.add_argument("--variant", default=BASELINE_VARIANT)
+    parser.add_argument(
+        "--variant",
+        default=BASELINE_VARIANT,
+        help=(
+            "frozen pipeline variant: baseline | rag | vision. The paired "
+            "variants (rag, vision) require --paired-with (docs/evaluation.md "
+            "§8.7)."
+        ),
+    )
     parser.add_argument(
         "--paired-with",
         default=None,
         help=(
-            "archived baseline run directory compared against --variant rag "
-            "(read-only: never replayed, never modified). Required for "
-            "--variant rag; refused otherwise (docs/evaluation.md §8.7)."
+            "archived baseline run directory compared against --variant "
+            "rag|vision (read-only: never replayed, never modified). Required "
+            "for --variant rag and --variant vision; refused otherwise "
+            "(docs/evaluation.md §8.7)."
         ),
     )
     parser.add_argument(

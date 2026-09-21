@@ -302,7 +302,7 @@ def _extract_html_links(html_text: str, part_id: str) -> list[Link]:
 class _WalkState:
     """Mutable walk state: part counter, decoded totals, limits, defects."""
 
-    def __init__(self, limits: ParseLimits) -> None:
+    def __init__(self, limits: ParseLimits, keep_image_bytes: bool = False) -> None:
         self.limits = limits
         self.part_count = 0
         self.decoded_total = 0
@@ -310,6 +310,12 @@ class _WalkState:
         self.defects: list[str] = []
         self.attachments: list[Attachment] = []
         self.images: list[VisualEvidence] = []
+        # TICKET-16: when explicitly requested (bounded Vision/QR capability),
+        # the decoded bytes of images the parser ACCEPTED (metadata_only) are
+        # retained here for the authorized call. The default keeps the frozen
+        # metadata-only contract: no bytes are ever retained by parse_bytes.
+        self.keep_image_bytes = keep_image_bytes
+        self.image_bytes: dict[str, bytes] = {}
         self.aborted = False
 
 
@@ -587,6 +593,8 @@ def _image_metadata(
             digest, status = "", "over_limit"
         else:
             digest, status = hashlib.sha256(payload).hexdigest(), "metadata_only"
+            if state.keep_image_bytes:
+                state.image_bytes[my_id] = payload
     return VisualEvidence(
         id=_det_id("vis", my_id, digest, content_type, content_id),
         sha256=digest,
@@ -1023,3 +1031,30 @@ def parse_email(path: Path, limits: ParseLimits) -> ParsedEmail | ParseFailure:
     if len(data) > limits.max_eml_bytes:
         return ParseFailure(error="email_too_large", detail=f"{len(data)} bytes")
     return parse_bytes(data, "rfc822", limits)
+
+
+def extract_image_parts(
+    data: bytes, limits: ParseLimits | None = None
+) -> dict[str, bytes]:
+    """Decoded image bytes keyed by the parser's own part ids (TICKET-16).
+
+    Bounded loading of the bytes of images ``parse_bytes`` accepted as
+    metadata_only visuals: the same deterministic walk, the same part
+    numbering, the same decode limits — so ``part_id`` keys always match
+    ``ParsedEmail.images``. The parser itself keeps its metadata-only
+    contract (this helper is only called by the Vision capability, at the
+    authorized call, and its result never enters the state). No network,
+    no interpretation; Vision limits are re-enforced by ``src/vision.py``
+    before any expensive processing.
+    """
+
+    limits = limits or ParseLimits()
+    if len(data) > limits.max_eml_bytes:
+        return {}
+    try:
+        message = message_from_bytes(data)
+    except Exception:  # malformed top-level structure: no bytes claimed
+        return {}
+    state = _WalkState(limits, keep_image_bytes=True)
+    _walk(message, 1, state, [], [], [])
+    return state.image_bytes

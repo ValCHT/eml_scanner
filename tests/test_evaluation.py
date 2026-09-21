@@ -1748,3 +1748,440 @@ def test_paired_rag_run_pairs_read_only_and_archives_diagnostics(
         if path.is_file()
     }
     assert before == after
+
+
+# ---------------------------------------------------------------------------
+# TICKET-16 paired vision interface (offline, docs/evaluation.md §8.7)
+# ---------------------------------------------------------------------------
+
+
+def _vision_variant_args(evaluate_script, tmp_path: Path, paired_dir: Path | None):
+    argv = [
+        "--split", "dev",
+        "--mode", "live",
+        "--variant", "vision",
+        "--sample-profile", "smoke",
+        "--out", str(tmp_path / "dev_vision_smoke"),
+    ]
+    if paired_dir is not None:
+        argv += ["--paired-with", str(paired_dir)]
+    return evaluate_script.build_parser().parse_args(argv)
+
+
+def _stub_offline_vision_run(
+    evaluate_script,
+    monkeypatch,
+    tmp_path,
+    gold_rows,
+    *,
+    verdicts: dict[str, str | None],
+    visual_status: str = "supplied_to_model",
+    visual_count_sent: int = 1,
+) -> dict[str, list]:
+    """Offline paired-vision wiring: no network, no provider, no real pixel.
+
+    The REAL effective-config construction runs (``prepare_vision_ablation``);
+    only ``vision_dependencies`` is replaced so the host installation cannot
+    change the contract. The archived reports carry the real
+    ``visual_evidence`` structure and the audits carry the exact §2.6.1
+    ``visual_count_sent`` counters (control B stays at zero pixels).
+    """
+
+    import shutil
+    import types
+
+    from pydantic import SecretStr
+
+    from src.config import load_settings as real_load_settings
+
+    real_root = SCRIPTS_DIR.parent
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    for relative in ("prompts", "schemas", "configs"):
+        shutil.copytree(real_root / relative, tmp_path / relative, dirs_exist_ok=True)
+    gold_path = tmp_path / "corpus" / "gold" / "gold_dev.jsonl"
+    gold_path.parent.mkdir(parents=True, exist_ok=True)
+    gold_path.write_text("", encoding="utf-8")
+
+    settings = real_load_settings(None).model_copy(
+        update={
+            "RUNS_DIR": tmp_path / "runs",
+            "CONFIG_DIR": real_root / "configs",
+            "MODEL_SUPPORTS_VISION": False,
+            "QR_DECODE_ENABLED": False,
+            "LITELLM_API_KEY": SecretStr("placeholder-key-not-a-real-credential"),
+        }
+    )
+    monkeypatch.setattr(evaluate_script, "load_settings", lambda: settings)
+    monkeypatch.setattr(evaluate_script, "verify_experiment_lock", lambda lock: [])
+    monkeypatch.setattr(evaluate_script, "check_runtime_ready", lambda settings, lock: [])
+    monkeypatch.setattr(
+        evaluate_script, "load_gold_records", lambda config, split: (gold_rows, gold_path)
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "validate_gold_raw_files",
+        lambda rows: ({row["sample_id"]: b"raw email bytes" for row in rows}, []),
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "vision_dependencies",
+        lambda: {"pillow": True, "zxingcpp": True},
+    )
+    stub_audit = {
+        "attempt": 1,
+        "phase": "final",
+        "external_evidence_count_sent": 0,
+        "internal_evidence_count_sent": 1,
+        "evidence_count_sent": 1,
+        "rag_case_count_sent": 0,
+        "visual_count_sent": visual_count_sent,
+        "tool_status_digest": "d" * 64,
+    }
+
+    def _stub_read_final_audits(capture_dir: Path) -> list[dict]:
+        # The B ablation control must keep zero pixels (§2.6.1); the nominal
+        # FINAL audit carries the configured visual_count_sent.
+        audit = dict(stub_audit)
+        if "responses_control_b" in str(capture_dir):
+            audit["visual_count_sent"] = 0
+        return [audit]
+
+    monkeypatch.setattr(evaluate_script, "read_final_audits", _stub_read_final_audits)
+    monkeypatch.setattr(
+        evaluate_script, "read_input_audits", lambda capture_dir, phase: []
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "run_control_b",
+        lambda settings, final_state, capture_dir, pricing: {
+            "attempted": True,
+            "reason_not_attempted": None,
+            "verdict": None,
+            "confidence": None,
+            "probabilities": None,
+            "call": {
+                "phase": "final",
+                "status": "error",
+                "attempts": 1,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_usd": None,
+                "cost_status": "unknown",
+            },
+            "latency_ms": None,
+            "capture_dir": "responses_control_b",
+            "cost_usd": None,
+            "cost_status": "unknown",
+        },
+    )
+
+    pipeline_calls: list[dict] = []
+
+    def _fake_pipeline(settings, email_file, profile, **kwargs):
+        assert kwargs.get("tools_override") is not None, "the ablation must pass the effective tools"
+        assert kwargs["tools_override"].vision.enabled is True
+        assert settings.MODEL_SUPPORTS_VISION is True
+        sample_id = Path(email_file).stem.split("_", 1)[1]
+        gold_row = next(row for row in gold_rows if row["sample_id"] == sample_id)
+        pipeline_calls.append(
+            {
+                "sample_id": sample_id,
+                "profile": profile,
+                "qr_decode_enabled": bool(settings.QR_DECODE_ENABLED),
+            }
+        )
+        verdict = verdicts[sample_id]
+        sha = str(gold_row["raw_sha256"])
+        report = _synthetic_report(
+            sample_id,
+            sha,
+            gate="complex",
+            final_verdict=verdict,
+            internal_verdict="phishing",
+            action="AUTO",
+        )
+        report["visual_evidence"] = [
+            {
+                "id": f"vis_{sample_id}",
+                "mime_type": "image/png",
+                "status": visual_status,
+                "sha256": "a" * 64,
+                "width": 120,
+                "height": 40,
+                "qr_payloads": (
+                    ["SOC-POC-CASE-0042-BENIGN"]
+                    if visual_status == "supplied_to_model"
+                    else []
+                ),
+            }
+        ]
+        report_dir = tmp_path / "vision_reports" / sample_id
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_file = report_dir / "report.json"
+        report_file.write_text(
+            json.dumps(report, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+        )
+        final_state = {
+            "parsed": types.SimpleNamespace(email_sha256=sha),
+            "internal": None,
+            "final_validated": None,
+            "evidence": {},
+            "enrichment": types.SimpleNamespace(rag=[]),
+            "report_path": str(report_file),
+        }
+        return report, final_state
+
+    monkeypatch.setattr(evaluate_script, "run_nominal_pipeline", _fake_pipeline)
+    return {"pipeline": pipeline_calls}
+
+
+def test_vision_variant_requires_paired_with(evaluate_script, monkeypatch, tmp_path):
+    """--variant vision without --paired-with is a FAIL before anything runs."""
+
+    monkeypatch.setattr(
+        evaluate_script,
+        "run_nominal_pipeline",
+        lambda *args, **kwargs: pytest.fail("no pipeline call without --paired-with"),
+    )
+    args = _vision_variant_args(evaluate_script, tmp_path, None)
+    config = _make_cfg(evaluate_script, tmp_path)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+    assert not (tmp_path / "dev_vision_smoke").exists()
+
+
+def test_vision_ablation_requires_zxing_only_when_qr_enabled(
+    evaluate_script, monkeypatch
+):
+    """The vision switch must not implicitly require (or enable) the decoder."""
+
+    from pydantic import SecretStr
+
+    from src.config import ToolsConfig, load_yaml_config, load_settings as real_load_settings
+
+    tools = load_yaml_config(PROJECT_ROOT / "configs" / "tools.yaml", ToolsConfig)
+    settings = real_load_settings(None).model_copy(
+        update={
+            "MODEL_SUPPORTS_VISION": False,
+            "QR_DECODE_ENABLED": False,
+            "LITELLM_API_KEY": SecretStr("placeholder-key-not-a-real-credential"),
+        }
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "vision_dependencies",
+        lambda: {"pillow": True, "zxingcpp": False},
+    )
+    ablation = evaluate_script.prepare_vision_ablation(settings, tools)
+    assert ablation.effective_settings.MODEL_SUPPORTS_VISION is True
+    assert ablation.effective_tools.vision.enabled is True
+    assert ablation.effective_settings.QR_DECODE_ENABLED is False
+    assert ablation.description["qr_decode_requested"] is False
+    qr_settings = settings.model_copy(update={"QR_DECODE_ENABLED": True})
+    with pytest.raises(evaluate_script.VisionDependencyError):
+        evaluate_script.prepare_vision_ablation(qr_settings, tools)
+
+
+def test_vision_dependencies_missing_is_blocked_before_any_call(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """A missing optional stack is BLOCKED, never silently measured."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    _stub_offline_vision_run(
+        evaluate_script,
+        monkeypatch,
+        tmp_path,
+        gold,
+        verdicts={"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "vision_dependencies",
+        lambda: {"pillow": False, "zxingcpp": True},
+    )
+    monkeypatch.setattr(
+        evaluate_script,
+        "run_nominal_pipeline",
+        lambda *args, **kwargs: pytest.fail("no pipeline call when Pillow is missing"),
+    )
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    args = _vision_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_BLOCKED
+    assert not (tmp_path / "dev_vision_smoke").exists()
+
+
+def test_paired_vision_run_publishes_diagnostics_with_transmitted_pixels(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """Happy path: exact pairing, read-only baseline, transmitted-pixel proof."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    before = {
+        str(path.relative_to(paired_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paired_dir.rglob("*"))
+        if path.is_file()
+    }
+    state = _stub_offline_vision_run(
+        evaluate_script,
+        monkeypatch,
+        tmp_path,
+        gold,
+        verdicts={"u1": "phishing", "u2": "legitime", "u3": None},
+    )
+    args = _vision_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_OK
+
+    out = tmp_path / "dev_vision_smoke"
+    # The effective configuration is built in memory; the frozen tools.yaml
+    # (copied fixture) still says vision.enabled=false and QR stays off.
+    assert state["pipeline"] and all(
+        entry["qr_decode_enabled"] is False for entry in state["pipeline"]
+    )
+    tools_yaml = (tmp_path / "configs" / "tools.yaml").read_text(encoding="utf-8")
+    assert (
+        "vision:\n"
+        "  # Globally piloted by MODEL_SUPPORTS_VISION (default false); QR decode obeys\n"
+        "  # QR_DECODE_ENABLED separately.\n"
+        "  enabled: false" in tools_yaml
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (out / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert sorted(row["sample_id"] for row in rows) == ["u1", "u2", "u3"]
+    assert all(row["variant"] == "vision" for row in rows)
+    assert all(row["visual_cases"][0]["status"] == "supplied_to_model" for row in rows)
+    assert all(row["visual_count_sent_final"] == 1 for row in rows)
+    assert all(row["visual_count_sent_internal"] == 0 for row in rows)
+
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["variant"] == "vision"
+    assert manifest["measurement_scope"] == "smoke"
+    assert manifest["performance_claims_allowed"] is False
+    capability = manifest["vision_ablation"]["capability"]
+    assert capability["in_memory_overrides"] == [
+        "tools.vision.enabled=true",
+        "MODEL_SUPPORTS_VISION=true",
+    ]
+    assert capability["qr_decode_enabled_effective"] is False
+    assert capability["frozen_tools_yaml_unchanged"] is True
+    assert manifest["vision_ablation"]["limits"]["max_images"] == 4
+    assert manifest["vision_ablation"]["paired_with"] == "paired"
+
+    paired = json.loads((out / "paired_baseline.json").read_text(encoding="utf-8"))
+    assert paired["variant"] == "vision"
+    assert paired["paired_variant"] == "baseline"
+    assert paired["paired_with"] == "paired"
+    assert paired["selection_identity"]["sample_ids"] == ["u1", "u2", "u3"]
+    assert paired["denominators"] == {
+        "current_run": 3,
+        "paired_run": 3,
+        "selection": 3,
+        "identical": True,
+    }
+    assert paired["delta_published"] is True
+    comparison = paired["comparison"]
+    assert comparison["n_comparable"] == 3
+    assert comparison["buckets"]["right_to_right"] == 2
+    assert comparison["buckets"]["right_to_wrong"] == 1
+    assert comparison["denominators_paired"] is True
+    usage = paired["vision_usage"]
+    assert usage["samples_with_supplied_pixels"] == 3
+    assert usage["total_supplied_pixels"] == 3
+    assert usage["samples_with_transmitted_pixels"] == 3
+    assert usage["visual_count_sent_total"] == 3
+    assert usage["total_qr_payloads"] == 3
+    per_sample = {entry["sample_id"]: entry for entry in paired["per_sample"]}
+    assert per_sample["u1"]["visual_cases"][0]["status"] == "supplied_to_model"
+    assert per_sample["u1"]["vision_predicted"] == "phishing"
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "Paired baseline" in report
+    assert "Paired baseline → vision" in report
+    assert "performance_claims_allowed=false" in report
+
+    # The paired baseline run was never modified.
+    after = {
+        str(path.relative_to(paired_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paired_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert before == after
+
+
+def test_paired_vision_run_without_supplied_pixels_is_inconclusive(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """No prepared pixel → no vision delta published (INCONCLUSIVE, exit 0)."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    _stub_offline_vision_run(
+        evaluate_script,
+        monkeypatch,
+        tmp_path,
+        gold,
+        verdicts={"u1": "phishing", "u2": "legitime", "u3": "spam"},
+        visual_status="metadata_only",
+        visual_count_sent=0,
+    )
+    args = _vision_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_OK
+
+    out = tmp_path / "dev_vision_smoke"
+    paired = json.loads((out / "paired_baseline.json").read_text(encoding="utf-8"))
+    assert paired["comparison"] is None
+    assert paired["delta_published"] is False
+    assert paired["inconclusive"] is True
+    assert paired["vision_usage"]["samples_with_supplied_pixels"] == 0
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "delta not published" in report
+
+
+def test_paired_vision_prepared_pixels_missing_from_audits_fail(
+    evaluate_script, monkeypatch, tmp_path
+):
+    """Prepared pixels absent from the audits are a wiring FAIL, never a delta."""
+
+    gold = _rag_gold_rows()
+    config = _make_cfg(evaluate_script, tmp_path)
+    paired_dir = _write_paired_baseline_run(
+        evaluate_script,
+        tmp_path / "paired",
+        gold,
+        {"u1": "phishing", "u2": "legitime", "u3": "spam"},
+    )
+    _stub_offline_vision_run(
+        evaluate_script,
+        monkeypatch,
+        tmp_path,
+        gold,
+        verdicts={"u1": "phishing", "u2": "legitime", "u3": "spam"},
+        visual_status="supplied_to_model",
+        visual_count_sent=0,
+    )
+    args = _vision_variant_args(evaluate_script, tmp_path, paired_dir)
+    assert evaluate_script.run_live(args, config, {}) == evaluate_script.EXIT_FAIL
+    assert not (tmp_path / "dev_vision_smoke").exists()

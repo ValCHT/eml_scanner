@@ -14,8 +14,9 @@ Builds the deterministic user envelopes from a ``ParsedEmail``:
   (subject, selected headers, text/HTML parts, links, attachments metadata,
   authentication as reported, image METADATA — never pixels, never an
   invented visual description);
-- ``SUPPLIED_VISUAL_IDS``: always empty in this POC unless actual pixels are
-  supplied to the model — G2/G5 supply none.
+- ``SUPPLIED_VISUAL_IDS``: empty in this POC unless actual pixels are
+  supplied to the model (TICKET-16 staged visuals); metadata-only images
+  never appear there.
 
 Harness-only manifest data (fixture filename, scenario, design_label,
 content_anchors, part_expectations, constraints, gold metadata, historical
@@ -40,7 +41,7 @@ observables referenced by kept evidence are always included.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -423,13 +424,21 @@ def _content_limits(
     return content_limits
 
 
-def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[str, Any]:
+def build_internal_envelope(
+    parsed: ParsedEmail, limits: ContextLimits, staged: Sequence[Any] = ()
+) -> dict[str, Any]:
     """Deterministic INTERNAL user envelope (docs/prompt_integration.md §3).
 
     Returns the four conceptual fields exactly:
     ``UNTRUSTED_EMAIL``, ``EVIDENCE_REGISTRY``, ``OBSERVABLE_REGISTRY``,
-    ``SUPPLIED_VISUAL_IDS``. ``SUPPLIED_VISUAL_IDS`` is empty: G2 supplies no
-    pixels, and an image metadata record never becomes a visual description.
+    ``SUPPLIED_VISUAL_IDS``. Without staged pixels (TICKET-16 ``staged``),
+    ``SUPPLIED_VISUAL_IDS`` is empty — the G2/G5 text-only behavior.
+
+    ``staged`` carries the ``StagedVisual`` objects of ``src/vision.py``:
+    their IDs must be ``VisualEvidence`` ids of THIS parsed email and their
+    data URIs must be PNG/JPEG data URIs (never a remote or local path).
+    The check is strict and happens BEFORE any call: a mismatch is a
+    configuration error, never a silently dropped pixel.
 
     Section budgets are enforced in the frozen order headers → body →
     links/observables → evidence; every truncation is flagged in
@@ -463,12 +472,14 @@ def build_internal_envelope(parsed: ParsedEmail, limits: ContextLimits) -> dict[
         evidence_trunc,
     )
 
+    supplied_ids = _supplied_visual_ids(parsed, staged)
     envelope = {
         "UNTRUSTED_EMAIL": untrusted_email,
         "EVIDENCE_REGISTRY": {entry["id"]: entry for entry in kept_evidence},
         "OBSERVABLE_REGISTRY": observables,
-        # No pixels are supplied by this phase: always empty for G2/G5.
-        "SUPPLIED_VISUAL_IDS": [],
+        # Exactly the IDs of images whose real pixels are attached to THIS
+        # call; metadata-only images never appear here.
+        "SUPPLIED_VISUAL_IDS": supplied_ids,
     }
 
     user_chars = len(canonical_bytes(envelope).decode("utf-8"))
@@ -589,6 +600,51 @@ def rag_context_entries(rag_context: Any) -> list[dict[str, Any]]:
     return entries
 
 
+def _supplied_visual_ids(parsed: ParsedEmail, staged: Sequence[Any]) -> list[str]:
+    """Validated ``SUPPLIED_VISUAL_IDS`` for the staged pixels (TICKET-16).
+
+    Strict identity rules before any call: exactly the staged visual IDs, in
+    staged order; each ID must be a ``VisualEvidence`` of this parsed email;
+    only PNG/JPEG data URIs are permitted (``data:image/png;base64,`` /
+    ``data:image/jpeg;base64,``) — never ``http(s)://``, ``file://`` or a
+    local path. No visual ID without actual pixels, no pixels without an ID.
+    """
+
+    if not staged:
+        return []
+    known = {image.id for image in parsed.images}
+    ids: list[str] = []
+    for visual in staged:
+        visual_id = getattr(visual, "visual_id", None)
+        data_uri = getattr(visual, "data_uri", None)
+        data_mime = getattr(visual, "data_mime_type", None)
+        if visual_id is None or data_uri is None or data_mime is None:
+            raise ValueError(
+                f"staged visual {visual!r}: expected a vision.StagedVisual "
+                "(visual_id, data_mime_type, data_uri)"
+            )
+        if visual_id not in known:
+            raise ValueError(
+                f"staged visual {visual_id!r} is not a VisualEvidence of this "
+                "email: no visual ID without a matching parsed image"
+            )
+        expected_prefix = f"data:{data_mime};base64,"
+        if data_mime not in ("image/png", "image/jpeg"):
+            raise ValueError(
+                f"staged visual {visual_id!r}: only PNG/JPEG data URIs are "
+                f"permitted, got {data_mime!r}"
+            )
+        if not str(data_uri).startswith(expected_prefix):
+            raise ValueError(
+                f"staged visual {visual_id!r}: data URI must start with "
+                f"{expected_prefix!r}"
+            )
+        ids.append(visual_id)
+    if len(set(ids)) != len(ids):
+        raise ValueError("staged visuals contain duplicate visual IDs")
+    return ids
+
+
 def build_final_envelope(
     parsed: ParsedEmail,
     internal: Assessment | None,
@@ -597,6 +653,7 @@ def build_final_envelope(
     tool_results: Any,
     rag_context: Any,
     limits: ContextLimits,
+    staged: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Deterministic FINAL user envelope (docs/prompt_integration.md §3).
 
@@ -606,6 +663,7 @@ def build_final_envelope(
     leaves a dangling reference: whole evidence entries only, observables
     under the shared budget, and an evidence entry whose observable no
     longer fits is dropped (truncation flagged in ``content_limits``).
+    Without staged pixels ``SUPPLIED_VISUAL_IDS`` stays empty (G5).
     """
 
     untrusted_email, links_used, body_trunc, headers_trunc, links_trunc = (
@@ -636,12 +694,13 @@ def build_final_envelope(
         evidence_trunc,
     )
 
+    supplied_ids = _supplied_visual_ids(parsed, staged)
     envelope = {
         "UNTRUSTED_EMAIL": untrusted_email,
         "EVIDENCE_REGISTRY": {entry["id"]: entry for entry in kept_evidence},
         "OBSERVABLE_REGISTRY": observables_sent,
-        # No pixels are supplied by this phase: always empty for G5.
-        "SUPPLIED_VISUAL_IDS": [],
+        # Exactly the IDs of the images whose pixels are attached HERE.
+        "SUPPLIED_VISUAL_IDS": supplied_ids,
         # The internal assessment is unreliable data like the rest of the
         # envelope; null is honest when no valid internal result exists.
         "INTERNAL_ASSESSMENT": (
@@ -680,15 +739,22 @@ def envelope_has_useful_content(envelope: dict[str, Any]) -> bool:
     return bool(has_text or has_headers or has_actors)
 
 
-def build_internal_messages(parsed: ParsedEmail, limits: ContextLimits) -> tuple[list[dict[str, str]], dict[str, Any]]:
+def build_internal_messages(
+    parsed: ParsedEmail, limits: ContextLimits, staged: Sequence[Any] = ()
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """System prompt (delivered file, unchanged) + user JSON envelope.
+
+    ``staged`` (TICKET-16) carries the ``StagedVisual`` pixels to attach to
+    THIS call as OpenAI-compatible multipart ``image_url`` parts (PNG/JPEG
+    data URIs only). Without staged pixels the user message stays the exact
+    text-only string (byte-equivalent behavior when Vision is disabled).
 
     Returns ``(messages, envelope)`` so the caller can validate references
     against the registries ACTUALLY sent (never a rebuild).
     """
 
-    envelope = build_internal_envelope(parsed, limits)
-    return _messages_from_envelope(envelope, load_internal_prompt()), envelope
+    envelope = build_internal_envelope(parsed, limits, staged)
+    return _messages_from_envelope(envelope, load_internal_prompt(), staged), envelope
 
 
 def build_final_messages(
@@ -699,28 +765,56 @@ def build_final_messages(
     tool_results: Any,
     rag_context: Any,
     limits: ContextLimits,
-) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    staged: Sequence[Any] = (),
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """FINAL system prompt (delivered file) + user JSON envelope.
+
+    ``staged`` (TICKET-16) attaches the real pixels of exactly the visuals
+    listed in the envelope's ``SUPPLIED_VISUAL_IDS``. Without staged pixels
+    the text-only form is unchanged.
 
     Returns ``(messages, envelope)`` so the caller can validate references
     against the registries ACTUALLY sent, never a rebuild.
     """
 
     envelope = build_final_envelope(
-        parsed, internal, evidence, observables, tool_results, rag_context, limits
+        parsed, internal, evidence, observables, tool_results, rag_context, limits, staged
     )
-    return _messages_from_envelope(envelope, load_final_prompt()), envelope
+    return _messages_from_envelope(envelope, load_final_prompt(), staged), envelope
 
 
 def _messages_from_envelope(
-    envelope: dict[str, Any], system_prompt: str
-) -> list[dict[str, str]]:
+    envelope: dict[str, Any], system_prompt: str, staged: Sequence[Any] = ()
+) -> list[dict[str, Any]]:
+    """System text + user envelope; staged pixels become multipart parts.
+
+    Text-only (no staged pixels): the user content is the exact JSON string
+    (unchanged frozen form). With staged pixels: an OpenAI-compatible
+    multipart list — one ``text`` part (the same envelope JSON) followed by
+    one ``image_url`` part per staged visual, using PNG/JPEG data URIs
+    only. The pixels stay USER content: never system text, never a path,
+    never a remote URL.
+    """
+
     user_payload = json.dumps(
         envelope, ensure_ascii=False, sort_keys=True, allow_nan=False
     )
+    if not staged:
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_payload},
+        ]
+    user_parts: list[dict[str, Any]] = [{"type": "text", "text": user_payload}]
+    for visual in staged:
+        user_parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": visual.data_uri},
+            }
+        )
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_payload},
+        {"role": "user", "content": user_parts},
     ]
 
 
