@@ -4,6 +4,10 @@
 
 G7-B
 
+## AMENDEMENT OPÉRATEUR (2026-09-21) — smoke visuel borné uniquement
+
+Aucun benchmark complet avant TICKET-19 : T16 exécute un **smoke visuel borné uniquement** — préférer le subset visual-essential (`essential_visual_content`) une fois matérialisé, sinon le smoke dev T14 ; jamais le run complet Visual-79 avant T19. Sortie sous `runs/eval/dev_vision_smoke`. Les métriques restent diagnostiques (`performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Le premier benchmark complet (texte seul / texte+QR / texte+QR+vision sur les cas visuels) est T19.
+
 ## OBJECTIF
 
 Mesurer l’apport des images et du décodage QR.
@@ -42,7 +46,7 @@ Smoke visuel réel sur image bénigne ; payload QR exacte ; image-only ; injecti
 python -m pip install -e ".[dev,vision]"
 python scripts/smoke.py vision --require-configured
 python -m pytest tests/test_vision.py --live -q
-python scripts/evaluate.py --split dev --mode live --variant vision --paired-with runs/eval/dev_baseline --out runs/eval/dev_vision
+python scripts/evaluate.py --split dev --mode live --variant vision --sample-profile smoke --paired-with runs/eval/dev_smoke --out runs/eval/dev_vision_smoke
 python scripts/check_gate.py G7-B --record
 ```
 

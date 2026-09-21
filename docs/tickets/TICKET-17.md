@@ -4,6 +4,10 @@
 
 G7-C
 
+## AMENDEMENT OPÉRATEUR (2026-09-21) — diagnostics des smokes uniquement
+
+Aucun benchmark complet avant TICKET-19 : T17 analyse **uniquement les observations/diagnostics accumulés** (smoke T14, smoke RAG T15, smoke vision T16 — erreurs, fallbacks, timeouts, couverture). Aucun run dev complet. INCONCLUSIVE est un résultat valide et attendu tant que le premier benchmark complet (T19) n'a pas été exécuté ; la décision documente ce statut explicitement. Le recompute de préparation s'appuie sur `runs/eval/dev_smoke` (reproduction exacte du smoke, pas des 83 emails).
+
 ## OBJECTIF
 
 Décider si une expérimentation de spécialisation mérite d’être lancée.
@@ -40,7 +44,7 @@ Comparer les comptes à metrics.json ; chaque erreur citée possède un sample_i
 
 ```bash
 python scripts/check_gate.py G6
-python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_baseline --out runs/eval/dev_for_ft_decision
+python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke --out runs/eval/dev_for_ft_decision
 python scripts/check_gate.py G7-C --record
 ```
 

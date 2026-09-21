@@ -81,9 +81,9 @@ GATE_COMMANDS: dict[str, list[str]] = {
         [sys.executable, "-m", "pytest", "tests/test_corpus.py", "tests/test_metrics.py",
          "tests/test_evaluation.py", "-q"],
         [sys.executable, "scripts/evaluate.py", "--split", "dev", "--mode", "live",
-         "--variant", "baseline", "--out", "runs/eval/dev_baseline"],
+         "--variant", "baseline", "--sample-profile", "smoke", "--out", "runs/eval/dev_smoke"],
         [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
-         "--from-run", "runs/eval/dev_baseline", "--out", "runs/eval/dev_recomputed"],
+         "--from-run", "runs/eval/dev_smoke", "--out", "runs/eval/dev_smoke_recomputed"],
     ],
     # Optional gates (docs/gates.md §5.1): G7-A RAG (TICKET-15), G7-B vision
     # (TICKET-16), G7-C fine-tuning decision (TICKET-17).
@@ -91,7 +91,7 @@ GATE_COMMANDS: dict[str, list[str]] = {
     "G7-B": [[sys.executable, "-m", "pytest", "tests/test_vision.py", "--live", "-q"]],
     "G7-C": [
         [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
-         "--from-run", "runs/eval/dev_baseline", "--out", "runs/eval/dev_for_ft_decision"],
+         "--from-run", "runs/eval/dev_smoke", "--out", "runs/eval/dev_for_ft_decision"],
     ],
 }
 
@@ -301,7 +301,7 @@ def _check_g7c_artifact_concordance(
 
     problems: list[str] = []
     ft_dir = ft_dir or PROJECT_ROOT / "runs" / "eval" / "dev_for_ft_decision"
-    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "dev_baseline"
+    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "dev_smoke"
 
     if not ft_dir.is_dir() or not any(ft_dir.iterdir()):
         return [
@@ -314,7 +314,7 @@ def _check_g7c_artifact_concordance(
     if base_count is not None and ft_count is not None and base_count != ft_count:
         problems.append(
             f"dev record count mismatch between archived artifacts: "
-            f"dev_baseline={base_count} vs dev_for_ft_decision={ft_count}"
+            f"dev_smoke={base_count} vs dev_for_ft_decision={ft_count}"
         )
     return problems
 

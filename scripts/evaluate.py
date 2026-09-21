@@ -1,38 +1,54 @@
 #!/usr/bin/env python3
-"""TICKET-14 — real dev baseline evaluation and exact offline recompute (G6).
+"""TICKET-14 — dev harness smoke evaluation and exact offline recompute (G6).
 
-Live mode (``--split dev --mode live --variant baseline``):
+Operator amendment 2026-09-21: G6 is a HARNESS-validation gate, not a
+performance benchmark. No full dev benchmark before TICKET-19 — T14–T18 use
+bounded samples/smokes only; the first full benchmark is T19
+(`--sample-profile full` capability preserved but NOT executed as
+validation).
+
+Live mode (``--split dev --mode live --variant baseline --sample-profile smoke``):
 
 1. loads the frozen evaluation configuration and verifies the experiment
    lock (hashes of gate/policy/tools configs, prompts, schemas, gold_dev);
    any drift fails the run instead of silently measuring a moved baseline;
-2. loads and fully validates ``corpus/gold/gold_dev.jsonl`` — closed
-   GoldRecord schema, forbidden content keys refused recursively, resolved
-   ``raw_path`` under ``corpus/raw/**``, recomputed SHA-256 vs ``raw_sha256``
-   and ``email_sha256 == raw_sha256`` — ALL records are validated BEFORE any
-   LLM or external-tool call; a mismatch is a loud failure, never a silent
-   sample drop;
-3. runs the frozen pipeline (one sequential StateGraph, BASELINE V0 gate,
-   prompts V1) for every dev email and archives the authentic per-sample
-   report under ``<out>/<run_id>/report.json``;
-4. for COMPLEX emails runs the A/B/C control: A is the shared INTERNAL of
+2. loads and fully validates ALL 83 ``corpus/gold/gold_dev.jsonl`` records —
+   closed GoldRecord schema, forbidden content keys refused recursively,
+   resolved ``raw_path`` under ``corpus/raw/**``, recomputed SHA-256 vs
+   ``raw_sha256`` and ``email_sha256 == raw_sha256`` — BEFORE any LLM or
+   external-tool call; a mismatch is a loud failure, never a silent sample
+   drop;
+3. selects the deterministic representative smoke (one lexicographically
+   first ``sample_id`` per dev label with support>0; menace has zero
+   support and is never fabricated) and runs live calls ONLY for the
+   selected records (``--sample-profile full`` = the complete 83-record
+   capability, reserved for TICKET-19);
+4. runs the frozen pipeline for every selected email and archives the
+   authentic per-sample report under ``<out>/<run_id>/report.json``;
+5. for COMPLEX emails runs the A/B/C control: A is the shared INTERNAL of
    the nominal run, B is an XHIGH control call with parser-internal
    evidence only (TOOL_STATUS explicitly marks the ablation, RAG empty, no
    pixels), C is the nominal FINAL with the real external bundle; the FINAL
    input audits (docs/contracts.md §2.6.1) are validated BEFORE any B−A /
    C−B comparison is published;
-5. writes exactly one evaluation row per ``sample_id``, the deterministic
+6. writes exactly one evaluation row per ``sample_id``, the deterministic
    metrics (``src.metrics``), the confusion matrix CSV, a manifest and a
    human-readable report. Failures/outages stay in every denominator.
+   Smoke results are DIAGNOSTIC ONLY (``measurement_scope=smoke``,
+   ``performance_claims_allowed=false``): never presented as a performance
+   baseline, representative Macro-F1 or statistical validation.
 
 Recompute mode (``--mode recompute --from-run <run> --out <dir>``):
 
 performs NO provider call and NO external network access; it reloads the
 archived gold_dev records, evaluation rows and authentic per-sample reports
-and recomputes the metrics deterministically. The result must equal the
-live metrics exactly (metrics carry no wall-clock data); only the
-recompute manifest differs (explicit recomputation metadata, original
-observation timestamps preserved).
+and recomputes the metrics deterministically. For a smoke run it reproduces
+exactly the archived selected rows and verifies their identity against the
+deterministic selection (no ``len(rows)==83`` requirement); for a
+``full_dev_baseline`` run the complete row set is still required. The
+result must equal the live metrics exactly (metrics carry no wall-clock
+data); only the recompute manifest differs (explicit recomputation
+metadata, original observation timestamps preserved).
 
 Security: no secret is ever read or printed (settings expose presence
 booleans only); gold_test.jsonl is NEVER opened by this script — the
@@ -97,6 +113,23 @@ EXIT_BLOCKED = 2
 FORBIDDEN_SPLIT = "test"
 
 ABLATION_TOOL_REASON = "ablation_control_b_no_external_evidence"
+
+#: Sample profiles (operator amendment 2026-09-21): no full dev benchmark
+#: before TICKET-19. ``smoke`` = deterministic representative harness smoke;
+#: ``full`` = complete gold_dev evaluation capability, reserved for T19.
+SMOKE_PROFILE = "smoke"
+FULL_PROFILE = "full"
+
+SAMPLE_SELECTION_RULE = (
+    "deterministic_stratified_smoke_v1: for each dev label with support>0 "
+    "in fixed taxonomy order (menace excluded, support=0 — nothing "
+    "fabricated), select the lexicographically first sample_id; exactly "
+    "one record per label; full gold metadata/raw integrity is still "
+    "validated for all 83 records before any live call; results are "
+    "harness diagnostics only (measurement_scope=smoke, "
+    "performance_claims_allowed=false); the first full benchmark is "
+    "TICKET-19"
+)
 
 #: Exact filename of the archived FINAL validation rejects (assess_final).
 FINAL_REJECT_FILE = "final_validation_reject.json"
@@ -279,6 +312,9 @@ def validate_gold_raw_files(rows: list[dict[str, Any]]) -> tuple[dict[str, bytes
     ``raw_path`` escaping ``corpus/raw/**`` (symlink-aware) or a null/unknown
     field abort the evaluation with a loud error. Returns the verified bytes
     per sample_id (exact message bytes, never re-encoded).
+
+    This integrity check ALWAYS covers ALL provided records (the complete
+    gold_dev partition, even when the live scope is the 5-record smoke).
     """
 
     loader = build_corpus._RawLoader(PROJECT_ROOT)
@@ -301,6 +337,28 @@ def validate_gold_raw_files(rows: list[dict[str, Any]]) -> tuple[dict[str, bytes
             continue
         verified[sample_id] = data
     return verified, failures
+
+
+def select_smoke_sample(gold_rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Deterministic representative smoke: one record per supported label.
+
+    For each dev label with support>0 in fixed taxonomy order, the
+    lexicographically first ``sample_id`` is selected. ``menace`` has zero
+    support in this POC: nothing is fabricated for it. The result is the
+    bounded T14 smoke set (5 records today); the complete 83-record
+    capability stays untouched for TICKET-19.
+    """
+
+    by_label: dict[str, list[Mapping[str, Any]]] = {}
+    for row in gold_rows:
+        by_label.setdefault(str(row["normalized_label"]), []).append(row)
+    selected: list[dict[str, Any]] = []
+    for label in LABELS:
+        candidates = sorted(by_label.get(label, []), key=lambda row: str(row["sample_id"]))
+        if not candidates:
+            continue  # zero support: nothing fabricated
+        selected.append(dict(candidates[0]))
+    return selected
 
 
 def derive_source_profile(row: Mapping[str, Any], config: EvaluationConfig) -> str:
@@ -574,10 +632,12 @@ def build_evaluation_row(
     pricing: Mapping[str, Any],
     variant: str,
     split: str,
+    measurement_scope: str,
 ) -> dict[str, Any]:
     """One authentic evaluation row with its full provenance."""
 
     report_rel = report_file.relative_to(PROJECT_ROOT)
+    report_dir_rel = Path(report_file).parent.name  # relative to the run root
     internal = final_state.get("internal")
     parsed = final_state.get("parsed")
     evidence_registry = final_state.get("evidence") or {}
@@ -615,6 +675,7 @@ def build_evaluation_row(
         "sample_id": row["sample_id"],
         "split": split,
         "variant": variant,
+        "measurement_scope": measurement_scope,
         "source_dataset": row["source_dataset"],
         "family_group": row["family_group"],
         "raw_path": row["raw_path"],
@@ -623,7 +684,7 @@ def build_evaluation_row(
         "public_source": bool(row["public_source"]),
         "label": row["normalized_label"],
         "run_id": report["run_id"],
-        "report_dir": str(Path(report_file).parent.relative_to(PROJECT_ROOT)),
+        "report_dir": str(report_dir_rel),
         "report_path": str(report_rel),
         "report_sha256": _file_sha256(report_file),
         "started_at": (report.get("reproducibility") or {}).get("started_at"),
@@ -818,6 +879,15 @@ def write_matrix_csv(path: Path, metrics: Mapping[str, Any]) -> None:
         )
 
 
+def _label_support(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Label support over the given rows in fixed taxonomy order."""
+
+    return {
+        label: sum(1 for row in rows if str(row["normalized_label"]) == label)
+        for label in LABELS
+    }
+
+
 def build_manifest(
     *,
     settings: Settings,
@@ -832,6 +902,11 @@ def build_manifest(
     rows: list[Mapping[str, Any]],
     started_at: str,
     mode: str,
+    measurement_scope: str,
+    performance_claims_allowed: bool,
+    sample_selection_rule: str,
+    selected_ids: list[str],
+    full_support: dict[str, int],
 ) -> dict[str, Any]:
     """Run manifest: identity, frozen inputs, pricing, tool/config status."""
 
@@ -874,6 +949,11 @@ def build_manifest(
         "variant": variant,
         "split": split,
         "sample_count": len(rows),
+        "measurement_scope": measurement_scope,
+        "performance_claims_allowed": performance_claims_allowed,
+        "sample_selection_rule": sample_selection_rule,
+        "selected_sample_ids": selected_ids,
+        "full_dev_label_support": full_support,
         "model": settings.LITELLM_MODEL,
         "provider": evaluation_config.pricing_snapshot.get("provider"),
         "chat_url": settings.LITELLM_CHAT_URL,
@@ -977,8 +1057,27 @@ def write_human_report(path: Path, metrics: Mapping[str, Any], manifest: Mapping
 
     lines: list[str] = []
     delivered = metrics["delivered"]
-    lines.append(f"# Dev baseline evaluation ({manifest['variant']}, split={manifest['split']})")
+    scope = manifest.get("measurement_scope", "full_dev_baseline")
+    claims_allowed = bool(manifest.get("performance_claims_allowed", True))
+    lines.append(
+        f"# Dev baseline evaluation ({manifest['variant']}, split={manifest['split']})"
+    )
     lines.append("")
+    if not claims_allowed:
+        lines.append(
+            "> **DIAGNOSTIC HARNESS SMOKE — NOT a performance baseline.** "
+            "measurement_scope=smoke, performance_claims_allowed=false. The "
+            "records below validate plumbing only (one lexicographically "
+            "first sample per dev label with support>0); supports, Macro-F1 "
+            "and every rate here are NOT representative and no statistical "
+            "validation is claimed. The first full-corpus benchmark is "
+            "TICKET-19."
+        )
+        lines.append("")
+    lines.append(f"- measurement_scope: {scope}")
+    lines.append(f"- sample_selection_rule: {manifest.get('sample_selection_rule')}")
+    lines.append(f"- selected_sample_ids: {manifest.get('selected_sample_ids')}")
+    lines.append(f"- full_dev_label_support: {manifest.get('full_dev_label_support')}")
     lines.append(f"- run id: {manifest.get('run_id')}")
     lines.append(f"- date (UTC): {manifest.get('date_time_utc')}")
     lines.append(f"- git commit: {manifest.get('git_commit')}")
@@ -1219,6 +1318,8 @@ def run_live(
         return EXIT_BLOCKED
 
     # --- gold validation BEFORE any call -------------------------------------
+    # The FULL partition integrity is always validated (all 83 records),
+    # whatever the live measurement scope is.
     gold_rows, gold_path = load_gold_records(evaluation_config, split)
     verified_bytes, raw_failures = validate_gold_raw_files(gold_rows)
     if raw_failures:
@@ -1226,7 +1327,27 @@ def run_live(
             print(f"FAIL (gold validation): {failure}", file=sys.stderr)
         return EXIT_FAIL
 
+    full_support = _label_support(gold_rows)
+    sample_profile = args.sample_profile
+    if sample_profile == SMOKE_PROFILE:
+        run_rows = select_smoke_sample(gold_rows)
+    elif sample_profile == FULL_PROFILE:
+        run_rows = gold_rows
+    else:
+        print(f"FAIL: unknown sample profile {sample_profile!r}", file=sys.stderr)
+        return EXIT_FAIL
+    selected_ids = [str(row["sample_id"]) for row in run_rows]
+
     pricing = evaluation_config.pricing_snapshot
+    measurement_scope = "smoke" if sample_profile == SMOKE_PROFILE else "full_dev_baseline"
+    performance_claims_allowed = sample_profile == FULL_PROFILE
+    if sample_profile == SMOKE_PROFILE:
+        print(
+            f"[smoke] measurement_scope=smoke: {len(selected_ids)} live "
+            "records, diagnostic only (performance_claims_allowed=false); "
+            "full Gold metadata/raw integrity validated for all "
+            f"{len(gold_rows)} records"
+        )
     started_at = datetime.now(UTC).isoformat()
     rows: list[dict[str, Any]] = []
     consecutive_infra_failures = 0
@@ -1237,7 +1358,7 @@ def run_live(
         print(f"FAIL: cannot create a temporary directory: {error}", file=sys.stderr)
         return EXIT_FAIL
     try:
-        for index, gold_row in enumerate(gold_rows):
+        for index, gold_row in enumerate(run_rows):
             sample_id = str(gold_row["sample_id"])
             safe_name = "".join(
                 character if character.isalnum() or character in "._-" else "_"
@@ -1298,6 +1419,7 @@ def run_live(
                 pricing,
                 variant,
                 split,
+                measurement_scope,
             )
             rows.append(evaluation_row)
             if _row_internal_ok(evaluation_row):
@@ -1317,7 +1439,7 @@ def run_live(
                 )
                 return EXIT_FAIL
             print(
-                f"[{index + 1}/{len(gold_rows)}] {sample_id} "
+                f"[{index + 1}/{len(run_rows)}] {sample_id} "
                 f"gate={evaluation_row['gate_decision']} "
                 f"pred={evaluation_row['predicted']} "
                 f"action={evaluation_row['recommended_action']}"
@@ -1326,7 +1448,7 @@ def run_live(
         temp_dir.cleanup()
 
     metrics = evaluate_metrics(
-        gold_rows,
+        run_rows,
         _reports_for_metrics(rows),
         sample_extras=extras_from_rows(rows),
         controls=controls_from_rows(rows),
@@ -1349,6 +1471,11 @@ def run_live(
         rows=rows,
         started_at=started_at,
         mode="live",
+        measurement_scope=measurement_scope,
+        performance_claims_allowed=performance_claims_allowed,
+        sample_selection_rule=SAMPLE_SELECTION_RULE,
+        selected_ids=selected_ids,
+        full_support=full_support,
     )
     write_predictions_atomic(out_dir / "predictions.jsonl", rows)
     write_json_atomic(out_dir / "metrics.json", metrics)
@@ -1468,19 +1595,70 @@ def run_recompute(args: argparse.Namespace, evaluation_config: EvaluationConfig)
 
     gold_rows, gold_path = load_gold_records(evaluation_config, split)
     by_sample = {str(row["sample_id"]): row for row in gold_rows}
-    missing = [str(row["sample_id"]) for row in rows_raw if str(row["sample_id"]) not in by_sample]
-    if missing:
-        print(
-            f"FAIL: archived rows reference samples outside {split}: {missing[:5]}",
-            file=sys.stderr,
+    measurement_scope = str(manifest.get("measurement_scope", "full_dev_baseline"))
+    if measurement_scope == "smoke":
+        selected_ids = manifest.get("selected_sample_ids")
+        if not isinstance(selected_ids, list) or not selected_ids:
+            print(
+                "FAIL: smoke run manifest has no selected_sample_ids; the "
+                "archived selection cannot be verified against the "
+                "deterministic rule",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        expected_ids = sorted(
+            str(row["sample_id"]) for row in select_smoke_sample(gold_rows)
         )
-        return EXIT_FAIL
-    if len(rows_raw) != len(gold_rows):
-        print(
-            f"FAIL: archived row count {len(rows_raw)} != gold {split} record "
-            f"count {len(gold_rows)} (denominators must stay complete)",
-            file=sys.stderr,
-        )
+        archived_ids = sorted(str(value) for value in selected_ids)
+        if expected_ids != archived_ids:
+            print(
+                "FAIL: archived selected_sample_ids differ from the "
+                "deterministic selection recomputed from gold_dev "
+                f"({expected_ids} vs {archived_ids})",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        missing_selected = [value for value in expected_ids if str(value) not in {str(row["sample_id"]) for row in rows_raw}]
+        if missing_selected:
+            print(
+                "FAIL: archived smoke run is missing selected sample row(s): "
+                f"{missing_selected} (the smoke must reproduce exactly the "
+                "deterministic selection)",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        extra_rows = [
+            str(row["sample_id"])
+            for row in rows_raw
+            if str(row["sample_id"]) not in set(expected_ids)
+        ]
+        if extra_rows:
+            print(
+                "FAIL: archived smoke run contains row(s) outside the "
+                f"deterministic selection: {extra_rows}",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        gold_rows_aligned = [by_sample[str(row["sample_id"])] for row in rows_raw]
+    elif measurement_scope == "full_dev_baseline":
+        missing = [str(row["sample_id"]) for row in rows_raw if str(row["sample_id"]) not in by_sample]
+        if missing:
+            print(
+                f"FAIL: archived rows reference samples outside {split}: {missing[:5]}",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        if len(rows_raw) != len(gold_rows):
+            print(
+                f"FAIL: archived row count {len(rows_raw)} != gold {split} record "
+                f"count {len(gold_rows)} (denominators must stay complete)",
+                file=sys.stderr,
+            )
+            return EXIT_FAIL
+        gold_rows_aligned = [by_sample[str(row["sample_id"])] for row in rows_raw]
+    else:
+        print(f"FAIL: unknown measurement_scope in archived manifest: {measurement_scope!r}",
+              file=sys.stderr)
         return EXIT_FAIL
 
     # Provenance integrity: every archived report must still hash-match.
@@ -1502,10 +1680,6 @@ def run_recompute(args: argparse.Namespace, evaluation_config: EvaluationConfig)
             print(f"FAIL: archived report not an object for {row['sample_id']}", file=sys.stderr)
             return EXIT_FAIL
         reports.append(report)
-    gold_rows_aligned = [
-        by_sample[str(row["sample_id"])]
-        for row in rows_raw
-    ]
 
     metrics = evaluate_metrics(
         gold_rows_aligned,
@@ -1539,6 +1713,7 @@ def run_recompute(args: argparse.Namespace, evaluation_config: EvaluationConfig)
     recompute_manifest = {
         "schema_version": "recompute-manifest-1.0",
         "recomputed_from_run": str(from_run),
+        "measurement_scope": measurement_scope,
         "source_manifest": {
             "run_id": manifest.get("run_id"),
             "date_time_utc": manifest.get("date_time_utc"),
@@ -1547,6 +1722,11 @@ def run_recompute(args: argparse.Namespace, evaluation_config: EvaluationConfig)
             "variant": manifest.get("variant"),
             "split": manifest.get("split"),
             "sample_count": manifest.get("sample_count"),
+            "measurement_scope": manifest.get("measurement_scope"),
+            "performance_claims_allowed": manifest.get("performance_claims_allowed"),
+            "sample_selection_rule": manifest.get("sample_selection_rule"),
+            "selected_sample_ids": manifest.get("selected_sample_ids"),
+            "full_dev_label_support": manifest.get("full_dev_label_support"),
         },
         "recomputed_at_utc": datetime.now(UTC).isoformat(),
         "network_calls": 0,
@@ -1574,7 +1754,10 @@ def run_recompute(args: argparse.Namespace, evaluation_config: EvaluationConfig)
     write_json_atomic(out_dir / "manifest.json", recompute_manifest)
     write_matrix_csv(out_dir / "matrix.csv", metrics)
     write_human_report(out_dir / "report.md", metrics, manifest)
-    print(f"recompute complete: {out_dir} (equal to live metrics)")
+    print(
+        f"recompute complete: {out_dir} (equal to live metrics; "
+        f"scope={measurement_scope}, sample_count={len(rows_raw)})"
+    )
     return EXIT_OK
 
 
@@ -1621,6 +1804,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", choices=["dev", FORBIDDEN_SPLIT], default="dev")
     parser.add_argument("--mode", choices=["live", "recompute"], default="live")
     parser.add_argument("--variant", default="baseline")
+    parser.add_argument(
+        "--sample-profile",
+        default=None,
+        choices=[SMOKE_PROFILE, FULL_PROFILE],
+        help=(
+            "live measurement scope: 'smoke' = deterministic representative "
+            "harness sample (one lexicographically first record per dev "
+            "label with support>0; diagnostic only); 'full' = complete "
+            "gold_dev evaluation, reserved for TICKET-19. Required for "
+            "--mode live."
+        ),
+    )
     parser.add_argument("--out", default=None, help="output run directory")
     parser.add_argument("--from-run", default=None, help="archived run for recompute")
     parser.add_argument(
@@ -1653,6 +1848,15 @@ def main(argv: list[str] | None = None) -> int:
     # live
     if not args.out:
         print("FAIL: --mode live requires --out", file=sys.stderr)
+        return EXIT_FAIL
+    if not args.sample_profile:
+        print(
+            "FAIL: --mode live requires an explicit --sample-profile "
+            f"({SMOKE_PROFILE} or {FULL_PROFILE}); an accidental full "
+            "corpus benchmark is refused (full scope is reserved for "
+            "TICKET-19)",
+            file=sys.stderr,
+        )
         return EXIT_FAIL
     if args.split == FORBIDDEN_SPLIT:
         print(

@@ -4,6 +4,10 @@
 
 Mesure terminale G6
 
+## AMENDEMENT OPÉRATEUR (2026-09-21) — readiness/reproducibility smoke pré-T19
+
+Aucun benchmark complet avant TICKET-19 : T18 NE lit PAS le full gold_test et N'exécute PAS de run complet. T18 devient un **smoke de freeze/readiness/reproducibility pré-T19** : vérifier et archiver les empreintes (code, config, prompts, schémas, index, lock), le gel des variantes, la procédure de recompute (reproduction exacte du smoke T14), la traçabilité de sélection et la checklist de handoff pour l'évaluateur T19. La première évaluation finale scellée du gold_test (ouverture par l'évaluateur dans un environnement distinct) est **T19**.
+
 ## OBJECTIF
 
 Mesurer une seule fois les variantes décidées avant lecture du test.
@@ -39,9 +43,9 @@ Empreintes du test et du lock avant/après ; une sortie par sample_id ; validati
 ## VALIDATION COMMANDS
 
 ```bash
-python scripts/evaluate.py --split test --mode live --experiment-lock configs/experiment_lock.json --out runs/eval/gold_test_final
-python scripts/validate_reports.py --run-dir runs/eval/gold_test_final
-python scripts/evaluate.py --mode recompute --from-run runs/eval/gold_test_final --out runs/eval/gold_test_recomputed
+python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke --out runs/eval/dev_smoke_recomputed
+python scripts/check_gate.py G6
+python scripts/check_gate.py G6 --record
 ```
 
 ## EXPECTED RESULTS

@@ -4,6 +4,10 @@
 
 G7-A
 
+## AMENDEMENT OPÉRATEUR (2026-09-21) — sample borné uniquement
+
+Aucun benchmark complet avant TICKET-19 : T15 exécute l'ablation RAG **uniquement sur le sample/smoke dev borné** (le smoke T14 de `runs/eval/dev_smoke`, ou un sample borné équivalent documenté dans le manifest), jamais sur les 83 emails. `--paired-with runs/eval/dev_smoke` ; sortie sous `runs/eval/dev_rag_smoke`. Les métriques restent diagnostiques (`measurement_scope` archivé, `performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Le premier benchmark complet (avec et sans RAG) est T19.
+
 ## OBJECTIF
 
 Tester si des précédents publics améliorent le classement.
@@ -42,7 +46,7 @@ Refus d’un cas privé, gold ou non confirmé ; clear ; add idempotent ; exclus
 python -m pip install -e ".[dev,rag]"
 python -m pytest tests/test_rag.py -q
 python scripts/manage_rag.py add --input corpus/rag/public_cases.jsonl
-python scripts/evaluate.py --split dev --mode live --variant rag --paired-with runs/eval/dev_baseline --out runs/eval/dev_rag
+python scripts/evaluate.py --split dev --mode live --variant rag --sample-profile smoke --paired-with runs/eval/dev_smoke --out runs/eval/dev_rag_smoke
 python scripts/check_gate.py G7-A --record
 ```
 

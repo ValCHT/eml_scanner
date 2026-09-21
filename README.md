@@ -13,23 +13,33 @@ exact offline recompute, gold_test never opened during development).
 ## Real dev baseline (TICKET-14)
 
 ```bash
-# real dev baseline on gold_dev (requires LITELLM_* runtime configuration)
+# bounded real harness smoke on gold_dev (requires LITELLM_* runtime configuration)
+# — 5 deterministic representative records; DIAGNOSTIC ONLY, not a performance baseline
 python scripts/evaluate.py --split dev --mode live --variant baseline \
-  --out runs/eval/dev_baseline
+  --sample-profile smoke --out runs/eval/dev_smoke
 
 # exact offline recompute from the archived authentic artifacts (no network)
-python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_baseline \
-  --out runs/eval/dev_recomputed
+python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke \
+  --out runs/eval/dev_smoke_recomputed
 
 # G6 receipt
 python scripts/check_gate.py G6 --record
 ```
 
+Per the operator amendment (2026-09-21), **G6 is a harness-validation gate, not a
+performance benchmark**: the full 83-record dev benchmark is executed for the
+first time in **TICKET-19** (`--sample-profile full`; the complete evaluation
+capability is implemented and tested here but NOT run as T14–T18 validation).
+The smoke validates plumbing only (offline Gold/raw integrity over all 83
+records, then live calls for exactly one lexicographically first record per
+dev label with support>0 — menace has zero support and is never fabricated).
+The evaluation refuses a live run without an explicit `--sample-profile`.
+
 The evaluation validates every GoldRecord (closed schema, no content keys,
 `raw_path` resolved under `corpus/raw/**`, recomputed SHA-256) BEFORE any
 LLM call, runs the frozen BASELINE V0 pipeline with the official
 `Qwen/Qwen3.8-27B` runtime, executes the A/B/C control on the same COMPLEX
-emails (A = shared INTERNAL medium, B = XHIGH internal-only ablation
+smoke emails (A = shared INTERNAL medium, B = XHIGH internal-only ablation
 control, C = nominal FINAL with the real external bundle), and archives
 exactly one evaluation row per `sample_id` plus metrics/manifest/matrix.
 Provider failures and abstentions stay in every denominator; unknown costs

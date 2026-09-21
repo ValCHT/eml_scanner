@@ -765,6 +765,12 @@ def _write_synthetic_run(
         "variant": "baseline",
         "split": "dev",
         "sample_count": len(rows),
+        "measurement_scope": "smoke",
+        "performance_claims_allowed": False,
+        "sample_selection_rule": evaluate_script.SAMPLE_SELECTION_RULE,
+        "selected_sample_ids": sorted(str(row["sample_id"]) for row in rows),
+        "full_dev_label_support": {"spear_phishing": 8, "phishing": 25, "fraude": 15,
+                                   "menace": 0, "spam": 15, "legitime": 20},
     }
     evaluate_script.write_predictions_atomic(root / "predictions.jsonl", rows)
     evaluate_script.write_json_atomic(root / "metrics.json", metrics)
@@ -857,3 +863,86 @@ def test_metrics_from_rows_plumbing_consistent(evaluate_script, monkeypatch, tmp
     )
     assert abc["comparable_n"] == 1
     assert abc["audit"]["valid"] is True
+
+
+# ---------------------------------------------------------------------------
+# Smoke scope (operator amendment 2026-09-21): deterministic 5-record sample
+# ---------------------------------------------------------------------------
+
+
+def test_smoke_selection_is_deterministic_and_label_stratified(evaluate_script):
+    """Exactly one lexicographically first sample per dev label with support>0."""
+    config = evaluate_script.load_evaluation_config(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    rows, _path = evaluate_script.load_gold_records(config, "dev")
+    selected = evaluate_script.select_smoke_sample(rows)
+    ids = [str(row["sample_id"]) for row in selected]
+    labels = [str(row["normalized_label"]) for row in selected]
+    assert labels == ["spear_phishing", "phishing", "fraude", "spam", "legitime"]
+    # Exact deterministic selection (lexicographically first per label):
+    assert ids == [
+        "nazario_phishing_2025_00116",   # spear_phishing (lexicographically first)
+        "nazario_phishing_2025_00020",   # phishing
+        "nazario_phishing_2025_00112",   # fraude
+        "spamassassin_hard_ham_00192",   # spam
+        "nazario_phishing_2025_00404",   # legitime
+    ]
+    assert "menace" not in labels  # support=0: nothing fabricated
+    # idempotent
+    assert ids == [str(row["sample_id"]) for row in evaluate_script.select_smoke_sample(rows)]
+
+
+def test_live_requires_explicit_sample_profile(evaluate_script, tmp_path):
+    args = evaluate_script.build_parser().parse_args(
+        ["--split", "dev", "--mode", "live", "--variant", "baseline",
+         "--out", str(tmp_path / "out")]
+    )
+    config = evaluate_script.load_evaluation_config(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    exit_code = evaluate_script.main(
+        ["--split", "dev", "--mode", "live", "--variant", "baseline",
+         "--out", str(tmp_path / "out")]
+    )
+    assert exit_code == evaluate_script.EXIT_FAIL
+
+
+def test_check_gate_g6_commands_are_smoke_scoped():
+    """G6 must run the bounded smoke, not the 83-email benchmark."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("check_gate_script", SCRIPTS_DIR / "check_gate.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["check_gate_script"] = module
+    spec.loader.exec_module(module)
+    commands = module.GATE_COMMANDS["G6"]
+    assert " ".join(commands[1][1:]) == (
+        "scripts/evaluate.py --split dev --mode live --variant baseline "
+        "--sample-profile smoke --out runs/eval/dev_smoke"
+    )
+    assert " ".join(commands[2][1:]) == (
+        "scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke "
+        "--out runs/eval/dev_smoke_recomputed"
+    )
+    assert not any("--out runs/eval/dev_baseline" in " ".join(command) for command in commands)
+
+
+def test_recompute_smoke_requires_exact_selection_identity(evaluate_script, monkeypatch, tmp_path):
+    """A smoke run missing/adding a selected row FAILS (identity check)."""
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    from_run = tmp_path / "from_run"
+    from_run.mkdir()
+    _write_synthetic_run(evaluate_script, from_run)
+    lines = [
+        json.loads(line)
+        for line in (from_run / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    # Drop one archived row: the smoke must reproduce the selection EXACTLY.
+    reduced_rows = lines[:-1]
+    evaluate_script.write_predictions_atomic(from_run / "predictions.jsonl", reduced_rows)
+    args = evaluate_script.build_parser().parse_args(
+        ["--mode", "recompute", "--from-run", str(from_run), "--out", str(tmp_path / "out")]
+    )
+    config = _make_cfg(evaluate_script, tmp_path)
+    exit_code = evaluate_script.run_recompute(args, config)
+    assert exit_code == evaluate_script.EXIT_FAIL

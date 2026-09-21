@@ -1,6 +1,6 @@
 {
-  "created_at_utc": "2026-09-20T23:20:00Z",
-  "experiment": "dev_baseline_v0",
+  "created_at_utc": "2026-09-21T00:00:00Z",
+  "experiment": "dev_smoke_harness_v0",
   "gate": "G6",
   "gate_thresholds": {
     "min_confidence": 0.9,
@@ -31,7 +31,13 @@
     "schema_assessment": "eeb646dcff9c1514c7e01cefcd900437bc372ecb9696c087b4878692c37021a2",
     "schema_triage_report": "d5e176fae7837399872bf883726af5c86430b1be665496a8e16f153c233e5866"
   },
-  "lock_version": 1,
+  "lock_version": 2,
+  "measurement_policy": {
+    "note": "amendement opérateur 2026-09-21: aucun benchmark complet avant TICKET-19; T14-T18 utilisent uniquement des samples/smokes bornés; le premier benchmark complet est T19 (--sample-profile full)",
+    "performance_claims_allowed": false,
+    "sample_selection_rule": "deterministic_stratified_smoke_v1: for each dev label with support>0 in fixed taxonomy order (menace excluded, support=0 - nothing fabricated), select the lexicographically first sample_id; exactly one record per label",
+    "scope": "smoke"
+  },
   "pricing_snapshot": {
     "cache_read_usd_per_1m": 0.05,
     "currency": "USD",
@@ -49,12 +55,13 @@
     "max_llm_attempts": 2
   },
   "rules": [
-    "measure BASELINE V0 exactly (gate 0.90/0.20 R1-R3, prompts V1, frozen policy) — no tuning before the baseline is recorded",
-    "no RAG, no vision, no fine-tuning, no alternate model, no selective retry",
-    "provider failures and abstentions stay in every denominator",
+    "measure the bounded real smoke exactly (gate 0.90/0.20 R1-R3, prompts V1, frozen policy) — no tuning before the full T19 benchmark",
+    "no RAG, no vision, no fine-tuning, no alternate model, no selective retry, no budget change to improve a score",
+    "provider failures, timeouts and abstentions stay in every denominator",
     "unknown cost is never turned into zero; provider-billed and estimated values are preserved separately",
     "A/B/C audit invariants (docs/contracts.md §2.6.1) are validated before any B−A / C−B delta is published",
-    "no push, no merge; changes left unpushed for human review"
+    "smoke results are diagnostic only; they never support a performance claim",
+    "no push, no merge; changes left for human review"
   ],
   "runtime": {
     "chat_url": "https://api.akashml.com/v1/chat/completions",
@@ -66,6 +73,6 @@
       "internal": "medium"
     }
   },
-  "split_policy": "dev only for TICKET-14; gold_test.jsonl is an internal POC validation partition never opened during development; the terminal test evaluation belongs to the later authorized ticket",
+  "split_policy": "dev only for TICKET-14; gold_test.jsonl is an internal POC validation partition never opened during development; the terminal test evaluation belongs to the later authorized ticket (T19)",
   "ticket": "TICKET-14"
 }

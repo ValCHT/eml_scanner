@@ -111,39 +111,48 @@ Un YES peut conclure : « Le POC Qwen3.8 hébergé révèle un besoin probable d
 
 Livrable final POC : résultats réels, coverage matrix, erreur par cause, décision sur chaque composant, FINE-TUNE=YES/NO/INCONCLUSIVE et limites. Une conclusion « baseline utile, enrichissement indisponible/non concluant, RAG sans gain » est plus informative qu'un succès fabriqué.
 
-## 8.6 TICKET-14 — exécution baseline dev (implémentée)
+## 8.6 TICKET-14 — exécution du smoke de validation du harness (amendement opérateur 2026-09-21)
 
-La variante `baseline` exécute la baseline réelle sur `gold_dev` et archive une mesure auditable. CLI exacte :
+**Amendement opérateur (2026-09-21) :** aucun benchmark complet avant TICKET-19. T14–T18 utilisent uniquement des samples/smokes bornés ; le premier benchmark complet (dev/test/Visual-79, architecture + modèle) est **TICKET-19**. G6 est une gate de validation du **harness**, pas un benchmark de performance.
+
+La variante `baseline` avec `--sample-profile smoke` exécute le smoke réel borné : la partition dev ENTIÈRE (83 GoldRecords) reste validée hors ligne (schéma fermé, clés interdites, résolution `raw_path`, SHA-256 recalculé) AVANT tout appel, mais seuls les records sélectionnés reçoivent des appels live. CLI exacte :
 
 ```bash
 python scripts/evaluate.py \
   --split dev --mode live --variant baseline \
-  --out runs/eval/dev_baseline
+  --sample-profile smoke \
+  --out runs/eval/dev_smoke
 ```
 
-Options : `--split {dev,test}` (test refusé en TICKET-14, voir §8.1/§8.6.3), `--mode {live,recompute}`, `--variant baseline`, `--out` (répertoire vide exigé, jamais écrasé), `--from-run` (recompute), `--evaluation-config` (défaut `configs/evaluation.yaml`), `--experiment-lock` (défaut `configs/experiment_lock.json`). Codes de sortie : `0` OK, `1` FAIL (drift du lock, échec de validation gold, audit A/B/C invalide, métriques recompute différentes), `2` BLOCKED (clé LLM absente, split test).
+Options : `--split {dev,test}` (test refusé en TICKET-14, voir §8.1/§8.6.3), `--mode {live,recompute}`, `--variant baseline`, `--sample-profile {smoke,full}` **requis en live** (un run complet accidentel est refusé ; `full` = capacité complète réservée à T19), `--out` (répertoire vide exigé), `--from-run` (recompute), `--evaluation-config`, `--experiment-lock`. Codes de sortie : `0` OK, `1` FAIL (drift du lock, échec de validation gold, audit A/B/C invalide, métriques recompute différentes), `2` BLOCKED (clé LLM absente, split test, profil manquant).
 
-### 8.6.1 Déroulé live
+### 8.6.1 Déroulé live (scope smoke)
 
-1. **Lock** : `configs/experiment_lock.json` gèle l'empreinte SHA-256 des prompts, schémas, `gate.yaml`/`policy.yaml`/`tools.yaml`, `requirements.lock`, `evaluation.yaml` et `gold_dev.jsonl`, plus le binding runtime (`Qwen/Qwen3.8-27B`, endpoint AkashML, internal=medium/final=xhigh) et les seuils BASELINE V0 (0,90/0,20). Tout drift = FAIL avant tout appel.
-2. **Validation gold préalable** : les 83 GoldRecords dev (schéma fermé, clés de contenu interdites refusées récursivement, `label_status=confirmed`, `email_sha256 == raw_sha256`) sont résolus et hachés depuis `corpus/raw/**` AVANT tout appel LLM/outil ; fichier absent, hash divergent ou chemin sortant de `corpus/raw/**` = échec fort, jamais un échantillon silencieusement retiré.
-3. **Pipeline figé** : un graphe séquentiel par email (StateGraph, gate R1–R3, prompts V1, maximum deux appels nominaux, RAG/vision inactifs), rapport authentique archivé sous `<out>/<run_id>/report.json` (runs/ git-ignoré).
-4. **Contrôle A/B/C sur les COMPLEX** : A = INTERNAL medium du run partagé (jamais de second appel internal) ; B = contrôle xhigh avec preuves internes seules (`merge_evidence(parsed, None)`), `TOOL_STATUS` marquant explicitement l'ablation (`skipped/ablation_control_b_no_external_evidence`, mode `none`, zéro requête), RAG vide, aucun pixel, audits §2.6.1 archivés dans `responses_control_b/` ; C = FINAL nominal xhigh avec le bundle externe réellement collecté. Les invariants d'audit sont validés avant tout delta : B sans preuve externe/RAG/visuel, C transmettant les evidences OSINT/SANDBOX admissibles lorsque le bundle en produit (sinon `no_new_external_evidence`). Un mismatch invalide la comparaison B−A/C−B et fait échouer le run.
-5. **Sorties** : `predictions.jsonl` (exactement une ligne par `sample_id`, métadonnées/verdicts/usage/audits, aucun contenu d'email), `metrics.json` (§8.2 complet : confusion 6×6 + colonne abstention, Macro-F1 six classes non conclusive quand menace=0, FPR strict/malveillant/abstention, SIMPLE/COMPLEX qualité+coût+latence, validité schéma/retries/refus, IOC avant/après vérifier, couverture AUTO/REVIEW/ESCALATE, couverture outils par statut/cause), `matrix.csv`, `report.md`, `manifest.json` (identité, commit, modèle, reasoning, empreintes des entrées gelées, snapshot tarifaire, statuts d'outils, politique de retry — sans aucun secret, présence seulement).
-6. **Coûts** : usage réel de chaque tentative ; tarif AkashML du snapshot (0,25 input / 0,05 cache-read / 2,20 output USD par 1M) appliqué seulement sans valeur facturée exposée ; valeurs provider-billed et estimées conservées séparément ; coût inconnu jamais remplacé par 0 ; les tokens de reasoning sont déjà dans `output_tokens` et ne sont jamais additionnés deux fois.
-7. **Budget total de l'expérience** : coût/temps opérationnel (A en SIMPLE ; A+outils+C en COMPLEX) et coût/temps du contrôle B sont archivés et séparés, mais toutes les tentatives (y compris B et les retries) comptent dans le budget total.
+1. **Lock** : `configs/experiment_lock.json` gèle l'empreinte SHA-256 des prompts, schémas, `gate.yaml`/`policy.yaml`/`tools.yaml`, `requirements.lock`, `evaluation.yaml` et `gold_dev.jsonl`, plus le binding runtime et les seuils BASELINE V0 (0,90/0,20). Tout drift = FAIL avant tout appel.
+2. **Validation gold préalable** : les **83** GoldRecords dev (schéma fermé, clés de contenu interdites, `label_status=confirmed`, `email_sha256 == raw_sha256`) sont résolus et hachés depuis `corpus/raw/**` AVANT tout appel ; fichier absent, hash divergent ou chemin sortant de `corpus/raw/**` = échec fort, jamais un échantillon silencieusement retiré.
+3. **Sélection déterministe (`smoke`)** : pour chaque label dev à support>0 dans l'ordre de taxonomie fixe (spear_phishing, phishing, fraude, spam, legitime — menace support=0, rien n'est fabriqué), le `sample_id` lexicographiquement premier est sélectionné ; exactement un record par label. La règle, les IDs sélectionnés et le support complet dev sont archivés dans le manifest/report avec `measurement_scope="smoke"` et `performance_claims_allowed=false`.
+4. **Pipeline figé** : un graphe séquentiel par email sélectionné (gate R1–R3, prompts V1), rapport authentique archivé sous `<out>/<run_id>/report.json`.
+5. **Contrôle A/B/C sur les COMPLEX du smoke** : A = INTERNAL medium du run partagé (jamais de second appel internal) ; B = contrôle xhigh avec preuves internes seules (`merge_evidence(parsed, None)`), `TOOL_STATUS` marquant explicitement l'ablation (`skipped/ablation_control_b_no_external_evidence`, mode `none`, zéro requête), RAG vide, aucun pixel, audits §2.6.1 archivés dans `responses_control_b/` ; C = FINAL nominal xhigh avec le bundle externe réellement collecté. Les invariants d'audit sont validés avant tout delta.
+6. **Sorties** : `predictions.jsonl` (exactement une ligne par `sample_id`, métadonnées/verdicts/usage/audits, aucun contenu d'email), `metrics.json` (diagnostique), `matrix.csv`, `report.md`, `manifest.json` (identité, commit, modèle, reasoning, empreintes des entrées gelées, snapshot tarifaire, statuts d'outils, politique de retry, scope de mesure — sans aucun secret).
+7. **Interprétation** : les métriques du smoke sont **diagnostiques uniquement** — elles valident le câblage du harness (parsing, gate, appels réels, audits, policy, reports, recompute). Elles ne constituent PAS une baseline de performance, PAS un Macro-F1 représentatif et PAS une validation statistique ; aucune décision de tuning n'est prise sur elles. Un timeout/indisponibilité fournisseur reste un résultat réel et archivé : ni relance sélective des cas en échec, ni modification des budgets pour améliorer le score.
+8. **Coûts** : usage réel de chaque tentative ; tarif AkashML du snapshot appliqué seulement sans valeur facturée exposée ; coût inconnu jamais remplacé par 0 ; tokens de reasoning comptés exactement une fois.
 
-### 8.6.2 Recompute exact
+### 8.6.2 Recompute exact du smoke
 
 ```bash
 python scripts/evaluate.py \
   --mode recompute \
-  --from-run runs/eval/dev_baseline \
-  --out runs/eval/dev_recomputed
+  --from-run runs/eval/dev_smoke \
+  --out runs/eval/dev_smoke_recomputed
 ```
 
-Aucun appel fournisseur ni réseau : la partition dev (métadonnées), les lignes archivées et les rapports authentiques (hash vérifié ligne par ligne) sont rechargés et les métriques recalculées de façon déterministe. Les métriques doivent être ÉGALES aux métriques live (aucune horloge n'entre dans une métrique) ; seule la différence autorisée est le manifest de recompute (métadonnées explicites : date du recalcul, run source, `provider_calls=0`, timestamps d'observation préservés). Un recalcul ne reproduit ni la latence ni la disponibilité live et ne remplace pas le run live ; un nouveau run live est une nouvelle mesure.
+Aucun appel fournisseur ni réseau : les lignes archivées sont exactement reproduites et leur identité est vérifiée contre la sélection déterministe (IDs archivés == sélection recalculée depuis gold_dev ; ligne manquante ou ligne surnuméraire = FAIL). Pour un run `smoke`, l'exigence `len(rows)==83` ne s'applique plus ; elle reste valable pour un run `full_dev_baseline`. Les métriques doivent être ÉGALES aux métriques live ; seule différence autorisée : le manifest de recompute (métadonnées explicites, timestamps d'observation préservés).
 
 ### 8.6.3 gold_test non lisible en TICKET-14
 
-`--split test` est refusé par l'évaluateur (BLOCKED) tant que le workflow de développement TICKET-14 est actif : `gold_test.jsonl` est une partition de validation interne du POC, sa lecture terminale relève du ticket autorisé après gel des variantes (§8.1). Le chargement dev n'ouvre que `corpus/gold/gold_dev.jsonl`, vérifié par test.
+`--split test` est refusé par l'évaluateur (BLOCKED) tant que le workflow de développement TICKET-14 est actif : `gold_test.jsonl` est une partition de validation interne du POC, sa lecture terminale relève du ticket autorisé (T19, premier benchmark complet, après gel des variantes). Le chargement dev n'ouvre que `corpus/gold/gold_dev.jsonl`, vérifié par test.
+
+### 8.6.4 Capacité full corpus (réservée T19)
+
+La capacité technique d'évaluer les 83 records dev (`--sample-profile full`) reste implémentée et testée mais n'est PAS exécutée comme validation T14–T18 ; son premier usage officiel est le benchmark complet de T19 (dev complet, test scellé, Visual-79). Tout output `full_dev_baseline` produit avant T19 ne constitue pas une baseline officielle.
+
