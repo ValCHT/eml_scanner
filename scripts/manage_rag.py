@@ -15,15 +15,25 @@ Public-only enforcement (fail-closed):
   (``scripts/build_corpus.validate_rag_cases``: exact field set, no content
   key anywhere, is_public=True, split=rag_reference, taxonomy label,
   text_excerpt ≤ 1200 chars);
-- the Gold guard loads ``gold_dev.jsonl`` AND ``gold_test.jsonl`` as
-  metadata-only GoldRecords (same loader/validator as the evaluation) and
-  refuses to index any case whose ``family_group`` is a Gold family or
-  whose ``record_sha256`` is a Gold record hash. The Gold files are read
-  ONLY for this isolation assertion — never for labels, tuning or
-  selection decisions (operator amendment, internal POC partition);
+- the Gold guard loads ``gold_dev.jsonl`` as metadata-only GoldRecords
+  (same loader/validator as the evaluation) and refuses to index any case
+  whose ``family_group`` is a dev Gold family or whose ``record_sha256``
+  is a dev Gold record hash. ``gold_test.jsonl`` is NEVER opened by this
+  ticket (build agents have no access to the sealed partition before
+  T19E): the RAG/test disjointness is inherited from the TICKET-13
+  deterministic split construction (RAG families are reserved first from
+  the eligible confirmed complement, then dev/test are split by family
+  from the protected Gold pool) and is re-verified when T19E is
+  authorized. Only the AGGREGATE ``corpus/gold/test_seal.json`` (counts,
+  hashes, provenance) is read and archived in the receipt — never used to
+  reconstruct or open test membership;
 - the embedding is the frozen chromadb ONNX ``all-MiniLM-L6-v2`` (version +
   SHA-256 fingerprint recorded in the collection metadata); no alternative
   model, no download outside chromadb's pinned archive.
+
+Provenance (kept explicit, never overstated): the 150 public cases carry
+operator-approved, AI-adjudicated labels (``astra_gold_ai_v1``,
+``human_validated=false``) — they are NOT human analyst ground truth.
 
 Artifacts: ``runs/tickets/TICKET-15/rag_receipt.json`` (per-command receipt:
 command, file fingerprints, added counts, model info, isolation checks).
@@ -68,29 +78,109 @@ EXIT_BLOCKED = 2
 RECEIPT_RELATIVE = Path("runs/tickets/TICKET-15/rag_receipt.json")
 DEFAULT_INPUT = Path("corpus/rag/public_cases.jsonl")
 DEFAULT_GOLD_DEV = Path("corpus/gold/gold_dev.jsonl")
-DEFAULT_GOLD_TEST = Path("corpus/gold/gold_test.jsonl")
+DEFAULT_TEST_SEAL = Path("corpus/gold/test_seal.json")
 
 
 @dataclass(frozen=True)
 class GoldGuard:
-    """Metadata-only Gold isolation guard (families + record hashes)."""
+    """Dev Gold metadata + the sealed test aggregate (gold_test never opened)."""
 
     families: frozenset[str]
     record_sha256: frozenset[str]
-    partitions: dict[str, Any]
+    dev_partition: dict[str, Any]
+    test_seal: dict[str, Any]
 
     @property
     def summary(self) -> dict[str, Any]:
-        """Receipt projection WITHOUT the full family listing per partition."""
+        """Receipt projection WITHOUT the full family listing of gold_dev."""
 
         return {
-            "gold_partitions": {
-                split: {key: value for key, value in data.items() if key != "families"}
-                for split, data in self.partitions.items()
+            "gold_dev": {
+                key: value
+                for key, value in self.dev_partition.items()
+                if key != "families"
             },
+            "gold_test_seal": self.test_seal,
+            "gold_test_opened": False,
             "protected_family_count": len(self.families),
             "protected_record_hash_count": len(self.record_sha256),
         }
+
+
+def load_test_seal(path: Path) -> dict[str, Any]:
+    """Aggregate-only check of the sealed test partition (never opened).
+
+    ``corpus/gold/test_seal.json`` is the TICKET-13 seal: aggregate counts,
+    the partition hash and the selection protocol. It is read and archived
+    as a seal — it is NEVER used to reconstruct or open test membership,
+    and ``gold_test.jsonl`` stays unread before T19E.
+    """
+
+    if not path.is_file():
+        raise build_corpus.GoldValidationError(f"test seal missing: {path}")
+    try:
+        seal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise build_corpus.GoldValidationError(f"test seal unreadable: {path} ({error})") from error
+    if not isinstance(seal, dict):
+        raise build_corpus.GoldValidationError(f"test seal is not a JSON object: {path}")
+    problems: list[str] = []
+    if seal.get("split") != "test":
+        problems.append(f"split must be 'test' (got {seal.get('split')!r})")
+    record_count = seal.get("record_count")
+    family_count = seal.get("family_count")
+    if not isinstance(record_count, int) or isinstance(record_count, bool) or record_count <= 0:
+        problems.append("record_count must be a positive integer")
+    if not isinstance(family_count, int) or isinstance(family_count, bool) or family_count <= 0:
+        problems.append("family_count must be a positive integer")
+    if record_count != family_count:
+        problems.append("record_count and family_count must be equal (one record per family)")
+    support = seal.get("label_support")
+    if (
+        not isinstance(support, dict)
+        or not support
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in support.values()
+        )
+    ):
+        problems.append("label_support must be a non-empty mapping of non-negative integers")
+    elif isinstance(record_count, int) and sum(support.values()) != record_count:
+        problems.append("label_support must sum to record_count")
+    partition_hash = seal.get("gold_test_sha256")
+    if (
+        not isinstance(partition_hash, str)
+        or len(partition_hash) != 64
+        or any(character not in "0123456789abcdef" for character in partition_hash)
+    ):
+        problems.append("gold_test_sha256 must be 64 lowercase hex characters")
+    if not isinstance(seal.get("human_validated"), bool):
+        problems.append("human_validated must be an explicit boolean")
+    if not str(seal.get("reviewer_ref") or "").strip():
+        problems.append("reviewer_ref must state the reference method")
+    if not str(seal.get("selection_protocol") or "").strip():
+        problems.append("selection_protocol must document the deterministic split construction")
+    if problems:
+        raise build_corpus.GoldValidationError(
+            "test seal invalid: " + "; ".join(problems)
+        )
+    protocol = str(seal["selection_protocol"])
+    return {
+        "path": str(path),
+        "version": seal.get("version"),
+        "split": seal["split"],
+        "seal_sha256": _file_sha256(path),
+        "gold_test_sha256": partition_hash,
+        "record_count": record_count,
+        "family_count": family_count,
+        "label_support": dict(sorted(support.items())),
+        "reviewer_ref": seal["reviewer_ref"],
+        "human_validated": seal["human_validated"],
+        "rag_families_reserved_before_dev_test_split": (
+            "RAG families reserved first" in protocol
+        ),
+        "selection_protocol": protocol,
+    }
 
 
 def _file_sha256(path: Path) -> str:
@@ -140,37 +230,39 @@ def load_public_cases(path: Path) -> list[RagSourceCase]:
     return cases
 
 
-def gold_isolation_guard(gold_dev_path: Path, gold_test_path: Path) -> GoldGuard:
-    """Metadata-only Gold guard: protected family groups + record hashes.
+def gold_isolation_guard(gold_dev_path: Path, test_seal_path: Path) -> GoldGuard:
+    """Dev-only Gold guard + sealed-test aggregate.
 
-    ``gold_dev.jsonl`` and ``gold_test.jsonl`` are opened as METADATA/label
-    files with the full GoldRecord closed-schema validation (same loader as
-    the evaluation harness). They are used EXCLUSIVELY to enforce the
-    family/record isolation invariant of the RAG index — never for labels,
-    thresholds, tuning or any development decision (operator amendment,
-    internal POC validation partition).
+    ``gold_dev.jsonl`` is opened as METADATA/label file with the full
+    GoldRecord closed-schema validation (same loader as the evaluation) and
+    used EXCLUSIVELY to enforce the family/record isolation invariant of the
+    RAG index — never for labels, thresholds, tuning or any development
+    decision. ``gold_test.jsonl`` is NOT opened: the RAG/test disjointness
+    is inherited from the TICKET-13 deterministic split construction and is
+    re-verified when T19E is authorized; only ``test_seal.json`` aggregates
+    are read and archived.
     """
 
-    families: set[str] = set()
-    hashes: set[str] = set()
-    partitions: dict[str, Any] = {}
-    for split, path in (("dev", gold_dev_path), ("test", gold_test_path)):
-        rows = _read_jsonl(path, f"gold[{split}]")
-        build_corpus.validate_gold_records(rows, expected_splits=(split,))
-        split_families = {str(row["family_group"]) for row in rows}
-        split_hashes = {str(row["raw_sha256"]) for row in rows}
-        families |= split_families
-        hashes |= split_hashes
-        partitions[split] = {
-            "path": str(path),
-            "record_count": len(rows),
-            "family_count": len(split_families),
-            "families": sorted(split_families),
-        }
+    rows = _read_jsonl(gold_dev_path, "gold[dev]")
+    build_corpus.validate_gold_records(rows, expected_splits=("dev",))
+    dev_families = {str(row["family_group"]) for row in rows}
+    dev_hashes = {str(row["raw_sha256"]) for row in rows}
+    seal = load_test_seal(test_seal_path)
+    if seal["human_validated"] is False and str(seal["reviewer_ref"]) != "astra_gold_ai_v1":
+        raise build_corpus.GoldValidationError(
+            "test seal provenance is inconsistent: human_validated=false "
+            "requires reviewer_ref=astra_gold_ai_v1"
+        )
     return GoldGuard(
-        families=frozenset(families),
-        record_sha256=frozenset(hashes),
-        partitions=partitions,
+        families=frozenset(dev_families),
+        record_sha256=frozenset(dev_hashes),
+        dev_partition={
+            "path": str(gold_dev_path),
+            "record_count": len(rows),
+            "family_count": len(dev_families),
+            "families": sorted(dev_families),
+        },
+        test_seal=seal,
     )
 
 
@@ -218,27 +310,25 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     input_path = Path(args.input)
     cases = load_public_cases(input_path)
-    guard = gold_isolation_guard(Path(args.gold_dev), Path(args.gold_test))
+    guard = gold_isolation_guard(Path(args.gold_dev), Path(args.test_seal))
 
     rag_families = {case.family_group for case in cases}
-    intersections = {
-        f"gold_{split}": sorted(set(guard.partitions[split]["families"]) & rag_families)
-        for split in ("dev", "test")
-    }
-    colliding = {split: ids for split, ids in intersections.items() if ids}
-    if colliding:
+    rag_hashes = {case.record_sha256 for case in cases}
+    dev_intersection = sorted(set(guard.dev_partition["families"]) & rag_families)
+    if dev_intersection:
         raise build_corpus.GoldValidationError(
-            f"RAG families intersect the gold partitions: {colliding}"
+            f"RAG families intersect the gold_dev partition: {dev_intersection}"
         )
-    colliding_hashes = sorted({case.record_sha256 for case in cases} & guard.record_sha256)
+    colliding_hashes = sorted(rag_hashes & guard.record_sha256)
     if colliding_hashes:
         raise build_corpus.GoldValidationError(
-            f"RAG records collide with gold record hashes: {colliding_hashes[:5]}"
+            f"RAG records collide with gold_dev record hashes: {colliding_hashes[:5]}"
         )
 
     adapter = RagAdapter(_tools_config().rag, _resolve_index_dir(args))
     added = adapter.add(cases)
     description = adapter.describe()
+    validation_refs = sorted({case.analyst_validation_ref for case in cases})
     payload = {
         "status": "ok",
         "input_path": str(input_path),
@@ -246,10 +336,32 @@ def cmd_add(args: argparse.Namespace) -> int:
         "source_case_count": len(cases),
         "added_cases": added,
         "index": description,
+        "label_provenance": {
+            "validation_refs": validation_refs,
+            "reference_method": guard.test_seal["reviewer_ref"],
+            "human_validated": bool(guard.test_seal["human_validated"]),
+            "note": (
+                "operator-approved AI-adjudicated POC reference labels "
+                "(astra_gold_ai_v1); NOT human analyst ground truth"
+            ),
+        },
         "isolation": {
             **guard.summary,
-            "rag_families_intersecting_gold": intersections,
-            "rag_record_hashes_in_gold": colliding_hashes,
+            "rag_family_count": len(rag_families),
+            "rag_record_hash_count": len(rag_hashes),
+            "rag_families_intersecting_gold_dev": dev_intersection,
+            "rag_record_hashes_in_gold_dev": colliding_hashes,
+            "test_disjointness": {
+                "status": "inherited_from_t13_split_construction",
+                "reverified_at": "TICKET-19E",
+                "note": (
+                    "gold_test.jsonl is sealed before T19E and was never "
+                    "opened by T15; the T13 deterministic split reserved the "
+                    "RAG families before the dev/test family split of the "
+                    "protected Gold pool, so RAG/test disjointness is "
+                    "inherited by construction and re-verified at T19E"
+                ),
+            },
         },
     }
     receipt_file = write_receipt("add", payload, Path(args.receipt))
@@ -310,7 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--input", default=str(DEFAULT_INPUT))
     add_parser.add_argument("--index-dir", default=None)
     add_parser.add_argument("--gold-dev", default=str(DEFAULT_GOLD_DEV))
-    add_parser.add_argument("--gold-test", default=str(DEFAULT_GOLD_TEST))
+    add_parser.add_argument("--test-seal", default=str(DEFAULT_TEST_SEAL))
     add_parser.add_argument("--receipt", default=str(PROJECT_ROOT / RECEIPT_RELATIVE))
 
     clear_parser = subparsers.add_parser("clear", help="delete the index content")

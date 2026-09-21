@@ -24,7 +24,11 @@ docs/corpus.md §7.6 inside docs/contracts.md §2.4/§2.7/§2.8:
   collection metadata and verified on EVERY open — a changed embedding
   space is refused instead of silently mixing vectors. Only
   ``text_excerpt`` is embedded: labels, rationale and ids never enter the
-  embedding text (docs/corpus.md §7.6).
+  embedding text (docs/corpus.md §7.6). The metadata carries the FULL
+  public record (label, analyst rationale, validation reference, groups),
+  so a retrieved neighbour keeps its provenance and an identical re-add
+  with a changed rationale is a divergent replay, refused (never silently
+  ignored).
 - Disabled mode (``RAG_ENABLED=false``, the frozen G6 baseline): the
   factory returns ``None`` and NEITHER Chroma nor the ONNX weights are
   imported. Even a constructed adapter imports its storage stack lazily on
@@ -134,7 +138,13 @@ class RagSourceCase(BaseModel):
         return value
 
     def public_payload(self) -> dict[str, Any]:
-        """Chroma-compatible metadata without null values (Chroma refuses None)."""
+        """Chroma-compatible metadata without null values (Chroma refuses None).
+
+        The payload is also the idempotency contract: it carries EVERY
+        persisted field, including ``analyst_rationale``, so a re-add of the
+        same ``case_id`` with a different rationale is detected as a
+        divergent replay instead of being silently ignored.
+        """
 
         payload: dict[str, Any] = {
             "case_id": self.case_id,
@@ -143,6 +153,7 @@ class RagSourceCase(BaseModel):
             "record_sha256": self.record_sha256,
             "validated_label": self.validated_label,
             "analyst_validation_ref": self.analyst_validation_ref,
+            "analyst_rationale": self.analyst_rationale,
             "duplicate_group": self.duplicate_group,
             "family_group": self.family_group,
             "is_public": True,

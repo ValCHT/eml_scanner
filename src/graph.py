@@ -798,6 +798,8 @@ def build_services(
     current_duplicate_group: str | None = None,
     current_family_group: str | None = None,
     current_campaign_id: str | None = None,
+    tools_override: ToolsConfig | None = None,
+    rag: RagAdapter | None = None,
 ) -> Services:
     """Build the per-run dependency container from Settings + configs.
 
@@ -806,9 +808,18 @@ def build_services(
     (chromadb, ONNX weights) is imported or loaded (TICKET-15 disabled
     mode). ``rag_exclusions`` and the current group identities are
     caller-owned metadata (evaluation harness); they never enter the state.
+
+    ``tools_override`` and ``rag`` are the harness injection seam used by
+    the paired ablation runs (TICKET-15/TICKET-16): the evaluator executes
+    one run under an effective configuration (e.g. RAG enabled in memory,
+    the frozen ``configs/tools.yaml`` file unchanged) and injects the SAME
+    validated adapter instance for every sample. Both default to ``None``:
+    the production path is unchanged.
     """
 
     tools, gate, policy = _load_configs(settings)
+    if tools_override is not None:
+        tools = tools_override
     run_dir = Path(settings.RUNS_DIR) / run_id
     capture_dir = run_dir / "responses"
     quota_dir = Path(settings.RUNS_DIR) / "quota"
@@ -843,7 +854,7 @@ def build_services(
         clock=time.monotonic,
         started_monotonic=started_monotonic,
         mode=mode,
-        rag=create_rag_adapter_if_enabled(settings, tools.rag),
+        rag=rag if rag is not None else create_rag_adapter_if_enabled(settings, tools.rag),
         rag_exclusions=set(rag_exclusions) if rag_exclusions is not None else set(),
         current_duplicate_group=current_duplicate_group,
         current_family_group=current_family_group,

@@ -4,6 +4,12 @@ Coverage of docs/tickets/TICKET-15.md TESTS REQUIRED (offline part):
 
 - source contract: private, gold (dev/test split), unconfirmed and
   malformed cases are refused — they cannot even be constructed;
+- metadata contract: a retrieved neighbour keeps the FULL public record
+  (label, analyst rationale, validation reference); a changed rationale
+  under an existing case_id is a divergent replay, refused;
+- real corpus: public-only artifact + gold_dev isolation + the sealed test
+  aggregate; gold_test.jsonl is NEVER opened before T19E (tracked by test,
+  the RAG/test disjointness is inherited from the T13 split);
 - local Chroma storage: add/search/clear, idempotent re-add, one case per
   family, max_cases, oversized excerpt refusal;
 - retrieval: distance threshold (never a forced neighbour), exclusion of
@@ -252,6 +258,34 @@ def test_add_refuses_different_content_under_existing_id(
     adapter.add([_case(case_id="rag_case_00001")])
     with pytest.raises(RagIndexError):
         adapter.add([_case(case_id="rag_case_00001", text="NEAR::Different public body text")])
+
+
+def test_retrieved_case_keeps_the_source_rationale(
+    tmp_path: Path, chromadb_or_skip: None
+) -> None:
+    """analyst_rationale is persisted and returned by search, not dropped."""
+
+    adapter = _adapter(tmp_path)
+    source = _case(
+        analyst_rationale="AI-adjudicated reference rationale: credential-verify flow."
+    )
+    adapter.add([source])
+    hits = adapter.search(_query(), k=1)
+    assert len(hits) == 1
+    assert hits[0].analyst_rationale == source.analyst_rationale
+    assert hits[0].analyst_validation_ref == source.analyst_validation_ref
+
+
+def test_add_refuses_a_changed_rationale_under_the_same_case_id(
+    tmp_path: Path, chromadb_or_skip: None
+) -> None:
+    """A changed rationale under an existing case_id is a divergent replay."""
+
+    adapter = _adapter(tmp_path)
+    adapter.add([_case(analyst_rationale="Original AI-adjudicated rationale.")])
+    # Same text excerpt, same id, same label: ONLY the rationale changed.
+    with pytest.raises(RagIndexError):
+        adapter.add([_case(analyst_rationale="Rewritten rationale after adjudication.")])
 
 
 def test_add_refuses_second_case_of_an_indexed_family(
@@ -648,12 +682,57 @@ def test_build_services_rag_enabled_builds_a_lazy_adapter(
     assert Path(str(settings.RAG_DIR)) == tmp_path / "chroma"
 
 
+def test_build_services_accepts_effective_tools_and_adapter_override(
+    tmp_path: Path, project_root: Path
+) -> None:
+    """Paired-ablation seam: effective in-memory tools + ONE injected adapter.
+
+    The evaluator (docs/evaluation.md §8.7) runs the ablation under an
+    effective configuration (RAG enabled in memory, the frozen tools.yaml
+    file unchanged) and reuses the SAME validated adapter for every sample.
+    """
+
+    settings = load_settings(None).model_copy(
+        update={
+            "RUNS_DIR": tmp_path / "runs",
+            "CONFIG_DIR": project_root / "configs",
+            "RAG_DIR": tmp_path / "chroma",
+            "RAG_ENABLED": True,
+        }
+    )
+    tools = load_yaml_config(project_root / "configs" / "tools.yaml", ToolsConfig)
+    assert tools.rag.enabled is False  # the frozen file is unchanged
+    effective = tools.model_copy(
+        update={"rag": tools.rag.model_copy(update={"enabled": True})}
+    )
+    adapter = _adapter(tmp_path)  # stub embedder: no real weights loaded
+    services = build_services(
+        settings,
+        source_profile="fixture",  # type: ignore[arg-type]
+        run_id=str(uuid.uuid4()),
+        started_monotonic=time.monotonic(),
+        tools_override=effective,
+        rag=adapter,
+    )
+    assert services.rag is adapter
+    assert services.tools_config.rag.enabled is True
+    assert Path(str(settings.RAG_DIR)) == tmp_path / "chroma"
+
+
 # ---------------------------------------------------------------------------
 # REAL repo data: public-only + gold isolation of public_cases.jsonl
 # ---------------------------------------------------------------------------
 
 
-def test_real_public_cases_are_public_validated_and_gold_isolated() -> None:
+def test_real_public_cases_are_public_validated_and_dev_gold_isolated() -> None:
+    """Real corpus: public artifact valid, DEV isolation, test sealed.
+
+    ``gold_test.jsonl`` is NEVER opened before T19E (build agents have no
+    access to the sealed partition): the RAG/test disjointness is inherited
+    from the TICKET-13 deterministic split construction and only the seal
+    aggregate is checked here.
+    """
+
     import scripts.manage_rag as manage_rag
 
     cases = manage_rag.load_public_cases(PROJECT_ROOT / "corpus" / "rag" / "public_cases.jsonl")
@@ -661,15 +740,68 @@ def test_real_public_cases_are_public_validated_and_gold_isolated() -> None:
     assert len({case.family_group for case in cases}) == 150
     assert all(case.is_public is True for case in cases)
     assert all(case.split == "rag_reference" for case in cases)
+    assert {case.analyst_validation_ref for case in cases} == {"astra_gold_ai_v1"}
 
     guard = manage_rag.gold_isolation_guard(
         PROJECT_ROOT / "corpus" / "gold" / "gold_dev.jsonl",
-        PROJECT_ROOT / "corpus" / "gold" / "gold_test.jsonl",
+        PROJECT_ROOT / "corpus" / "gold" / "test_seal.json",
     )
     rag_families = {case.family_group for case in cases}
+    rag_hashes = {case.record_sha256 for case in cases}
     assert not (rag_families & guard.families)
-    assert not ({case.record_sha256 for case in cases} & guard.record_sha256)
-    assert guard.summary["protected_family_count"] == 166
+    assert not (rag_hashes & guard.record_sha256)
+    assert guard.summary["gold_test_opened"] is False
+    assert guard.summary["protected_family_count"] == 83
+    assert guard.summary["protected_record_hash_count"] == 83
+    seal = guard.summary["gold_test_seal"]
+    assert seal["record_count"] == seal["family_count"] == 83
+    assert seal["human_validated"] is False
+    assert seal["reviewer_ref"] == "astra_gold_ai_v1"
+    assert seal["rag_families_reserved_before_dev_test_split"] is True
+
+
+def test_manage_rag_never_opens_gold_test(
+    monkeypatch: pytest.MonkeyPatch, project_root: Path
+) -> None:
+    """Track every file the T15 guard reads; gold_test never appears.
+
+    Path.open / read_bytes / read_text are wrapped (still calling the
+    originals) so any attempted access to gold_test.jsonl would be recorded.
+    """
+
+    import scripts.manage_rag as manage_rag
+
+    touched: list[str] = []
+
+    original_open = Path.open
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def _record(original, self_path: Path, *args: object, **kwargs: object):
+        touched.append(str(self_path))
+        return original(self_path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        Path, "open", lambda self, *a, **k: _record(original_open, self, *a, **k)
+    )
+    monkeypatch.setattr(
+        Path, "read_bytes", lambda self, *a, **k: _record(original_read_bytes, self, *a, **k)
+    )
+    monkeypatch.setattr(
+        Path, "read_text", lambda self, *a, **k: _record(original_read_text, self, *a, **k)
+    )
+
+    cases = manage_rag.load_public_cases(
+        project_root / "corpus" / "rag" / "public_cases.jsonl"
+    )
+    guard = manage_rag.gold_isolation_guard(
+        project_root / "corpus" / "gold" / "gold_dev.jsonl",
+        project_root / "corpus" / "gold" / "test_seal.json",
+    )
+    assert cases and guard.families
+    assert any(str(path).endswith("gold_dev.jsonl") for path in touched)
+    assert any(str(path).endswith("test_seal.json") for path in touched)
+    assert not any("gold_test" in str(path) for path in touched)
 
 
 # ---------------------------------------------------------------------------
