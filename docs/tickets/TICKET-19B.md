@@ -2,7 +2,9 @@
 
 ## Statut
 
-Implémenté sur `feature/t19ab-agentic-core` (base `gate/g6-ticket-14`).
+Implémenté sur `feature/t19ab-agentic-core` (resynchronisée sur `main` ;
+base finale `38b642c`, qui inclut le merge T15 — T19B n'utilise ni RAG ni
+Vision).
 Périmètre : plus petit vertical agentique réel (parser existant → agent LLM →
 outils typés existants → finalize → vérificateur/policy existants).
 
@@ -64,6 +66,12 @@ MAX_TOOL_RESULT_CHARS = 12000
   `AgentLimits` exactement appliquées (`max_llm_turns`, `max_tool_calls`,
   `max_urlscan_calls`, `max_agent_seconds`) : prompt, hash et limites
   archivées ne peuvent pas diverger (auditabilité T19E).
+- Les refus typés renvoyés au modèle (budget provider, budget urlscan)
+  dérivent des `AgentLimits` effectivement appliquées : un refus ne peut pas
+  annoncer un budget différent de celui que l'exécuteur applique.
+  `max_urlscan_calls` est structurellement gelé à 1 (`AgentLimits`), donc le
+  schéma `scan_urlscan` (« at most one submission »), le prompt et les
+  messages de refus restent cohérents pour tout run constructible.
 - `trace.jsonl` ne persiste la prose libre du modèle que pour
   `source_profile=fixture` (extrait borné) ; pour `public_corpus` et
   `private_authorized`, seuls `content_chars` et `content_sha256` sont

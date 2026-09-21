@@ -2,7 +2,9 @@
 
 ## Statut
 
-Implémenté sur `feature/t19ab-agentic-core` (base `gate/g6-ticket-14`).
+Implémenté sur `feature/t19ab-agentic-core` (resynchronisée sur `main` ;
+base finale `38b642c`, qui inclut le merge T15 — T19A/B n'utilisent ni RAG
+ni Vision).
 Autorisation opérateur 2026-09-21 : T19A démarre avant G6 PASS ; T15 et T16
 sont développés en parallèle, sans dépendance RAG/Vision.
 
@@ -28,7 +30,10 @@ de performance, aucune conclusion de qualité.
     ni de clé ; le body exact n'est persisté que pour `source_profile=fixture`.
 - Alertes d'état : API key absente ou deadline expirée => zéro requête.
 - Outils exposés : exactement `lookup_virustotal`, `lookup_opencti`,
-  `scan_urlscan`, `finalize_assessment` (`src/agent/tools.py`).
+  `scan_urlscan`, `finalize_assessment` (`src/agent/tools.py`). Les schémas
+  ne portent aucun nombre configurable ; la limite urlscan est
+  structurellement gelée à 1, cohérente avec la description du schéma
+  (« at most one submission »).
 - Prompt agent : `src/agent/prompt.py` — prompt FINAL existant (taxonomie et
   règles métier) + politique agentique explicite en 10 points ; le prompt
   effectif et son SHA-256 sont construits à partir des `AgentLimits`

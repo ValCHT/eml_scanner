@@ -7,10 +7,12 @@ implemented; gate receipts G0–G5 are recorded under `runs/gates/`. TICKET-14
 (G6 harness-validation gate) implements the bounded real dev smoke and its
 exact offline recompute: `src/metrics.py`, `scripts/evaluate.py`,
 `configs/evaluation.yaml`, `configs/experiment_lock.json`, documented in
-`docs/evaluation.md` §8.6. TICKET-19A (native tool calling) and TICKET-19B
-(bounded minimum agentic core) are implemented — their ticket files are
-materialized under `docs/tickets/TICKET-19A.md`/`TICKET-19B.md` and the
-real smokes are archived under `runs/agentic/`. Operator trajectory
+`docs/evaluation.md` §8.6. TICKET-15 (public-only local RAG) is merged in
+PR #16 (phase status `IMPLEMENTED_WAITING_FOR_G6_SYNC` in its ticket; the
+G7-A experimental closure remains later). TICKET-19A (native tool calling)
+and TICKET-19B (bounded minimum agentic core) are implemented — their ticket
+files are materialized under `docs/tickets/TICKET-19A.md`/`TICKET-19B.md`
+and the real smokes are archived under `runs/agentic/`. Operator trajectory
 (2026-09-21, accelerated agentic path): after T14, three parallel
 development tracks — T15 (RAG), T16 (vision/QR), T19A→T19B (agentic chain,
 independent of RAG and Vision) — converge in T19C → T19D → **T19E**. T19E is
@@ -135,7 +137,7 @@ Use one Git branch per implementation gate and one commit per ticket:
 - `gate/g4`: TICKET-06 → 08
 - `gate/g5`: TICKET-09 → 11
 - `gate/g6`: TICKET-12 → 14
-- after T14, three parallel tracks: T15 (RAG), T16 (vision/QR), T19A → T19B (agentic; independent of RAG and Vision; T19A/B implemented and smoke-validated — see `docs/tickets/TICKET-19A.md`, `docs/tickets/TICKET-19B.md`)
+- after T14, three parallel tracks: T15 (RAG; merged in PR #16, G7-A closure later), T16 (vision/QR), T19A → T19B (agentic; independent of RAG and Vision; T19A/B implemented and smoke-validated — see `docs/tickets/TICKET-19A.md`, `docs/tickets/TICKET-19B.md`)
 - planned convergence (T19C–T19E ticket files not yet materialized; graph in `docs/gates.md`): T19C → T19D → T19E
 - T19E: terminal sealed evaluation — first full benchmark with a simultaneous rerun of the fixed V1; only after the experiment is frozen and the holdout is released by the evaluator
 - optional G7-A/G7-B closures may be recorded later; TICKET-17 is optional after T19E
