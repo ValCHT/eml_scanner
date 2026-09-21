@@ -56,6 +56,18 @@ MAX_TOOL_RESULT_CHARS = 12000
 - `finalize_assessment.assessment` est validé exactement comme
   `src.state.Assessment` ; un assessment invalide est refusé et ne devient
   jamais un verdict.
+- Un `finalize_assessment` **sans `tool_call_id` fournisseur** est une
+  erreur de protocole : refus typé (`missing_tool_call_id`), jamais
+  `status=finalized`. La boucle peut continuer si le budget le permet ;
+  sinon le run se termine `incomplete`/REVIEW.
+- Le prompt système effectif et son SHA-256 sont construits à partir des
+  `AgentLimits` exactement appliquées (`max_llm_turns`, `max_tool_calls`,
+  `max_urlscan_calls`, `max_agent_seconds`) : prompt, hash et limites
+  archivées ne peuvent pas diverger (auditabilité T19E).
+- `trace.jsonl` ne persiste la prose libre du modèle que pour
+  `source_profile=fixture` (extrait borné) ; pour `public_corpus` et
+  `private_authorized`, seuls `content_chars` et `content_sha256` sont
+  conservés, conformément à la règle de minimisation des bodies.
 - Vérificateur déterministe V01–V16 existant et policy AUTO/REVIEW/ESCALATE
   existante réutilisés tels quels (aucun second moteur).
 - Sans assessment valide : `status=incomplete`, `action=REVIEW`, verdict nul.

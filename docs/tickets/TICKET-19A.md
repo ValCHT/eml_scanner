@@ -30,12 +30,18 @@ de performance, aucune conclusion de qualité.
 - Outils exposés : exactement `lookup_virustotal`, `lookup_opencti`,
   `scan_urlscan`, `finalize_assessment` (`src/agent/tools.py`).
 - Prompt agent : `src/agent/prompt.py` — prompt FINAL existant (taxonomie et
-  règles métier) + politique agentique explicite en 10 points ; SHA-256 du
-  prompt effectif archivé (`effective_prompt_sha256`).
+  règles métier) + politique agentique explicite en 10 points ; le prompt
+  effectif et son SHA-256 sont construits à partir des `AgentLimits`
+  exactement appliquées par le run (`effective_prompt_sha256`), y compris
+  pour la sonde capacitaire.
 - Smoke réel : `python scripts/smoke_agentic.py capability`.
   - Fixture contrôlée avec observable URL issu du parser
     (`tests/fixtures/malicious_url_redirect.eml` par défaut) ; le prompt
     exige UN appel `lookup_virustotal` pour l'observable connu, puis stop.
+    L'instruction de sonde est une instruction **système** de confiance et
+    l'enveloppe utilisateur contient le registre réel : un premier essai a
+    montré que placer l'instruction dans la charge non fiable la fait (à
+    raison) traiter comme une injection.
   - Le lookup fournisseur n'est PAS exécuté : la sonde mesure uniquement la
     structure `tool_calls` native.
   - Archive : `requested_model`, `returned_model`, nom de l'outil,

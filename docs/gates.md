@@ -4,7 +4,7 @@
 
 ## 5.1 Ordre obligatoire et définition de PASS
 
-`G0 → PASS → G1 → PASS → G2 → PASS → G3 → PASS → G4 → PASS → G5 → PASS → G6 → PASS`. Après G6 (amendement opérateur 2026-09-21, trajectoire accélérée vers l'agentique) : trois pistes de développement **parallèles** — T15 (RAG), T16 (vision/QR), T19A→T19B (chaîne agentique, indépendante de RAG et Vision) — convergent en T19C ; puis T19D → T19E, la **mesure terminale** (premier benchmark complet avec rerun simultané de la V1 fixe). G7-A/G7-B sont des fermetures expérimentales éventuellement plus tardives ; T17 est optionnel après T19E ; T18 est SUPERSEDED BY T19E.
+`G0 → PASS → G1 → PASS → G2 → PASS → G3 → PASS → G4 → PASS → G5 → PASS → G6 → PASS`. Après G6 (amendement opérateur 2026-09-21, trajectoire accélérée vers l'agentique) : trois pistes de développement **parallèles** — T15 (RAG), T16 (vision/QR), T19A→T19B (chaîne agentique, indépendante de RAG et Vision ; TICKET-19A/19B matérialisés et smoke-validés) — convergent en T19C ; puis T19D → T19E, la **mesure terminale** (premier benchmark complet avec rerun simultané de la V1 fixe). G7-A/G7-B sont des fermetures expérimentales éventuellement plus tardives ; T17 est optionnel après T19E ; T18 est SUPERSEDED BY T19E.
 
 Ce dossier est un plan : statut initial de toutes les gates = NOT_STARTED. PASS signifie exécution effective et preuve archivée ; aucun PASS n'est déduit du nombre de fichiers écrits.
 
