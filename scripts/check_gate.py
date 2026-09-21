@@ -87,12 +87,13 @@ GATE_COMMANDS: dict[str, list[str]] = {
          "--from-run", "runs/eval/dev_smoke", "--out", "runs/eval/dev_smoke_recomputed"],
     ],
     # Optional gates (docs/gates.md §5.1): G7-A RAG (TICKET-15), G7-B vision
-    # (TICKET-16), G7-C fine-tuning decision (TICKET-17).
+    # (TICKET-16), G7-C fine-tuning decision (TICKET-17, optional post-T19E:
+    # recomputes the T19E full-dev run, never the small dev smoke).
     "G7-A": [[sys.executable, "-m", "pytest", "tests/test_rag.py", "-q"]],
     "G7-B": [[sys.executable, "-m", "pytest", "tests/test_vision.py", "--live", "-q"]],
     "G7-C": [
         [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
-         "--from-run", "runs/eval/dev_smoke", "--out", "runs/eval/dev_for_ft_decision"],
+         "--from-run", "runs/eval/t19e_dev", "--out", "runs/eval/t19e_for_ft_decision"],
     ],
 }
 
@@ -306,18 +307,20 @@ def _check_g7c_artifact_concordance(
 ) -> list[str]:
     """Concordance of dev counts with archived evaluation artifacts (§5.2).
 
-    The G7-C recompute output must exist; when both the baseline run and the
-    recompute expose a parseable dev record count, they must be equal.
+    The G7-C recompute output of the T19E full-dev run must exist; when both
+    the T19E run and the recompute expose a parseable dev record count, they
+    must be equal. The small dev_smoke is never used as the decision baseline.
     """
 
     problems: list[str] = []
-    ft_dir = ft_dir or PROJECT_ROOT / "runs" / "eval" / "dev_for_ft_decision"
-    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "dev_smoke"
+    ft_dir = ft_dir or PROJECT_ROOT / "runs" / "eval" / "t19e_for_ft_decision"
+    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "t19e_dev"
 
     if not ft_dir.is_dir() or not any(ft_dir.iterdir()):
         return [
-            "missing archived recompute artifact runs/eval/dev_for_ft_decision "
-            "(output of the G7-C evaluate.py --mode recompute command)"
+            "missing archived recompute artifact runs/eval/t19e_for_ft_decision "
+            "(output of the G7-C evaluate.py --mode recompute command; requires "
+            "the T19E full-dev run runs/eval/t19e_dev)"
         ]
 
     base_count = _count_dev_records(baseline_dir)
@@ -325,7 +328,7 @@ def _check_g7c_artifact_concordance(
     if base_count is not None and ft_count is not None and base_count != ft_count:
         problems.append(
             f"dev record count mismatch between archived artifacts: "
-            f"dev_smoke={base_count} vs dev_for_ft_decision={ft_count}"
+            f"t19e_dev={base_count} vs t19e_for_ft_decision={ft_count}"
         )
     return problems
 

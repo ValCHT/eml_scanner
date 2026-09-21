@@ -948,6 +948,17 @@ def test_check_gate_g6_commands_are_smoke_scoped():
     ]
 
 
+def test_check_gate_g7c_targets_t19e_artifacts():
+    """T17/G7-C is post-T19E: it recomputes the T19E full-dev run, not the smoke."""
+    module = _load_check_gate_module()
+    command = module.GATE_COMMANDS["G7-C"][0]
+    assert " ".join(command[1:]) == (
+        "scripts/evaluate.py --mode recompute --from-run runs/eval/t19e_dev "
+        "--out runs/eval/t19e_for_ft_decision"
+    )
+    assert not any("dev_smoke" in " ".join(entry) for entry in module.GATE_COMMANDS["G7-C"])
+
+
 def test_check_gate_g6_record_is_rerunnable_without_manual_cleanup(monkeypatch, tmp_path):
     """PR #15 finding 2: --record must archive preserved runs, never fail on them.
 

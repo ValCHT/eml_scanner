@@ -9,11 +9,11 @@ exact offline recompute: `src/metrics.py`, `scripts/evaluate.py`,
 `configs/evaluation.yaml`, `configs/experiment_lock.json`, documented in
 `docs/evaluation.md` §8.6. Operator trajectory (2026-09-21, accelerated
 agentic path): after T14, three parallel development tracks — T15 (RAG), T16
-(vision/QR), T19A→T19B (agentic chain, independent of RAG and Vision) —
-converge in T19C → T19D → **T19E**. T19E is the first **full benchmark**
-(complete dev, sealed test, Visual-79) and reruns the fixed V1 in the same
-experiment window; `gold_test` is never opened before it. T17 is optional
-after T19E; T18 is SUPERSEDED BY T19E.
+(vision/QR), T19A→T19B (agentic chain, planned; independent of RAG and
+Vision) — converge in T19C → T19D → **T19E**. T19E is the first **full
+benchmark** (complete dev, sealed test, Visual-79) and reruns the fixed V1 in
+the same experiment window; `gold_test` is never opened before it. T17 is
+optional after T19E; T18 is SUPERSEDED BY T19E.
 
 ## Real dev baseline (TICKET-14)
 
@@ -114,7 +114,7 @@ an `sk-*` key. No provider-specific credential mapping exists.
 - `CLAUDE.md` — Claude Code entry point importing `AGENTS.md`.
 - `opencode.jsonc` — project permissions for OpenCode V2; no model is hard-coded.
 - `docs/` — active normative architecture/contracts/gates and domain documents.
-- `docs/tickets/` — TICKET-01 … TICKET-18 plus the T19A–T19E chain (T18 superseded; T19E = terminal sealed evaluation). Execute one ticket per agent session.
+- `docs/tickets/` — TICKET-01 … TICKET-18; the T19A–T19E chain is **planned** (ticket files not yet materialized; graph in `docs/gates.md`). T18 is superseded by T19E. Execute one ticket per agent session.
 - `docs/spec/` — frozen V1.2 audit snapshot, changelog, QA, matrix and research inspections.
 - `prompts/` — runtime INTERNAL / FINAL prompts.
 - `schemas/` — runtime JSON schemas.
@@ -133,7 +133,7 @@ Use one Git branch per implementation gate and one commit per ticket:
 - `gate/g5`: TICKET-09 → 11
 - `gate/g6`: TICKET-12 → 14
 - after T14, three parallel tracks: T15 (RAG), T16 (vision/QR), T19A → T19B (agentic; independent of RAG and Vision)
-- convergence: T19C → T19D → T19E
+- planned convergence (T19A–T19E ticket files not yet materialized; graph in `docs/gates.md`): T19C → T19D → T19E
 - T19E: terminal sealed evaluation — first full benchmark with a simultaneous rerun of the fixed V1; only after the experiment is frozen and the holdout is released by the evaluator
 - optional G7-A/G7-B closures may be recorded later; TICKET-17 is optional after T19E
 - TICKET-18: SUPERSEDED BY T19E (not executed as a standalone ticket)

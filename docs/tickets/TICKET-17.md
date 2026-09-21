@@ -14,7 +14,7 @@ Décider si une expérimentation de spécialisation mérite d’être lancée.
 
 ## PRECONDITIONS / DÉPENDANCES
 
-T19E terminée (benchmark complet + rerun de la V1 fixe archivés) ; décision explicite de mener l'analyse optionnelle (T17 ne conditionne plus aucune étape).
+T19E terminée (benchmark complet + rerun de la V1 fixe archivés ; run dev complet retenu déposé sous `runs/eval/t19e_dev`) ; décision explicite de mener l'analyse optionnelle (T17 ne conditionne plus aucune étape).
 
 ## IN SCOPE
 
@@ -30,7 +30,7 @@ docs/fine_tuning_decision.md; configs/experiment_lock.json. Aucune modification 
 
 ## INTERFACES / CONTRACTS
 
-Document contenant FINE-TUNE=YES|NO|INCONCLUSIVE, nombre évalué, nombre d’erreurs, familles, stabilité sur reruns réels, gain potentiel, faisabilité modèle/proxy et conditions de révision. Les résultats T19E constituent la source principale de l’analyse (chemins définis par T19E) ; le recompute ci-dessous est la vérification d’artefact de la gate G7-C. Si YES : target_failure_modes, why_prompting_is_insufficient, why_retrieval_is_insufficient, why_enrichment_is_insufficient, training_data_needed, estimated_number_of_examples, candidate_models, evaluation_protocol, non_regression_requirements, estimated_training_cost, phase_2_go_no_go_conditions ; exigences détaillées docs/evaluation.md §8.5.
+Document contenant FINE-TUNE=YES|NO|INCONCLUSIVE, nombre évalué, nombre d’erreurs, familles, stabilité sur reruns réels, gain potentiel, faisabilité modèle/proxy et conditions de révision. Les résultats T19E analysés proviennent du run dev complet retenu `runs/eval/t19e_dev` (recompute `runs/eval/t19e_dev_recomputed`) ; le recompute de préparation écrit `runs/eval/t19e_for_ft_decision` et constitue la vérification d’artefact de la gate G7-C. Si YES : target_failure_modes, why_prompting_is_insufficient, why_retrieval_is_insufficient, why_enrichment_is_insufficient, training_data_needed, estimated_number_of_examples, candidate_models, evaluation_protocol, non_regression_requirements, estimated_training_cost, phase_2_go_no_go_conditions ; exigences détaillées docs/evaluation.md §8.5.
 
 ## IMPLEMENTATION REQUIREMENTS
 
@@ -43,8 +43,7 @@ Comparer les comptes à metrics.json ; chaque erreur citée possède un sample_i
 ## VALIDATION COMMANDS
 
 ```bash
-python scripts/check_gate.py G6
-python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke --out runs/eval/dev_for_ft_decision
+python scripts/evaluate.py --mode recompute --from-run runs/eval/t19e_dev --out runs/eval/t19e_for_ft_decision
 python scripts/check_gate.py G7-C --record
 ```
 
