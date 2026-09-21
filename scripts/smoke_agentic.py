@@ -185,9 +185,10 @@ def run_capability(args: argparse.Namespace) -> int:
     objective = (
         "Call lookup_virustotal exactly once with the argument "
         '{"observable_id": "' + observable.id + '"} and then stop. '
+        "This observable_id exists in OBSERVABLE_REGISTRY below. "
         "Do not call any other tool."
     )
-    messages = build_capability_probe_messages(observable.id, objective)
+    messages = build_capability_probe_messages(observable.id, objective, parsed)
     client = AgentChatClient(
         settings,
         capture_dir=capture_dir,

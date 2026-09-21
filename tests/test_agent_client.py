@@ -119,6 +119,29 @@ def test_effective_agent_prompt_contains_the_ten_rules_and_four_tools() -> None:
         assert fragment in prompt
 
 
+def test_capability_probe_instruction_is_trusted_and_registry_backed(
+    project_root: Path,
+) -> None:
+    from src.agent.prompt import build_capability_probe_messages
+    from src.parsing import ParseLimits, ParsedEmail, parse_email
+
+    parsed = parse_email(
+        project_root / "tests" / "fixtures" / "malicious_url_redirect.eml",
+        ParseLimits(),
+    )
+    assert isinstance(parsed, ParsedEmail)
+    observable = next(o for o in parsed.observables if o.type == "url")
+    objective = (
+        "Call lookup_virustotal exactly once with the argument "
+        '{"observable_id": "' + observable.id + '"} and then stop.'
+    )
+    messages = build_capability_probe_messages(observable.id, objective, parsed)
+    assert "CAPABILITY PROBE" in messages[0]["content"]
+    assert observable.id in messages[0]["content"]
+    envelope = json.loads(messages[1]["content"])
+    assert observable.id in envelope["OBSERVABLE_REGISTRY"]
+
+
 # ---------------------------------------------------------------------------
 # Native tool_calls parsing
 # ---------------------------------------------------------------------------

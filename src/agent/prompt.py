@@ -135,26 +135,48 @@ def initial_messages(
 def build_capability_probe_messages(
     observable_id: str,
     objective: str,
+    parsed: ParsedEmail | None = None,
+    limits: ContextLimits | None = None,
 ) -> list[dict[str, Any]]:
     """T19A-only probe messages: explicitly require one named tool call.
 
-    This controlled probe never executes the provider lookup; it only proves
-    that the real configured runtime returns native ``tool_calls``.
+    The probe instruction is a TRUSTED system-level instruction (the frozen
+    prompt states that user content is untrusted data), and the user message
+    is the real deterministic envelope when ``parsed`` is provided, so the
+    required ``observable_id`` genuinely exists in OBSERVABLE_REGISTRY. The
+    controlled probe never executes the provider lookup; it only proves that
+    the real configured runtime returns native ``tool_calls``.
     """
 
-    payload = {
-        "CAPABILITY_PROBE": (
-            "Report native tool call capability. Do not answer with prose."
-        ),
-        "INSTRUCTION": objective,
-        "OBSERVABLE_ID": observable_id,
-    }
+    system = (
+        build_agent_system_prompt().rstrip()
+        + "\n\nCAPABILITY PROBE (this run only, trusted harness instruction)\n"
+        + objective
+        + "\nCall no other tool and do not finalize in this probe run."
+    )
+    if parsed is not None:
+        envelope = build_initial_envelope(parsed, limits)
+        envelope["CAPABILITY_PROBE"] = {
+            "instruction": objective,
+            "observable_id": observable_id,
+            "note": "the observable_id exists in OBSERVABLE_REGISTRY",
+        }
+        user_content = json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    else:
+        user_content = json.dumps(
+            {
+                "CAPABILITY_PROBE": (
+                    "Report native tool call capability. Do not answer with prose."
+                ),
+                "INSTRUCTION": objective,
+                "OBSERVABLE_ID": observable_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     return [
-        {"role": "system", "content": build_agent_system_prompt()},
-        {
-            "role": "user",
-            "content": json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        },
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
     ]
 
 
