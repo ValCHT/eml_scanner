@@ -643,6 +643,10 @@ def run_nominal_pipeline(
     *,
     tools_override: ToolsConfig | None = None,
     rag_adapter: RagAdapter | None = None,
+    rag_exclusions: set[str] | None = None,
+    current_duplicate_group: str | None = None,
+    current_family_group: str | None = None,
+    current_campaign_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run the frozen sequential StateGraph for one email.
 
@@ -672,6 +676,10 @@ def run_nominal_pipeline(
         started_monotonic=started,
         tools_override=tools_override,
         rag=rag_adapter,
+        rag_exclusions=rag_exclusions,
+        current_duplicate_group=current_duplicate_group,
+        current_family_group=current_family_group,
+        current_campaign_id=current_campaign_id,
     )
     graph = build_graph(services)
     final_state = graph.invoke(state, config={"configurable": {"thread_id": state.run_id}})
@@ -1913,6 +1921,26 @@ def run_live(
             profile = derive_source_profile(gold_row, evaluation_config)
             email_file = Path(temp_dir.name) / f"{index:04d}_{safe_name}.eml"
             email_file.write_bytes(verified_bytes[sample_id])
+            rag_identity_kwargs: dict[str, Any] = {}
+            if variant == RAG_VARIANT:
+                current_family_group = str(gold_row.get("family_group") or "").strip() or None
+                current_duplicate_group = str(gold_row.get("duplicate_group") or "").strip() or None
+                current_campaign_id = str(gold_row.get("campaign_id") or "").strip() or None
+                rag_exclusions = {
+                    value
+                    for value in (
+                        current_family_group,
+                        current_duplicate_group,
+                        current_campaign_id,
+                    )
+                    if value is not None
+                }
+                rag_identity_kwargs = {
+                    "rag_exclusions": rag_exclusions,
+                    "current_duplicate_group": current_duplicate_group,
+                    "current_family_group": current_family_group,
+                    "current_campaign_id": current_campaign_id,
+                }
             try:
                 report, final_state = run_nominal_pipeline(
                     settings,
@@ -1920,6 +1948,7 @@ def run_live(
                     profile,
                     tools_override=tools_override,
                     rag_adapter=rag_adapter,
+                    **rag_identity_kwargs,
                 )
             except Exception as error:
                 # A pipeline exception is an implementation/infrastructure
