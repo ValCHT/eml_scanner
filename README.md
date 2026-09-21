@@ -2,12 +2,40 @@
 
 Implementation repository prepared from the frozen V1.2 specification dated 18/09/2026.
 
-**Implementation status (updated 19/09/2026):** TICKET-01 through TICKET-11 are
-implemented in the working tree. Gate receipts G0–G4 are recorded under
-`runs/gates/` (G4 was re-recorded live after the architecture-mandated
-LangGraph dependency alignment); the G5 closing receipt is produced by
-TICKET-11 (`python scripts/check_gate.py G5 --record`). TICKET-12 (G6) must
-not start before the G5 receipt and the human review of the diff.
+**Implementation status (updated 21/09/2026):** TICKET-01 through TICKET-13 are
+implemented; gate receipts G0–G5 are recorded under `runs/gates/`. TICKET-14
+(G6 closure) implements the real dev baseline evaluation:
+`src/metrics.py`, `scripts/evaluate.py`, `configs/evaluation.yaml`,
+`configs/experiment_lock.json` with the workflow documented in
+`docs/evaluation.md` §8.6 (frozen A/B/C control on COMPLEX dev emails,
+exact offline recompute, gold_test never opened during development).
+
+## Real dev baseline (TICKET-14)
+
+```bash
+# real dev baseline on gold_dev (requires LITELLM_* runtime configuration)
+python scripts/evaluate.py --split dev --mode live --variant baseline \
+  --out runs/eval/dev_baseline
+
+# exact offline recompute from the archived authentic artifacts (no network)
+python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_baseline \
+  --out runs/eval/dev_recomputed
+
+# G6 receipt
+python scripts/check_gate.py G6 --record
+```
+
+The evaluation validates every GoldRecord (closed schema, no content keys,
+`raw_path` resolved under `corpus/raw/**`, recomputed SHA-256) BEFORE any
+LLM call, runs the frozen BASELINE V0 pipeline with the official
+`Qwen/Qwen3.8-27B` runtime, executes the A/B/C control on the same COMPLEX
+emails (A = shared INTERNAL medium, B = XHIGH internal-only ablation
+control, C = nominal FINAL with the real external bundle), and archives
+exactly one evaluation row per `sample_id` plus metrics/manifest/matrix.
+Provider failures and abstentions stay in every denominator; unknown costs
+are never turned into zero. Development decisions use `gold_dev` only —
+`gold_test.jsonl` is an internal POC validation partition that this
+workflow refuses to open.
 
 ## Running the pipeline
 

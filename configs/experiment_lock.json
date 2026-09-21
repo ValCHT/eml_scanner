@@ -1,0 +1,71 @@
+{
+  "created_at_utc": "2026-09-20T23:20:00Z",
+  "experiment": "dev_baseline_v0",
+  "gate": "G6",
+  "gate_thresholds": {
+    "min_confidence": 0.9,
+    "min_margin": 0.2,
+    "rule_order": "R1,R2,R3"
+  },
+  "gold_dev_fingerprint": {
+    "family_count": 83,
+    "label_support": {
+      "fraude": 15,
+      "legitime": 20,
+      "menace": 0,
+      "phishing": 25,
+      "spam": 15,
+      "spear_phishing": 8
+    },
+    "record_count": 83
+  },
+  "hashes": {
+    "config_gate": "d41cb9f4d14c72ceddd7cbaf0d4352d2cddd71beb0a3405a8fed8ee59c02a9ae",
+    "config_policy": "e0bf22da81f416667191755138fe243088005b2f2bd1eac22409be6ef1285aee",
+    "config_tools": "59a6867e03de960bedf75da5945692bf6372fb7073efa0b7765107907514b564",
+    "evaluation_config": "d2fa480d52e87f078065573dc62ee67f12bf39114a37c3a1886275d570ad6074",
+    "gold_dev": "74f364e2a6624047b20adfa7f08ab67f8bff9a2ec71edb77dc4bb3c3947dd5da",
+    "prompts_final": "cfc9ba52a8426e524223cbfbfda53b874f2c4beac5379688bbcb772f6e14f6f7",
+    "prompts_internal": "60dc6ee00e0eabfd063638af7f62f9aeb00a919305277d99b64820809469b9ae",
+    "requirements_lock": "d1ae5eade83d3994730beb786ca15b048396c1675b0a3fbd76344c6de8e2a230",
+    "schema_assessment": "eeb646dcff9c1514c7e01cefcd900437bc372ecb9696c087b4878692c37021a2",
+    "schema_triage_report": "d5e176fae7837399872bf883726af5c86430b1be665496a8e16f153c233e5866"
+  },
+  "lock_version": 1,
+  "pricing_snapshot": {
+    "cache_read_usd_per_1m": 0.05,
+    "currency": "USD",
+    "input_usd_per_1m": 0.25,
+    "model": "Qwen/Qwen3.8-27B",
+    "observed_on": "2026-09-19",
+    "output_usd_per_1m": 2.2
+  },
+  "retry_policy": {
+    "final_max_output_tokens": 16384,
+    "final_phase_seconds": 90,
+    "internal_max_output_tokens": 8192,
+    "internal_phase_seconds": 60,
+    "max_email_seconds": 240,
+    "max_llm_attempts": 2
+  },
+  "rules": [
+    "measure BASELINE V0 exactly (gate 0.90/0.20 R1-R3, prompts V1, frozen policy) — no tuning before the baseline is recorded",
+    "no RAG, no vision, no fine-tuning, no alternate model, no selective retry",
+    "provider failures and abstentions stay in every denominator",
+    "unknown cost is never turned into zero; provider-billed and estimated values are preserved separately",
+    "A/B/C audit invariants (docs/contracts.md §2.6.1) are validated before any B−A / C−B delta is published",
+    "no push, no merge; changes left unpushed for human review"
+  ],
+  "runtime": {
+    "chat_url": "https://api.akashml.com/v1/chat/completions",
+    "model": "Qwen/Qwen3.8-27B",
+    "note": "openai/gpt-oss-20b is limited to authorized technical smoke tests and never contributes to official Gold metrics",
+    "provider": "AkashML OpenAI-compatible endpoint",
+    "reasoning": {
+      "final": "xhigh",
+      "internal": "medium"
+    }
+  },
+  "split_policy": "dev only for TICKET-14; gold_test.jsonl is an internal POC validation partition never opened during development; the terminal test evaluation belongs to the later authorized ticket",
+  "ticket": "TICKET-14"
+}

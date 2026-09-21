@@ -1,0 +1,859 @@
+"""TICKET-14 evaluation workflow tests (offline, deterministic).
+
+These tests verify the CONTRACT of the dev baseline workflow — gold input
+validation, gold_test refusal, A/B/C audit invalidation through the row
+plumbing, frozen-input lock drift, and exact offline recompute — using
+synthetic small artifacts labeled as test fixtures. No provider response is
+simulated and no benchmark result is claimed: the network is refused for
+the whole module (autouse fixture).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.g6
+
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+PROJECT_ROOT = SCRIPTS_DIR.parent
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evaluation contract tests never touch the network."""
+
+    def _deny(*args: object, **kwargs: object) -> None:
+        pytest.fail("network access attempted in an evaluation workflow test")
+
+    import socket
+
+    monkeypatch.setattr(socket, "socket", _deny)
+    monkeypatch.setattr(socket, "create_connection", _deny)
+
+
+def _load_evaluate_module():
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("evaluate_script", SCRIPTS_DIR / "evaluate.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # Register before exec: pydantic resolves forward annotations through
+    # sys.modules[module.__name__] when rebuilding strict models.
+    sys.modules["evaluate_script"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def evaluate_script():
+    return _load_evaluate_module()
+
+
+# ---------------------------------------------------------------------------
+# gold_test is NEVER opened by the TICKET-14 dev workflow
+# ---------------------------------------------------------------------------
+
+
+def test_gold_test_split_refused(evaluate_script):
+    config = evaluate_script.load_evaluation_config(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    with pytest.raises(evaluate_script.GoldTestAccessRefused):
+        evaluate_script.gold_path_for_split(config, "test")
+    # The refusal happens BEFORE any file access: the returned path for dev
+    # is the dev partition only.
+    path = evaluate_script.gold_path_for_split(config, "dev")
+    assert path.name == "gold_dev.jsonl"
+    assert path.name != "gold_test.jsonl"
+
+
+def test_dev_loader_never_touches_gold_test_bytes(evaluate_script, monkeypatch):
+    """Track every file the dev loading/validation reads; gold_test never appears.
+
+    Path.open / read_bytes / read_text are wrapped (still calling the
+    originals) so any attempted access to gold_test.jsonl would be recorded.
+    """
+
+    touched: list[str] = []
+
+    original_open = Path.open
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+
+    def _record(original, self_path: Path, *args: object, **kwargs: object):
+        touched.append(str(self_path))
+        return original(self_path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        Path, "open", lambda self, *a, **k: _record(original_open, self, *a, **k)
+    )
+    monkeypatch.setattr(
+        Path, "read_bytes", lambda self, *a, **k: _record(original_read_bytes, self, *a, **k)
+    )
+    monkeypatch.setattr(
+        Path, "read_text", lambda self, *a, **k: _record(original_read_text, self, *a, **k)
+    )
+
+    config = evaluate_script.load_evaluation_config(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    rows, path = evaluate_script.load_gold_records(config, "dev")
+    evaluate_script.validate_gold_raw_files(rows)
+
+    assert any(str(candidate).endswith("gold_dev.jsonl") for candidate in touched)
+    assert not any("gold_test" in str(candidate) for candidate in touched)
+
+
+def test_split_test_cli_refused(evaluate_script, tmp_path):
+    args = evaluate_script.build_parser().parse_args(
+        ["--split", "test", "--mode", "live", "--variant", "baseline",
+         "--out", str(tmp_path / "out")]
+    )
+    config = evaluate_script.load_evaluation_config(PROJECT_ROOT / "configs" / "evaluation.yaml")
+    result = evaluate_script.run_live(args, config, {})
+    assert result == evaluate_script.EXIT_BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Gold validation: forbidden content / missing raw / hash mismatch
+# ---------------------------------------------------------------------------
+
+
+def _write_gold(tmp_root: Path, rows: list[dict]) -> Path:
+    gold = tmp_root / "corpus" / "gold" / "gold_dev.jsonl"
+    gold.parent.mkdir(parents=True, exist_ok=True)
+    gold.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    return gold
+
+
+def _valid_row(sha: str, raw_path: str = "corpus/raw/x/m.eml") -> dict:
+    return {
+        "sample_id": "sample_ok",
+        "raw_sha256": sha,
+        "email_sha256": sha,
+        "raw_path": raw_path,
+        "source_dataset": "unit_test",
+        "input_format": "rfc822",
+        "normalized_label": "phishing",
+        "label_status": "confirmed",
+        "reviewer_ref": "astra_gold_ai_v1",
+        "label_rationale": "unit test row",
+        "public_source": True,
+        "is_synthetic": None,
+        "campaign_id": None,
+        "duplicate_group": "g",
+        "family_group": "g",
+        "tags": ["unit_test"],
+        "split": "dev",
+    }
+
+
+def _patched_config(evaluate_script, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = evaluate_script.EvaluationConfig(
+        version=1,
+        label_order=list(evaluate_script.LABELS),
+        split_files={"dev": "corpus/gold/gold_dev.jsonl"},
+        split_policy={},
+        source_profile_mapping={"public_source_true": "public_corpus",
+                                "public_source_false": "private_authorized"},
+        pricing_snapshot=evaluate_script.PRICING_SNAPSHOT,
+        latency={},
+        abc={"variant": "baseline"},
+        published_limitations=[],
+    )
+    return config
+
+
+def test_gold_with_forbidden_content_rejected(evaluate_script, monkeypatch, tmp_path):
+    """A forbidden content key (even deeply nested) makes the loader fail."""
+
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = _make_cfg(evaluate_script, tmp_path)
+    row = _valid_row("a" * 64)
+    row["body"] = {"hidden": "embedded content"}  # forbidden key, non-empty
+    _write_gold(tmp_path, [row])
+    with pytest.raises(evaluate_script.build_corpus.GoldValidationError):
+        evaluate_script.load_gold_records(config, "dev")
+
+
+def test_gold_with_null_forbidden_content_key_rejected(evaluate_script, monkeypatch, tmp_path):
+    """The forbidden key is refused even when its value is null/empty."""
+
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = _make_cfg(evaluate_script, tmp_path)
+    row = _valid_row("a" * 64)
+    row["raw_email"] = None
+    _write_gold(tmp_path, [row])
+    with pytest.raises(evaluate_script.build_corpus.GoldValidationError):
+        evaluate_script.load_gold_records(config, "dev")
+
+
+def test_raw_file_absent_rejected_before_provider_call(evaluate_script, monkeypatch, tmp_path):
+    """A missing raw file fails the pre-call validation (loud, no call)."""
+
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = _make_cfg(evaluate_script, tmp_path)
+    _write_gold(tmp_path, [_valid_row("a" * 64)])  # no corpus/raw/x/m.eml written
+    rows, _path = evaluate_script.load_gold_records(config, "dev")
+
+    def _fail_pipeline(*args: object, **kwargs: object) -> None:
+        pytest.fail("the pipeline must never run when raw validation fails")
+
+    monkeypatch.setattr(evaluate_script, "run_nominal_pipeline", _fail_pipeline)
+    failures = evaluate_script.validate_gold_raw_files(rows)[1]
+    assert failures, "missing raw file must be a loud validation failure"
+
+
+def test_raw_hash_mismatch_rejected_before_provider_call(evaluate_script, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = _make_cfg(evaluate_script, tmp_path)
+    raw = tmp_path / "corpus" / "raw" / "x" / "m.eml"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"From: a@example.com\r\n\r\nhello\r\n")
+    actual_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+    wrong_sha = "b" * 64
+    assert actual_sha != wrong_sha
+    _write_gold(tmp_path, [_valid_row(wrong_sha)])
+    rows, _path = evaluate_script.load_gold_records(config, "dev")
+
+    def _fail_pipeline(*args: object, **kwargs: object) -> None:
+        pytest.fail("the pipeline must never run when raw_sha256 mismatches")
+
+    monkeypatch.setattr(evaluate_script, "run_nominal_pipeline", _fail_pipeline)
+    failures = evaluate_script.validate_gold_raw_files(rows)[1]
+    assert any("raw_sha256 mismatch" in failure for failure in failures)
+
+
+def test_raw_path_escaping_corpus_raw_rejected(evaluate_script, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = _make_cfg(evaluate_script, tmp_path)
+    row = _valid_row("a" * 64, raw_path="corpus/raw/../outside/m.eml")
+    _write_gold(tmp_path, [row])
+    rows, _path = evaluate_script.load_gold_records(config, "dev")
+    failures = evaluate_script.validate_gold_raw_files(rows)[1]
+    assert any("escapes" in failure for failure in failures)
+
+
+def test_valid_gold_passes_full_validation(evaluate_script, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    config = _make_cfg(evaluate_script, tmp_path)
+    raw = tmp_path / "corpus" / "raw" / "x" / "m.eml"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"From: a@example.com\r\nSubject: ok\r\n\r\nbody\r\n")
+    sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+    _write_gold(tmp_path, [_valid_row(sha)])
+    rows, _path = evaluate_script.load_gold_records(config, "dev")
+    verified, failures = evaluate_script.validate_gold_raw_files(rows)
+    assert not failures
+    assert verified["sample_ok"] == raw.read_bytes()
+
+
+def _make_cfg(evaluate_script, tmp_path: Path):
+    from src.metrics import PRICING_SNAPSHOT
+
+    return evaluate_script.EvaluationConfig(
+        version=1,
+        label_order=list(evaluate_script.LABELS),
+        split_files={"dev": "corpus/gold/gold_dev.jsonl"},
+        split_policy={},
+        source_profile_mapping={
+            "public_source_true": "public_corpus",
+            "public_source_false": "private_authorized",
+        },
+        pricing_snapshot=PRICING_SNAPSHOT,
+        latency={},
+        abc={"variant": "baseline"},
+        published_limitations=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# A/B/C audit invalidation through the ROW plumbing
+# ---------------------------------------------------------------------------
+
+
+def _control_row(
+    sample_id: str,
+    sha: str,
+    *,
+    b_audits: list[dict],
+    c_audits: list[dict],
+    bundle_external: int = 0,
+    gate: str = "complex",
+    parse_ok: bool = True,
+) -> dict:
+    """Synthetic archived row shaped exactly like the live runner output."""
+
+    b_payload = {
+        "attempted": parse_ok,
+        "reason_not_attempted": None if parse_ok else "parsed_none_nominal_parse_failed",
+        "verdict": "phishing" if parse_ok else None,
+        "confidence": 0.9 if parse_ok else None,
+        "probabilities": None,
+        "call": {"phase": "final", "status": "ok", "attempts": 1,
+                 "input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5,
+                 "reasoning_tokens": 2, "cost_usd": None, "cost_status": "unknown"},
+        "latency_ms": 1200.0 if parse_ok else None,
+        "capture_dir": "responses_control_b",
+        "cost_usd": 0.0001 if parse_ok else None,
+        "cost_status": "estimated" if parse_ok else "unknown",
+    }
+    return {
+        "sample_id": sample_id,
+        "split": "dev",
+        "variant": "baseline",
+        "source_dataset": "unit_test",
+        "family_group": sample_id,
+        "raw_path": "corpus/raw/x/m.eml",
+        "raw_sha256": sha,
+        "input_format": "rfc822",
+        "public_source": True,
+        "label": "phishing",
+        "run_id": "run_" + sample_id,
+        "report_dir": "runs/synthetic/" + sample_id,
+        "report_path": "runs/synthetic/" + sample_id + "/report.json",
+        "report_sha256": "0" * 64,
+        "started_at": "2026-09-20T00:00:00Z",
+        "runtime_config_sha256": "1" * 64,
+        "gate_decision": gate,
+        "gate_reasons": [],
+        "final_source": "final_llm" if parse_ok else "none",
+        "run_status": "ok" if parse_ok else "error",
+        "predicted": "phishing" if parse_ok else None,
+        "predicted_valid": bool(parse_ok),
+        "final_confidence": 0.95 if parse_ok else None,
+        "final_probabilities": None,
+        "internal_verdict": "phishing",
+        "internal_confidence": 0.9,
+        "verdict_changed": False,
+        "recommended_action": "REVIEW",
+        "policy_reasons": [],
+        "timings": {"total_ms": 1000.0, "internal_llm_ms": 300.0, "final_llm_ms": 500.0},
+        "llm_calls": [
+            {"phase": "internal", "status": "ok", "attempts": 1,
+             "first_attempt_schema_valid": True, "input_tokens": 10,
+             "cached_input_tokens": 0, "output_tokens": 5, "reasoning_tokens": 2,
+             "cost_usd": None, "cost_status": "unknown"},
+            {"phase": "final", "status": "ok", "attempts": 1,
+             "first_attempt_schema_valid": True, "input_tokens": 20,
+             "cached_input_tokens": 0, "output_tokens": 8, "reasoning_tokens": 3,
+             "cost_usd": None, "cost_status": "unknown"},
+        ],
+        "control_b": b_payload,
+        "internal_assessment_sha256": "2" * 64,
+        "untrusted_email_sha256_b": "3" * 64,
+        "untrusted_email_sha256_c": "3" * 64,
+        "tool_status_digest_b": "4" * 64,
+        "tool_status_digest_c": "5" * 64,
+        "evidence_provenance_counts": {"INTERNE": 4, "OSINT": bundle_external, "SANDBOX": 0},
+        "bundle_external_evidence": bundle_external,
+        "extras": {"rejected_final_candidates": 0, "proposals_total": 0,
+                   "proposals_invalid": 0, "refusals": 0},
+        "abc_audit": {
+            "applicable": gate == "complex",
+            "valid": False,
+            "problems": [],
+            "no_new_external_evidence": False,
+            "b_attempt_audits": b_audits,
+            "c_attempt_audits": c_audits,
+        },
+        "notes": [] if parse_ok else ["parse_failed_technical_failure_stays_in_denominator"],
+    }
+
+
+def _b_audit(**overrides: object) -> dict:
+    audit = {
+        "phase": "final", "external_evidence_count_sent": 0,
+        "internal_evidence_count_sent": 4, "evidence_count_sent": 4,
+        "rag_case_count_sent": 0, "visual_count_sent": 0,
+        "tool_status_digest": "d" * 64,
+    }
+    audit.update(overrides)
+    return audit
+
+
+def _c_audit(**overrides: object) -> dict:
+    audit = {
+        "phase": "final", "external_evidence_count_sent": 0,
+        "internal_evidence_count_sent": 4, "evidence_count_sent": 4,
+        "rag_case_count_sent": 0, "visual_count_sent": 0,
+        "tool_status_digest": "e" * 64,
+    }
+    audit.update(overrides)
+    return audit
+
+
+def _finish_abc_audit(row: dict) -> dict:
+    """Recompute the row audit exactly like the runner (post-hoc validation)."""
+
+    from src.metrics import validate_control_audits
+
+    valid, problems, no_new = validate_control_audits(
+        row["abc_audit"]["b_attempt_audits"],
+        row["abc_audit"]["c_attempt_audits"],
+        row["bundle_external_evidence"],
+    )
+    row["abc_audit"]["valid"] = valid
+    row["abc_audit"]["problems"] = problems
+    row["abc_audit"]["no_new_external_evidence"] = no_new
+    return row
+
+
+def test_abc_row_with_external_evidence_in_b_invalidates(evaluate_script):
+    from src.metrics import abc_block
+
+    row = _finish_abc_audit(_control_row(
+        "s1", "a" * 64,
+        b_audits=[_b_audit(external_evidence_count_sent=2)],
+        c_audits=[_c_audit(external_evidence_count_sent=2)],
+        bundle_external=2,
+    ))
+    assert not row["abc_audit"]["valid"]
+    controls = evaluate_script.controls_from_rows([row])
+    report = {
+        "sample_id": "s1", "email_sha256": row["raw_sha256"], "gate_decision": "complex",
+        "internal_verdict": "phishing", "final_verdict": "phishing", "final_source": "final_llm",
+        "run_status": "ok", "recommended_action": "REVIEW", "llm_calls": [],
+        "timings": {"total_ms": 1000.0}, "evidence": [], "unsupported_claims": [],
+    }
+    abc = abc_block(["phishing"], ["phishing"], ["complex"], [report], controls)
+    assert abc["audit"]["valid"] is False
+    assert abc["audit"]["problems"], "B containing external evidence must invalidate"
+
+
+def test_abc_row_c_dropping_admissible_evidence_invalidates(evaluate_script):
+    from src.metrics import abc_block
+
+    row = _finish_abc_audit(_control_row(
+        "s1", "a" * 64,
+        b_audits=[_b_audit()],
+        c_audits=[_c_audit(external_evidence_count_sent=0)],
+        bundle_external=4,  # the bundle produced external evidence...
+    ))
+    assert not row["abc_audit"]["valid"]
+    controls = evaluate_script.controls_from_rows([row])
+    report = {
+        "sample_id": "s1", "email_sha256": row["raw_sha256"], "gate_decision": "complex",
+        "internal_verdict": "phishing", "final_verdict": "phishing", "final_source": "final_llm",
+        "run_status": "ok", "recommended_action": "REVIEW", "llm_calls": [],
+        "timings": {"total_ms": 1000.0}, "evidence": [], "unsupported_claims": [],
+    }
+    abc = abc_block(["phishing"], ["phishing"], ["complex"], [report], controls)
+    assert abc["audit"]["valid"] is False
+    assert any("dropped admissible evidence" in problem for problem in abc["audit"]["problems"])
+
+
+def test_abc_row_valid_without_external_bundle(evaluate_script):
+    from src.metrics import abc_block
+
+    row = _finish_abc_audit(_control_row(
+        "s1", "a" * 64,
+        b_audits=[_b_audit()],
+        c_audits=[_c_audit(external_evidence_count_sent=0)],
+        bundle_external=0,
+    ))
+    assert row["abc_audit"]["valid"]
+    assert row["abc_audit"]["no_new_external_evidence"] is True
+    controls = evaluate_script.controls_from_rows([row])
+    report = {
+        "sample_id": "s1", "email_sha256": row["raw_sha256"], "gate_decision": "complex",
+        "internal_verdict": "phishing", "final_verdict": "phishing", "final_source": "final_llm",
+        "run_status": "ok", "recommended_action": "REVIEW", "llm_calls": [],
+        "timings": {"total_ms": 1000.0}, "evidence": [], "unsupported_claims": [],
+    }
+    abc = abc_block(["phishing"], ["phishing"], ["complex"], [report], controls)
+    assert abc["audit"]["valid"] is True
+    assert abc["audit"]["samples_no_new_external_evidence"] == 1
+    assert abc["comparable_n"] == 1
+
+
+def test_abc_row_parse_failure_excluded_technical(evaluate_script):
+    from src.metrics import abc_block
+
+    row = _control_row(
+        "s1", "a" * 64,
+        b_audits=[], c_audits=[], gate="complex", parse_ok=False,
+    )
+    row["notes"] = ["parse_failed_technical_failure_stays_in_denominator"]
+    controls = evaluate_script.controls_from_rows([row])
+    report = {
+        "sample_id": "s1", "email_sha256": row["raw_sha256"], "gate_decision": "complex",
+        "internal_verdict": None, "final_verdict": None, "final_source": "none",
+        "run_status": "error", "recommended_action": "REVIEW", "llm_calls": [],
+        "timings": {"total_ms": 1000.0}, "evidence": [], "unsupported_claims": [],
+    }
+    abc = abc_block(["phishing"], [None], ["complex"], [report], controls)
+    assert abc["audit"]["valid"] is True  # technical exclusion, not an audit failure
+    assert abc["excluded_technical_n"] == 1
+    assert abc["comparable_n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Experiment lock
+# ---------------------------------------------------------------------------
+
+
+def test_lock_hash_drift_fails(evaluate_script):
+    lock = evaluate_script.load_experiment_lock(PROJECT_ROOT / "configs" / "experiment_lock.json")
+    assert evaluate_script.verify_experiment_lock(lock) == []
+    tampered = json.loads(json.dumps(lock))
+    tampered["hashes"]["config_gate"] = "0" * 64
+    problems = evaluate_script.verify_experiment_lock(tampered)
+    assert any("config_gate" in problem for problem in problems)
+
+
+def test_lock_model_drift_detected(evaluate_script):
+    lock = evaluate_script.load_experiment_lock(PROJECT_ROOT / "configs" / "experiment_lock.json")
+    tampered = dict(lock)
+    tampered["runtime"] = {**lock["runtime"], "model": "Other/Model"}
+    problems = evaluate_script.verify_experiment_lock(tampered)
+    assert any("model" in problem for problem in problems)
+
+
+def test_evaluation_config_strict(evaluate_script, tmp_path):
+    config_text = (PROJECT_ROOT / "configs" / "evaluation.yaml").read_text(encoding="utf-8")
+    bad = tmp_path / "evaluation.yaml"
+    bad.write_text(config_text + "\nunknown_key: true\n", encoding="utf-8")
+    with pytest.raises(Exception):
+        evaluate_script.load_evaluation_config(bad)
+    good = tmp_path / "evaluation_ok.yaml"
+    good.write_text(config_text, encoding="utf-8")
+    config = evaluate_script.load_evaluation_config(good)
+    assert tuple(config.label_order) == evaluate_script.LABELS
+
+
+# ---------------------------------------------------------------------------
+# Recompute mode: exact equality with the captured (archived) results
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_report(sample_id: str, sha: str, *, gate: str, final_verdict: str | None,
+                      internal_verdict: str | None, action: str) -> dict:
+    llm_calls = [
+        {"phase": "internal", "status": "ok" if internal_verdict else "error", "attempts": 1,
+         "requested_model": "Qwen/Qwen3.8-27B", "returned_model": "Qwen/Qwen3.8-27B",
+         "reasoning_effort": "medium", "first_attempt_schema_valid": bool(internal_verdict),
+         "input_tokens": 1500, "cached_input_tokens": 100, "output_tokens": 400,
+         "reasoning_tokens": 150, "cost_usd": None, "cost_status": "unknown",
+         "response_refs": [], "request_sha256": "r" * 64},
+    ]
+    if gate == "complex":
+        llm_calls.append(
+            {"phase": "final", "status": "ok" if final_verdict else "error", "attempts": 1,
+             "requested_model": "Qwen/Qwen3.8-27B", "returned_model": "Qwen/Qwen3.8-27B",
+             "reasoning_effort": "xhigh", "first_attempt_schema_valid": bool(final_verdict),
+             "input_tokens": 2500, "cached_input_tokens": 0, "output_tokens": 600,
+             "reasoning_tokens": 200, "cost_usd": None, "cost_status": "unknown",
+             "response_refs": [], "request_sha256": "f" * 64},
+        )
+    timings = {
+        "parse_ms": 2.0, "internal_llm_ms": 1000.0, "gate_ms": 1.0,
+        "vt_ms": 1.0, "opencti_ms": 1.0, "urlscan_ms": 1.0, "rag_ms": 0.0,
+        "merge_ms": 1.0, "final_llm_ms": 2000.0 if gate == "complex" else 0.0,
+        "verify_ms": 2.0, "policy_ms": 1.0, "report_ms": 1.0, "total_ms": 3010.0,
+    }
+    return {
+        "schema_version": "1.0",
+        "run_id": "run_" + sample_id,
+        "email_sha256": sha,
+        "run_status": "ok" if final_verdict else "error",
+        "internal_verdict": internal_verdict,
+        "internal_confidence": 0.91 if internal_verdict else None,
+        "internal_probabilities": None,
+        "gate_decision": gate,
+        "gate_reasons": [],
+        "enrichment": {
+            "virustotal": [
+                {"tool": "virustotal", "query_observable_id": None, "status": "unavailable",
+                 "reason": "access_not_authorized", "evidence": [], "observables": [],
+                 "response_sha256": None, "response_ref": None, "collected_at": None,
+                 "mode": "live", "elapsed_ms": 1.0, "requests_sent": 0,
+                 "visibility": None, "scan_id": None}
+            ],
+            "opencti": [
+                {"tool": "opencti", "query_observable_id": None, "status": "skipped",
+                 "reason": "service_not_approved_in_egress", "evidence": [], "observables": [],
+                 "response_sha256": None, "response_ref": None, "collected_at": None,
+                 "mode": "none", "elapsed_ms": 1.0, "requests_sent": 0,
+                 "visibility": None, "scan_id": None}
+            ],
+            "urlscan": [],
+            "rag": [],
+        },
+        "visual_evidence": [],
+        "final_verdict": final_verdict,
+        "final_confidence": 0.97 if final_verdict else None,
+        "final_probabilities": None,
+        "final_source": "final_llm" if (gate == "complex" and final_verdict)
+        else ("internal_copy" if gate == "simple" and final_verdict else "none"),
+        "verdict_changed": None,
+        "decisive_evidence": [],
+        "decisive_evidence_ids": [],
+        "evidence": [{"id": "ev_1", "provenance": "INTERNE", "source_kind": "parser",
+                      "observable_id": None, "predicate": "header_value",
+                      "value": "unit", "source_ref": "header:0", "observed_at": None,
+                      "match_level": "NONE", "source_group": ""}],
+        "observables": [],
+        "inferences": [],
+        "unsupported_claims": [],
+        "verification_warnings": [],
+        "recommended_action": action,
+        "policy_reasons": [],
+        "analyst_summary": "Verdict indéterminé. (unit synthetic)",
+        "timings": timings,
+        "llm_calls": llm_calls,
+        "cost_usd": None,
+        "cost_status": "unknown",
+        "reproducibility": {
+            "code_commit": None, "python_version": "3.11.10",
+            "dependencies_sha256": "d" * 64, "prompt_internal_sha256": "p" * 64,
+            "prompt_final_sha256": "q" * 64, "assessment_schema_sha256": "s" * 64,
+            "config_sha256": "c" * 64, "corpus_split_sha256": None,
+            "mode": "live", "started_at": "2026-09-20T00:00:00Z",
+        },
+    }
+
+
+def _gold_row(sample_id: str, sha: str, label: str) -> dict:
+    return {
+        "sample_id": sample_id,
+        "raw_sha256": sha,
+        "email_sha256": sha,
+        "raw_path": "corpus/raw/unit/" + sample_id + ".eml",
+        "source_dataset": "unit_test",
+        "input_format": "rfc822",
+        "normalized_label": label,
+        "label_status": "confirmed",
+        "reviewer_ref": "astra_gold_ai_v1",
+        "label_rationale": "synthetic unit row",
+        "public_source": True,
+        "is_synthetic": None,
+        "campaign_id": None,
+        "duplicate_group": sample_id,
+        "family_group": sample_id,
+        "tags": ["unit_test"],
+        "split": "dev",
+    }
+
+
+def _write_synthetic_run(
+    evaluate_script, root: Path
+) -> tuple[Path, dict]:
+    """Archive a small synthetic run (predictions + reports + metrics).
+
+    Clearly a TEST FIXTURE: synthetic rows/reports used to verify the
+    recompute machinery, never presented as a benchmark measurement. The
+    matching synthetic gold partition is written under ``root.parent`` so a
+    patched ``evaluate_script.PROJECT_ROOT`` resolves it.
+    """
+
+    from src.metrics import evaluate as evaluate_metrics
+
+    gold = [
+        _gold_row("u1", "a" * 64, "phishing"),
+        _gold_row("u2", "b" * 64, "legitime"),
+        _gold_row("u3", "c" * 64, "spam"),
+    ]
+    _write_gold(root.parent, gold)
+    specs = [
+        ("u1", "complex", "phishing", "phishing", "AUTO"),
+        ("u2", "simple", "legitime", "legitime", "AUTO"),
+        ("u3", "complex", "legitime", "spam", "AUTO"),
+    ]
+    rows: list[dict] = []
+    reports: list[dict] = []
+    for sample_id, gate, internal_v, final_v, action in specs:
+        sha = next(row["raw_sha256"] for row in gold if row["sample_id"] == sample_id)
+        report = _synthetic_report(sample_id, sha, gate=gate, final_verdict=final_v,
+                                   internal_verdict=internal_v, action=action)
+        report_dir = root / ("run_" + sample_id)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_bytes = json.dumps(report, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        (report_dir / "report.json").write_bytes(report_bytes)
+        row = {
+            "sample_id": sample_id,
+            "split": "dev",
+            "variant": "baseline",
+            "source_dataset": "unit_test",
+            "family_group": sample_id,
+            "raw_path": "corpus/raw/unit/" + sample_id + ".eml",
+            "raw_sha256": sha,
+            "input_format": "rfc822",
+            "public_source": True,
+            "label": next(row["normalized_label"] for row in gold if row["sample_id"] == sample_id),
+            "run_id": report["run_id"],
+            "report_dir": str(report_dir.relative_to(root)),
+            "report_path": str((report_dir / "report.json").relative_to(root)),
+            "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "started_at": report["reproducibility"]["started_at"],
+            "runtime_config_sha256": "c" * 64,
+            "gate_decision": gate,
+            "gate_reasons": [],
+            "final_source": report["final_source"],
+            "run_status": report["run_status"],
+            "predicted": final_v,
+            "predicted_valid": final_v is not None,
+            "final_confidence": report["final_confidence"],
+            "final_probabilities": None,
+            "internal_verdict": internal_v,
+            "internal_confidence": report["internal_confidence"],
+            "verdict_changed": None,
+            "recommended_action": action,
+            "policy_reasons": [],
+            "timings": report["timings"],
+            "llm_calls": report["llm_calls"],
+            "control_b": {
+                "attempted": True, "reason_not_attempted": None,
+                "verdict": "phishing" if sample_id == "u1" else None,
+                "confidence": 0.9 if sample_id == "u1" else None,
+                "probabilities": None,
+                "call": {"phase": "final", "status": "ok", "attempts": 1,
+                         "input_tokens": 2200, "cached_input_tokens": 0,
+                         "output_tokens": 500, "reasoning_tokens": 180,
+                         "cost_usd": None, "cost_status": "unknown"},
+                "latency_ms": 1500.0 if sample_id == "u1" else None,
+                "capture_dir": "responses_control_b",
+                "cost_usd": 0.0002 if sample_id == "u1" else None,
+                "cost_status": "estimated" if sample_id == "u1" else "unknown",
+            },
+            "internal_assessment_sha256": "i" * 64,
+            "untrusted_email_sha256_b": "m" * 64,
+            "untrusted_email_sha256_c": "m" * 64,
+            "tool_status_digest_b": "t" * 64,
+            "tool_status_digest_c": "s" * 64,
+            "evidence_provenance_counts": {"INTERNE": 1, "OSINT": 0, "SANDBOX": 0},
+            "bundle_external_evidence": 0,
+            "extras": {"rejected_final_candidates": 0, "proposals_total": 6,
+                       "proposals_invalid": 0, "refusals": 0},
+            "abc_audit": {
+                "applicable": gate == "complex",
+                "valid": True,
+                "problems": [],
+                "no_new_external_evidence": True,
+                "b_attempt_audits": [{
+                    "phase": "final", "external_evidence_count_sent": 0,
+                    "internal_evidence_count_sent": 1, "evidence_count_sent": 1,
+                    "rag_case_count_sent": 0, "visual_count_sent": 0,
+                    "tool_status_digest": "t" * 64,
+                }],
+                "c_attempt_audits": [{
+                    "phase": "final", "external_evidence_count_sent": 0,
+                    "internal_evidence_count_sent": 1, "evidence_count_sent": 1,
+                    "rag_case_count_sent": 0, "visual_count_sent": 0,
+                    "tool_status_digest": "s" * 64,
+                }],
+            },
+            "notes": [],
+        }
+        rows.append(row)
+        reports.append(report)
+    metrics = evaluate_metrics(
+        gold, reports,
+        sample_extras=evaluate_script.extras_from_rows(rows),
+        controls=evaluate_script.controls_from_rows(rows),
+    )
+    manifest = {
+        "run_id": root.name,
+        "date_time_utc": "2026-09-20T00:00:00Z",
+        "git_commit": None,
+        "model": "Qwen/Qwen3.8-27B",
+        "variant": "baseline",
+        "split": "dev",
+        "sample_count": len(rows),
+    }
+    evaluate_script.write_predictions_atomic(root / "predictions.jsonl", rows)
+    evaluate_script.write_json_atomic(root / "metrics.json", metrics)
+    evaluate_script.write_json_atomic(root / "manifest.json", manifest)
+    return root, metrics
+
+
+def test_recompute_equals_archived_live_metrics(evaluate_script, monkeypatch, tmp_path):
+    """recompute MUST reproduce the captured metrics exactly."""
+
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    from_run = tmp_path / "from_run"
+    from_run.mkdir()
+    _from_run, live_metrics = _write_synthetic_run(evaluate_script, from_run)
+
+    out = tmp_path / "recomputed"
+    args = evaluate_script.build_parser().parse_args(
+        ["--mode", "recompute", "--from-run", str(from_run), "--out", str(out)]
+    )
+    config = _make_cfg(evaluate_script, tmp_path)
+    exit_code = evaluate_script.run_recompute(args, config)
+    assert exit_code == evaluate_script.EXIT_OK
+    recomputed = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert evaluate_script.diff_metrics(live_metrics, recomputed) == []
+    assert (out / "manifest.json").is_file()
+    recompute_manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert recompute_manifest["provider_calls"] == 0
+    assert recompute_manifest["observation_timestamps_preserved"] is True
+
+
+def test_recompute_detects_tampered_report(evaluate_script, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    from_run = tmp_path / "from_run"
+    from_run.mkdir()
+    _write_synthetic_run(evaluate_script, from_run)
+    victim = from_run / "run_u1" / "report.json"
+    report = json.loads(victim.read_text(encoding="utf-8"))
+    report["final_verdict"] = "legitime"  # tampering with an archived report
+    victim.write_text(
+        json.dumps(report, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+    out = tmp_path / "out"
+    args = evaluate_script.build_parser().parse_args(
+        ["--mode", "recompute", "--from-run", str(from_run), "--out", str(out)]
+    )
+    config = _make_cfg(evaluate_script, tmp_path)
+    exit_code = evaluate_script.run_recompute(args, config)
+    assert exit_code == evaluate_script.EXIT_FAIL  # provenance hash mismatch
+
+
+def test_recompute_missing_predictions_fail(evaluate_script, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    from_run = tmp_path / "from_run"
+    from_run.mkdir()
+    (from_run / "manifest.json").write_text("{}", encoding="utf-8")
+    args = evaluate_script.build_parser().parse_args(
+        ["--mode", "recompute", "--from-run", str(from_run), "--out", str(tmp_path / "out")]
+    )
+    config = _make_cfg(evaluate_script, tmp_path)
+    exit_code = evaluate_script.run_recompute(args, config)
+    assert exit_code == evaluate_script.EXIT_FAIL
+
+
+def test_metrics_from_rows_plumbing_consistent(evaluate_script, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluate_script, "PROJECT_ROOT", tmp_path)
+    """The row → controls/extras plumbing keeps the paired denominators."""
+    from src.metrics import abc_block
+
+    from_run = tmp_path / "from_run"
+    from_run.mkdir()
+    _write_synthetic_run(evaluate_script, from_run)
+    rows = [
+        json.loads(line)
+        for line in (from_run / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    controls = evaluate_script.controls_from_rows(rows)
+    assert len(controls) == 3
+    complex_controls = [control for control in controls if control is not None]
+    assert len(complex_controls) == 2  # u1, u3 complex; u2 simple
+    report_stub = {
+        "sample_id": "x", "email_sha256": "z" * 64, "gate_decision": "complex",
+        "internal_verdict": "phishing", "final_verdict": "phishing",
+        "final_source": "final_llm", "run_status": "ok",
+        "recommended_action": "AUTO", "llm_calls": [], "timings": {},
+        "evidence": [], "unsupported_claims": [],
+    }
+    abc = abc_block(
+        ["phishing"], ["phishing"], ["complex"], [report_stub], [controls[0]]
+    )
+    assert abc["comparable_n"] == 1
+    assert abc["audit"]["valid"] is True

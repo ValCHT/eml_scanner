@@ -1,0 +1,64 @@
+# configs/evaluation.yaml — TICKET-14 evaluation configuration (docs/evaluation.md §8).
+# Strict model (extra keys refused): scripts/evaluate.EvaluationConfig.
+version: 1
+
+# Fixed label order of every metric (docs/contracts.md §2.1).
+label_order:
+  - spear_phishing
+  - phishing
+  - fraude
+  - menace
+  - spam
+  - legitime
+
+# Gold partitions (metadata/labels only, closed GoldRecord schema).
+split_files:
+  dev: corpus/gold/gold_dev.jsonl
+  test: corpus/gold/gold_test.jsonl
+
+# Split policy (operator amendment 2026-09-20): gold_test is an INTERNAL POC
+# validation partition, NOT an independent holdout. The TICKET-14 dev
+# workflow never opens it; the terminal test evaluation is executed by a
+# later authorized ticket after the experiment configuration is frozen.
+split_policy:
+  dev_only_in_ticket_14: true
+  gold_test_readable_by_ticket_14: false
+  terminal_test_command_ticket: TICKET-18
+  test_seal: corpus/gold/test_seal.json
+
+# Source profile derivation (from dataset provenance, never message content).
+source_profile_mapping:
+  public_source_true: public_corpus
+  public_source_false: private_authorized
+
+# AkashML pricing snapshot (docs/evaluation.md §8.2, observed 19/09/2026).
+# Applied ONLY when the provider exposes no billed value; provider-billed
+# and estimated values are preserved separately; unknown stays unknown.
+pricing_snapshot:
+  model: Qwen/Qwen3.8-27B
+  provider: AkashML OpenAI-compatible endpoint
+  input_usd_per_1m: 0.25
+  cache_read_usd_per_1m: 0.05
+  output_usd_per_1m: 2.20
+  currency: USD
+  observed_on: "2026-09-19"
+
+latency:
+  percentile_method: nearest_rank
+  percentile: 0.95
+
+# A/B/C control definition (variant baseline, COMPLEX gold_dev samples).
+abc:
+  variant: baseline
+  a_reasoning: medium
+  b_reasoning: xhigh
+  c_reasoning: xhigh
+  b_tool_status_reason: ablation_control_b_no_external_evidence
+
+# Limitations always published with the metrics (truthful, never hidden).
+published_limitations:
+  - "Gold-AI reference labels are AI-adjudicated, not human ground truth (human_validated=false, reviewer_ref=astra_gold_ai_v1)"
+  - "the independent AI review was not perfectly source-blind (residual corpus-identifying metadata in some raw messages), accepted for this exploratory POC"
+  - "menace reference support is 0 (nothing fabricated); six-class Macro-F1 is non-conclusive with a zero-support class"
+  - "spear_phishing dev reference support is small (8); per-class metrics carry wide uncertainty"
+  - "gold_test.jsonl was NOT opened, parsed or used during TICKET-14 (development uses gold_dev only)"
