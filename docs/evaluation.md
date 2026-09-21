@@ -110,3 +110,53 @@ Un YES peut conclure : « Le POC Qwen3.8 hébergé révèle un besoin probable d
 **G7-D — TOOL ABLATION, optionnelle uniquement :** proposer seulement si C−B suggère un gain intéressant ou laisse un effet ambigu à clarifier ; ne pas exécuter si le bundle ne montre déjà aucune valeur mesurable. Exemples : C_full, C_without_VT, C_without_OpenCTI, C_without_urlscan, mêmes emails et snapshots réels. Objectif : contribution individuelle éventuelle. Hors baseline, hors chemin critique, hors PASS G6, sans nouveau ticket ni nouvelle gate obligatoire. Une indisponibilité réelle reste enregistrée ; ne pas l'interpréter comme une ablation nominale d'un outil disponible.
 
 Livrable final POC : résultats réels, coverage matrix, erreur par cause, décision sur chaque composant, FINE-TUNE=YES/NO/INCONCLUSIVE et limites. Une conclusion « baseline utile, enrichissement indisponible/non concluant, RAG sans gain » est plus informative qu'un succès fabriqué.
+
+## 8.6 TICKET-14 — exécution du smoke de validation du harness (amendement opérateur 2026-09-21)
+
+**Amendement opérateur (2026-09-21, trajectoire accélérée vers l'agentique) :** aucun benchmark complet avant T19E. T15/T16 et les étapes de développement T19A–T19D utilisent uniquement des samples/smokes bornés ; le premier benchmark complet (dev/test/Visual-79, architecture + modèle, rerun simultané de la V1 fixe) est **T19E**. G6 est une gate de validation du **harness**, pas un benchmark de performance.
+
+La variante `baseline` avec `--sample-profile smoke` exécute le smoke réel borné : la partition dev ENTIÈRE (83 GoldRecords) reste validée hors ligne (schéma fermé, clés interdites, résolution `raw_path`, SHA-256 recalculé) AVANT tout appel, mais seuls les records sélectionnés reçoivent des appels live. CLI exacte :
+
+```bash
+python scripts/evaluate.py \
+  --split dev --mode live --variant baseline \
+  --sample-profile smoke \
+  --out runs/eval/dev_smoke
+```
+
+Options : `--split {dev,test}` (test refusé en TICKET-14, voir §8.1/§8.6.3), `--mode {live,recompute}`, `--variant baseline`, `--sample-profile {smoke,full}` **requis en live** (un run complet accidentel est refusé ; `full` = capacité complète réservée à T19E), `--out` (répertoire vide exigé), `--from-run` (recompute), `--evaluation-config`, `--experiment-lock`. Codes de sortie : `0` OK, `1` FAIL (drift du lock, échec de validation gold, audit A/B/C invalide, métriques recompute différentes), `2` BLOCKED (clé LLM absente, split test, profil manquant).
+
+### 8.6.1 Déroulé live (scope smoke)
+
+1. **Lock** : `configs/experiment_lock.json` gèle l'empreinte SHA-256 des prompts, schémas, `gate.yaml`/`policy.yaml`/`tools.yaml`, `requirements.lock`, `evaluation.yaml` et `gold_dev.jsonl`, plus le binding runtime et les seuils BASELINE V0 (0,90/0,20). Tout drift = FAIL avant tout appel.
+2. **Validation gold préalable** : les **83** GoldRecords dev (schéma fermé, clés de contenu interdites, `label_status=confirmed`, `email_sha256 == raw_sha256`) sont résolus et hachés depuis `corpus/raw/**` AVANT tout appel ; fichier absent, hash divergent ou chemin sortant de `corpus/raw/**` = échec fort, jamais un échantillon silencieusement retiré.
+3. **Sélection déterministe (`smoke`)** : pour chaque label dev à support>0 dans l'ordre de taxonomie fixe (spear_phishing, phishing, fraude, spam, legitime — menace support=0, rien n'est fabriqué), le `sample_id` lexicographiquement premier est sélectionné ; exactement un record par label. La règle, les IDs sélectionnés et le support complet dev sont archivés dans le manifest/report avec `measurement_scope="smoke"` et `performance_claims_allowed=false`.
+4. **Pipeline figé** : un graphe séquentiel par email sélectionné (gate R1–R3, prompts V1), rapport authentique archivé sous `<out>/<run_id>/report.json`.
+5. **Contrôle A/B/C sur les COMPLEX du smoke** : A = INTERNAL medium du run partagé (jamais de second appel internal) ; B = contrôle xhigh avec preuves internes seules (`merge_evidence(parsed, None)`), `TOOL_STATUS` marquant explicitement l'ablation (`skipped/ablation_control_b_no_external_evidence`, mode `none`, zéro requête), RAG vide, aucun pixel, audits §2.6.1 archivés dans `responses_control_b/` ; C = FINAL nominal xhigh avec le bundle externe réellement collecté. Les invariants d'audit sont validés avant tout delta.
+6. **Sorties** : `predictions.jsonl` (exactement une ligne par `sample_id`, métadonnées/verdicts/usage/audits, aucun contenu d'email), `metrics.json` (diagnostique), `matrix.csv`, `report.md`, `manifest.json` (identité, commit, modèle, reasoning, empreintes des entrées gelées, snapshot tarifaire, statuts d'outils, politique de retry, scope de mesure — sans aucun secret).
+7. **Interprétation** : les métriques du smoke sont **diagnostiques uniquement** — elles valident le câblage du harness (parsing, gate, appels réels, audits, policy, reports, recompute). Elles ne constituent PAS une baseline de performance, PAS un Macro-F1 représentatif et PAS une validation statistique ; aucune décision de tuning n'est prise sur elles. Un timeout/indisponibilité fournisseur reste un résultat réel et archivé : ni relance sélective des cas en échec, ni modification des budgets pour améliorer le score. L'abort d'outage systématique (`_abort_on_systematic_outage`) ne s'applique qu'à un run full-corpus (T19E) qui n'a jamais obtenu UN succès INTERNAL ; le smoke borné ne s'interrompt jamais sur des échecs fournisseur consécutifs (5 timeouts réels = 5 lignes honnêtes, dénominateurs complets).
+8. **Coûts** : usage réel de chaque tentative ; tarif AkashML du snapshot appliqué seulement sans valeur facturée exposée ; coût inconnu jamais remplacé par 0 ; tokens de reasoning comptés exactement une fois.
+
+### 8.6.2 Recompute exact du smoke
+
+```bash
+python scripts/evaluate.py \
+  --mode recompute \
+  --from-run runs/eval/dev_smoke \
+  --out runs/eval/dev_smoke_recomputed
+```
+
+Aucun appel fournisseur ni réseau : les lignes archivées sont exactement reproduites et leur identité est vérifiée contre la sélection déterministe (IDs archivés == sélection recalculée depuis gold_dev ; ligne manquante ou ligne surnuméraire = FAIL). Pour un run `smoke`, l'exigence `len(rows)==83` ne s'applique plus ; elle reste valable pour un run `full_dev_baseline`. Les métriques doivent être ÉGALES aux métriques live ; seule différence autorisée : le manifest de recompute (métadonnées explicites, timestamps d'observation préservés).
+
+### 8.6.3 gold_test non lisible en TICKET-14
+
+`--split test` est refusé par l'évaluateur (BLOCKED) tant que le workflow de développement TICKET-14 est actif : `gold_test.jsonl` est une partition de validation interne du POC, sa lecture terminale relève du ticket autorisé (T19E, premier benchmark complet, après gel des variantes). Le chargement dev n'ouvre que `corpus/gold/gold_dev.jsonl`, vérifié par test.
+
+### 8.6.4 Capacité full corpus (réservée T19E)
+
+La capacité technique d'évaluer les 83 records dev (`--sample-profile full`) reste implémentée et testée mais n'est PAS exécutée comme validation d'une étape antérieure à T19E ; son premier usage officiel est le benchmark complet de T19E (dev complet, test scellé, Visual-79, rerun simultané de la V1 fixe). Tout output `full_dev_baseline` produit avant T19E ne constitue pas une baseline officielle.
+
+### 8.7 Variantes appariées (T15/T16) — interface réservée
+
+L'ablation RAG (T15) et l'ablation vision (T16) étendent la CLI de l'évaluateur avec `--variant {rag|vision}` et `--paired-with <run-dir>` sur le même smoke borné (`--sample-profile smoke`). L'implémentation appartient à ces tickets (`scripts/evaluate.py`, `src/metrics.py` et leurs tests figurent dans leurs FILES ALLOWED). Contrat : le run baseline apparié (`runs/eval/dev_smoke`) est lu seul, jamais rejoué, et ses lignes/reports ne sont jamais modifiés ; la comparaison apparie exactement les mêmes `sample_id` (identité de sélection vérifiée) et exige des dénominateurs identiques (ligne manquante ou surnuméraire = FAIL) ; `measurement_scope=smoke` et `performance_claims_allowed=false` restent archivés et aucun delta n'est publié si une des deux séries de lignes archivées est invalide. Les métriques restent diagnostiques (INCONCLUSIVE valide) ; les résultats alimentent T19C ; le premier benchmark complet des variantes est T19E.
+

@@ -26,6 +26,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -81,17 +82,18 @@ GATE_COMMANDS: dict[str, list[str]] = {
         [sys.executable, "-m", "pytest", "tests/test_corpus.py", "tests/test_metrics.py",
          "tests/test_evaluation.py", "-q"],
         [sys.executable, "scripts/evaluate.py", "--split", "dev", "--mode", "live",
-         "--variant", "baseline", "--out", "runs/eval/dev_baseline"],
+         "--variant", "baseline", "--sample-profile", "smoke", "--out", "runs/eval/dev_smoke"],
         [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
-         "--from-run", "runs/eval/dev_baseline", "--out", "runs/eval/dev_recomputed"],
+         "--from-run", "runs/eval/dev_smoke", "--out", "runs/eval/dev_smoke_recomputed"],
     ],
     # Optional gates (docs/gates.md §5.1): G7-A RAG (TICKET-15), G7-B vision
-    # (TICKET-16), G7-C fine-tuning decision (TICKET-17).
+    # (TICKET-16), G7-C fine-tuning decision (TICKET-17, optional post-T19E:
+    # recomputes the T19E full-dev run, never the small dev smoke).
     "G7-A": [[sys.executable, "-m", "pytest", "tests/test_rag.py", "-q"]],
     "G7-B": [[sys.executable, "-m", "pytest", "tests/test_vision.py", "--live", "-q"]],
     "G7-C": [
         [sys.executable, "scripts/evaluate.py", "--mode", "recompute",
-         "--from-run", "runs/eval/dev_baseline", "--out", "runs/eval/dev_for_ft_decision"],
+         "--from-run", "runs/eval/t19e_dev", "--out", "runs/eval/t19e_for_ft_decision"],
     ],
 }
 
@@ -110,6 +112,16 @@ REQUIRED_TICKETS: dict[str, list[str]] = {
     "G7-A": ["TICKET-15"],
     "G7-B": ["TICKET-16"],
     "G7-C": ["TICKET-17"],
+}
+
+#: Gate output directories whose commands have a strict "never overwrite an
+#: existing run" contract (``scripts/evaluate.py`` fails closed on a non-empty
+#: ``--out``). Before ``--record`` executes the fixed commands, an existing
+#: non-empty directory is MOVED (never deleted, never overwritten) to
+#: ``runs/eval/_archive/<UTC stamp>_<name>``. Recording is therefore
+#: re-runnable without manual cleanup and the preserved evidence is kept.
+GATE_ARTIFACT_DIRS: dict[str, list[str]] = {
+    "G6": ["runs/eval/dev_smoke", "runs/eval/dev_smoke_recomputed"],
 }
 
 #: Files that must exist for the gate (docs/gates.md §5.2).
@@ -295,18 +307,20 @@ def _check_g7c_artifact_concordance(
 ) -> list[str]:
     """Concordance of dev counts with archived evaluation artifacts (§5.2).
 
-    The G7-C recompute output must exist; when both the baseline run and the
-    recompute expose a parseable dev record count, they must be equal.
+    The G7-C recompute output of the T19E full-dev run must exist; when both
+    the T19E run and the recompute expose a parseable dev record count, they
+    must be equal. The small dev_smoke is never used as the decision baseline.
     """
 
     problems: list[str] = []
-    ft_dir = ft_dir or PROJECT_ROOT / "runs" / "eval" / "dev_for_ft_decision"
-    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "dev_baseline"
+    ft_dir = ft_dir or PROJECT_ROOT / "runs" / "eval" / "t19e_for_ft_decision"
+    baseline_dir = baseline_dir or PROJECT_ROOT / "runs" / "eval" / "t19e_dev"
 
     if not ft_dir.is_dir() or not any(ft_dir.iterdir()):
         return [
-            "missing archived recompute artifact runs/eval/dev_for_ft_decision "
-            "(output of the G7-C evaluate.py --mode recompute command)"
+            "missing archived recompute artifact runs/eval/t19e_for_ft_decision "
+            "(output of the G7-C evaluate.py --mode recompute command; requires "
+            "the T19E full-dev run runs/eval/t19e_dev)"
         ]
 
     base_count = _count_dev_records(baseline_dir)
@@ -314,7 +328,7 @@ def _check_g7c_artifact_concordance(
     if base_count is not None and ft_count is not None and base_count != ft_count:
         problems.append(
             f"dev record count mismatch between archived artifacts: "
-            f"dev_baseline={base_count} vs dev_for_ft_decision={ft_count}"
+            f"t19e_dev={base_count} vs t19e_for_ft_decision={ft_count}"
         )
     return problems
 
@@ -545,6 +559,39 @@ def check_prerequisites(gate: str) -> list[str]:
     return missing
 
 
+def archive_gate_artifacts(gate: str, stamp: str | None = None) -> list[dict[str, str]]:
+    """Deterministically archive the gate's previous output directories.
+
+    Non-destructive by construction: a non-empty directory listed in
+    :data:`GATE_ARTIFACT_DIRS` is MOVED under ``runs/eval/_archive/`` with a
+    UTC timestamp (a colliding name gets a numeric suffix; nothing is ever
+    deleted or overwritten). Returns the archive moves, newest call last;
+    an empty list means there was nothing to do. Called by ``record`` so a
+    receipt can always be (re-)recorded without manual cleanup.
+    """
+
+    archived: list[dict[str, str]] = []
+    for relative in GATE_ARTIFACT_DIRS.get(gate, []):
+        source = PROJECT_ROOT / relative
+        if not source.is_dir() or not any(source.iterdir()):
+            continue
+        if stamp is None:
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        archive_root = PROJECT_ROOT / "runs" / "eval" / "_archive"
+        target = archive_root / f"{stamp}_{source.name}"
+        suffix = 2
+        while target.exists():
+            target = archive_root / f"{stamp}_{source.name}-{suffix}"
+            suffix += 1
+        archive_root.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        archived.append({
+            "path": relative,
+            "archived_to": str(target.relative_to(PROJECT_ROOT)).replace(os.sep, "/"),
+        })
+    return archived
+
+
 def record(gate: str) -> int:
     missing = check_prerequisites(gate)
     if missing:
@@ -559,6 +606,13 @@ def record(gate: str) -> int:
         )
         print(f"BLOCKED/FAIL: missing prerequisites: {', '.join(missing)}")
         return 2
+
+    # Deterministic, non-destructive archive of any previous output the fixed
+    # commands would refuse to overwrite (see GATE_ARTIFACT_DIRS): --record is
+    # always (re-)runnable, no manual cleanup, no evidence loss.
+    archived_pre_run = archive_gate_artifacts(gate)
+    for entry in archived_pre_run:
+        print(f"archived previous run: {entry['path']} -> {entry['archived_to']}")
 
     commands: list[dict[str, object]] = []
     all_ok = True
@@ -663,6 +717,7 @@ def record(gate: str) -> int:
         "g7c_validation_problems": g7c_problems,
         "g3_replay_problems": g3_replay_problems,
         "tested_commit": worktree_fingerprint(),
+        "archived_pre_run": archived_pre_run,
         # Scope-aware validity (docs/gates.md §5.2): the receipt stays valid
         # while the files this gate really exercised are content-identical.
         "validated_scope_hashes": compute_gate_scope(gate),
