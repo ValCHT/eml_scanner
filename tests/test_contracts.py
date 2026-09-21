@@ -493,7 +493,7 @@ def test_g7c_decision_file_validation(tmp_path: Path) -> None:
     problems = validate_g7c_decision_file(
         yes_unknown, baseline_dir=tmp_path / "no_base", ft_dir=tmp_path / "no_ft"
     )
-    assert any("dev_for_ft_decision" in p for p in problems)
+    assert any("t19e_for_ft_decision" in p for p in problems)
 
     # YES complete + concordant archived artifacts -> valid
     ft_dir = tmp_path / "ft"

@@ -25,6 +25,12 @@ dependencies = [
 dev = [
     "pytest>=8.0,<9",
 ]
+rag = [
+    # TICKET-15 (G7-A): local embedded Chroma + its ONNX all-MiniLM-L6-v2
+    # embedding stack (onnxruntime/tokenizers pulled by chromadb itself).
+    # Optional on purpose: the disabled baseline never imports it.
+    "chromadb>=1.2,<2",
+]
 # TICKET-16 (gate G7-B): bounded local Vision/QR capability; optional only.
 vision = [
     "Pillow>=12,<13",

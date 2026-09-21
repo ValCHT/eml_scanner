@@ -1141,6 +1141,39 @@ def compare_internal_final(
 # --- block_a_value accessor removed: direct dict access is clearer ---------
 
 
+def paired_variant_block(
+    labels: Sequence[str | None],
+    baseline_predictions: Sequence[str | None],
+    variant_predictions: Sequence[str | None],
+    *,
+    baseline_variant: str = "baseline",
+    variant: str = "rag",
+) -> dict[str, Any]:
+    """Paired baseline→variant comparison on the SAME archived samples (§8.7).
+
+    Diagnostic smoke scope only: the block never authorizes a performance
+    claim (``performance_claims_allowed=false``) and INCONCLUSIVE stays a
+    valid outcome. Denominators stay paired: the evaluator verifies the
+    exact ``sample_id`` identity of the two archived series BEFORE calling
+    this (missing/extra row = FAIL), every sample then appears in exactly
+    one bucket, and a null prediction counts as a failure — never removed.
+    """
+
+    block = compare_internal_final(labels, baseline_predictions, variant_predictions)
+    block["a_role"] = "baseline"
+    block["b_role"] = "variant"
+    block["baseline_variant"] = baseline_variant
+    block["variant"] = variant
+    block["diagnostic_only"] = True
+    block["performance_claims_allowed"] = False
+    block["scope_note"] = (
+        "bounded smoke paired ablation (docs/evaluation.md §8.7): diagnostic "
+        "only, feeds T19C; the first full benchmark including the variant is "
+        "TICKET-19E"
+    )
+    return block
+
+
 # ---------------------------------------------------------------------------
 # A/B/C block (variant baseline, COMPLEX samples, docs/evaluation.md §8.3)
 # ---------------------------------------------------------------------------
@@ -1371,6 +1404,7 @@ __all__ = [
     "fpr_block",
     "internal_prediction",
     "latency_stats",
+    "paired_variant_block",
     "sample_cost",
     "validate_control_audits",
 ]

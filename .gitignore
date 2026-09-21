@@ -27,6 +27,9 @@ corpus/raw/
 corpus/normalized/
 corpus/private/
 
+# Local RAG index (TICKET-15/G7-A): embedded Chroma data, never committed.
+corpus/rag/chroma/
+
 # IDE / OS
 .DS_Store
 Thumbs.db
