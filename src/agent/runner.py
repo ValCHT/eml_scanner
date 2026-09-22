@@ -18,8 +18,11 @@ RAG stays a deterministic preprocessing step (its results travel in
 ``RAG_CONTEXT`` and its conditional guidance in the system prompt), QR
 payloads join the existing parser contracts (INTERNE evidence/observables)
 and staged pixels travel as ``image_url`` parts of the same Qwen request.
-The tool set is unchanged: ``lookup_virustotal``, ``lookup_opencti``,
-``scan_urlscan``, ``finalize_assessment``.
+The default tool set is unchanged: ``lookup_virustotal``,
+``lookup_opencti``, ``scan_urlscan``, ``finalize_assessment``.
+T19D-OSINT adds the ``lookup_osint`` tool and the four profiles
+(``agentic_core``/``context``/``osint``/``full``); the default profile
+(``agentic_context``) keeps the four-tool behavior.
 
 Frozen limits (§15): 5 LLM turns, 4 provider calls, 1 urlscan call, 300 s
 total, 90 s per LLM request, 12,000 chars per tool result. A duplicate
@@ -69,6 +72,7 @@ from ..state import (
     ToolResult,
     VerificationIssue,
 )
+from ..tools.osint import PSL_VERSION
 from ..tools.rag import (
     RagError,
     RagUnavailableError,
@@ -89,24 +93,28 @@ from ..vision import (
 from .client import AgentChatClient
 from .models import (
     AGENT_REASONING_EFFORT,
-    CONVERGED_ARCHITECTURE_NAME,
     DEFAULT_AGENT_LIMITS,
+    DEFAULT_AGENT_PROFILE,
     FINALIZE_TOOL,
     MEASUREMENT_SCOPE,
+    OSINT_ARCHITECTURE_NAME,
     PERFORMANCE_CLAIMS_ALLOWED,
     AgentLimits,
+    AgentProfile,
     AgentRunResult,
     ToolExecution,
+    context_allowed,
+    osint_exposed,
 )
 from .prompt import agent_system_prompt_sha256, initial_messages
 from .tools import (
-    AGENT_TOOLS,
     ProviderAdapterSet,
     ProviderToolExecutor,
     assessment_schema_sha256,
     execution_payload,
     parse_finalize_arguments,
     tool_schema_sha256,
+    tools_for_profile,
 )
 
 #: Subdirectory of ``settings.RUNS_DIR`` holding every agentic run.
@@ -118,7 +126,7 @@ _DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 
 #: Deterministic nudge sent when a turn returned no tool call at all.
 _NO_TOOL_CALLS_NUDGE = (
-    "No tool call was received. Call one of the four tools, or — when enough "
+    "No tool call was received. Call one of the declared tools, or — when enough "
     "evidence exists — call finalize_assessment with the complete assessment "
     "object. Prose alone cannot become a verdict."
 )
@@ -180,6 +188,7 @@ def _build_real_adapters(
     """Build the existing typed adapters with the repository's own wiring."""
 
     from ..tools.opencti import OpenCTIAdapter
+    from ..tools.osint import OsintAdapter
     from ..tools.urlscan import UrlscanAdapter
     from ..tools.virustotal import VirusTotalAdapter
 
@@ -198,6 +207,7 @@ def _build_real_adapters(
             clock=clock,
             quota_journal_path=quota_dir / "urlscan.json",
         ),
+        osint=OsintAdapter(settings, tools_config.osint, clock=clock),
     )
 
 
@@ -417,6 +427,7 @@ def run_agentic_email(
     current_duplicate_group: str | None = None,
     current_family_group: str | None = None,
     current_campaign_id: str | None = None,
+    profile: AgentProfile = DEFAULT_AGENT_PROFILE,
 ) -> AgentRunResult:
     """Execute the bounded converged agentic runtime for ONE email.
 
@@ -427,6 +438,10 @@ def run_agentic_email(
     (``RAG_ENABLED`` + ``tools.rag.enabled``); ``rag_exclusions`` and the
     three current-email group identities are caller-owned metadata exactly
     like the V1 RAG node (the adapter excludes them and V15 re-checks them).
+    ``profile`` selects the agentic tool set and the deterministic context
+    preprocessing (TICKET-19D-OSINT §24): ``agentic_core``/``agentic_osint``
+    force RAG/QR/Vision OFF; ``agentic_context`` (default, T19D behavior)
+    and ``agentic_full`` follow Settings.
     """
 
     started = clock()
@@ -444,6 +459,10 @@ def run_agentic_email(
     policy_config = load_yaml_config(Path(settings.CONFIG_DIR) / "policy.yaml", PolicyConfig)
     assert isinstance(tools_config, ToolsConfig) and isinstance(policy_config, PolicyConfig)
 
+    allow_context = context_allowed(profile)
+    osint_on = osint_exposed(profile)
+    active_tools = tools_for_profile(profile)
+
     email_hash: str | None = None
     parse_error: str | None = None
     llm_error = False
@@ -460,14 +479,14 @@ def run_agentic_email(
     exclusions: set[str] = set()
     has_rag = False
     has_visuals = False
-    prompt_sha = agent_system_prompt_sha256(limits)
+    prompt_sha = agent_system_prompt_sha256(limits, has_osint=osint_on)
     # T19D §4: the exact values used by THIS run are captured once and reused
     # by the manifest, so the runtime contract fingerprint cannot diverge from
     # what the loop and the callers actually applied.
     max_output_tokens = int(
         getattr(settings, "FINAL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)
     )
-    tool_schema_sha = tool_schema_sha256()
+    tool_schema_sha = tool_schema_sha256(active_tools)
     assessment_schema_sha = assessment_schema_sha256()
 
     parsed = parse_email(
@@ -479,6 +498,34 @@ def run_agentic_email(
         agent_error = "parse_error"
         trace.add("error", kind="parse_error", message=parse_error)
         executor = None
+    elif not allow_context:
+        # T19D-OSINT §24.1: core/osint profiles force RAG/QR/Vision OFF. The
+        # Settings are NOT modified; the preprocessing is simply never
+        # called, even when the three switches are true.
+        email_hash = parsed.email_sha256
+        augmented = parsed
+        staged = ()
+        exclusions = set()
+        prompt_sha = agent_system_prompt_sha256(limits, has_osint=osint_on)
+        trace.add(
+            "rag_lookup",
+            enabled=False,
+            forced_off_by_profile=profile,
+            case_count=0,
+            exclusion_count=0,
+            error=None,
+        )
+        trace.add(
+            "visual_preparation",
+            vision_enabled=False,
+            qr_decode_enabled=False,
+            forced_off_by_profile=profile,
+            visual_count=0,
+            staged_count=0,
+            qr_payload_count=0,
+            qr_observable_count=0,
+            statuses=[],
+        )
     else:
         email_hash = parsed.email_sha256
 
@@ -500,7 +547,7 @@ def run_agentic_email(
         has_rag = bool(rag_info.cases)
         has_visuals = bool(staged)
         prompt_sha = agent_system_prompt_sha256(
-            limits, has_rag=has_rag, has_visuals=has_visuals
+            limits, has_rag=has_rag, has_visuals=has_visuals, has_osint=osint_on
         )
         trace.add(
             "rag_lookup",
@@ -522,6 +569,8 @@ def run_agentic_email(
             statuses=[entry.status for entry in visual.preparation.visuals],
         )
 
+    if parse_error is None:
+        assert augmented is not None
         executor = ProviderToolExecutor(
             parsed=augmented,
             adapters=adapters
@@ -562,12 +611,14 @@ def run_agentic_email(
                 limits,
                 rag_cases=rag_info.cases,
                 staged=staged,
+                has_osint=osint_on,
             )
             assessment, status, llm_error, agent_error, turns_meta = _run_loop(
                 parsed=augmented,
                 executor=executor,
                 client=agent_client,
                 messages=messages,
+                tools=active_tools,
                 trace=trace,
                 limits=limits,
                 agent_deadline=agent_deadline,
@@ -585,6 +636,16 @@ def run_agentic_email(
             urlscan=[r for r in executor.results if r.tool == "urlscan"],
             rag=list(rag_info.cases),
         )
+        # OSINT results travel alongside the frozen Enrichment (never inside
+        # it): merge/verify receive the combined deterministic list, so no
+        # V1 contract changes shape.
+        osint_results = [r for r in executor.results if r.tool == "osint"]
+        combined_results: list[ToolResult] = [
+            *enrichment.virustotal,
+            *enrichment.opencti,
+            *enrichment.urlscan,
+            *osint_results,
+        ]
         tool_counts = executor.tool_counts_by_provider()
         tool_statuses = executor.tool_statuses_by_provider()
         provider_tool_calls = executor.provider_tool_call_count
@@ -592,10 +653,12 @@ def run_agentic_email(
         planning_errors = executor.planning_error_count
     else:
         enrichment = Enrichment()
-        tool_counts = {"virustotal": 0, "opencti": 0, "urlscan": 0}
+        osint_results = []
+        combined_results = []
+        tool_counts = {"virustotal": 0, "opencti": 0, "urlscan": 0, "osint": 0}
         tool_statuses = {
             provider: {"ok": 0, "not_found": 0, "unavailable": 0, "skipped": 0}
-            for provider in ("virustotal", "opencti", "urlscan")
+            for provider in ("virustotal", "opencti", "urlscan", "osint")
         }
         provider_tool_calls = 0
         duplicate_refusals = 0
@@ -608,7 +671,7 @@ def run_agentic_email(
     merged_ok = True
     if augmented is not None:
         try:
-            evidence, observables, _visuals = merge_evidence(augmented, enrichment)
+            evidence, observables, _visuals = merge_evidence(augmented, combined_results)
         except EvidenceMergeError as error:
             merged_ok = False
             agent_errors.append(
@@ -628,7 +691,7 @@ def run_agentic_email(
         assessment,
         "final",
         registry={"evidence": evidence, "observables": observables},
-        tool_results=enrichment,
+        tool_results=combined_results,
         parsed=augmented,
         rag_context=rag_info.cases,
         internal=None,
@@ -730,12 +793,29 @@ def run_agentic_email(
         "max_single_llm_seconds": limits.max_single_llm_seconds,
         "max_tool_result_chars": limits.max_tool_result_chars,
     }
-    # T19D §4.4: canonical runtime contract — exactly the eight required
+    # T19D-OSINT §27.1: effective capabilities = the configuration ACTIVE
+    # for THIS run (profile ∧ Settings ∧ tool config). Never the verdict,
+    # never whether Qwen called a tool, never a provider hit.
+    rag_index_fingerprint: str | None = None
+    if rag_info.enabled and rag_info.cases:
+        candidate_fp = rag_info.cases[0].embedding_model_id
+        rag_index_fingerprint = candidate_fp if isinstance(candidate_fp, str) else None
+    effective_capabilities = {
+        "rag": bool(rag_info.enabled),
+        "rag_index_fingerprint": rag_index_fingerprint,
+        "qr": bool(allow_context and settings.QR_DECODE_ENABLED),
+        "vision": bool(allow_context and settings.MODEL_SUPPORTS_VISION),
+        "osint": bool(osint_on),
+        "threatfox_configured": bool(osint_on and settings.ABUSECH_API_KEY is not None),
+        "psl_version": PSL_VERSION if osint_on else None,
+    }
+    # T19D-OSINT §27: canonical runtime contract — exactly the ten required
     # fields, taken from the run actually executed. No timestamp, run_id,
     # email, model/tool result or secret enters it, so two runs under the
     # same contract share the same fingerprint (no second versioning system).
     runtime_contract = {
-        "architecture": CONVERGED_ARCHITECTURE_NAME,
+        "architecture": OSINT_ARCHITECTURE_NAME,
+        "profile": profile,
         "model": model_requested,
         "reasoning_effort": effort,
         "max_output_tokens_per_turn": max_output_tokens,
@@ -743,6 +823,7 @@ def run_agentic_email(
         "effective_prompt_sha256": prompt_sha,
         "tool_schema_sha256": tool_schema_sha,
         "assessment_schema_sha256": assessment_schema_sha,
+        "effective_capabilities": effective_capabilities,
     }
     runtime_contract_sha = hashlib.sha256(
         json.dumps(
@@ -756,7 +837,8 @@ def run_agentic_email(
 
     manifest = {
         "schema_version": "1.0",
-        "architecture": CONVERGED_ARCHITECTURE_NAME,
+        "architecture": OSINT_ARCHITECTURE_NAME,
+        "profile": profile,
         "run_kind": "t19c_agentic_runtime",
         "measurement_scope": MEASUREMENT_SCOPE,
         "performance_claims_allowed": PERFORMANCE_CLAIMS_ALLOWED,
@@ -773,6 +855,7 @@ def run_agentic_email(
         "tool_schema_sha256": tool_schema_sha,
         "assessment_schema_sha256": assessment_schema_sha,
         "runtime_contract_sha256": runtime_contract_sha,
+        "effective_capabilities": effective_capabilities,
         "reasoning_effort": effort,
         "max_output_tokens_per_turn": max_output_tokens,
         "limits": limits_payload,
@@ -806,7 +889,7 @@ def run_agentic_email(
             len(entry.qr_payloads) for entry in visual.preparation.visuals
         ),
         "qr_observable_count": len(visual.observables),
-        "prompt_guidance": {"rag": has_rag, "visuals": has_visuals},
+        "prompt_guidance": {"rag": has_rag, "visuals": has_visuals, "osint": osint_on},
         "parse_error": parse_error,
         "llm_error": llm_error,
         "agent_error": agent_error,
@@ -848,7 +931,7 @@ def run_agentic_email(
                 "requests_sent": result.requests_sent,
                 "mode": result.mode,
             }
-            for result in _canonical_results(enrichment)
+            for result in _canonical_results(combined_results)
         ],
     }
     summary = _build_summary(
@@ -915,6 +998,7 @@ def _run_loop(
     executor: ProviderToolExecutor,
     client: Any,
     messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
     trace: _RunTrace,
     limits: AgentLimits,
     agent_deadline: float,
@@ -953,7 +1037,7 @@ def _run_loop(
         )
         response = client.complete_with_tools(
             messages,
-            AGENT_TOOLS,
+            tools,
             deadline=call_deadline,
             max_output_tokens=max_output_tokens,
             turn_index=turn_index,
@@ -1271,12 +1355,23 @@ def _run_loop(
 # ---------------------------------------------------------------------------
 
 
-def _canonical_results(enrichment: Enrichment) -> list[ToolResult]:
-    return [
-        *enrichment.virustotal,
-        *enrichment.opencti,
-        *enrichment.urlscan,
-    ]
+def _canonical_results(results: Any) -> list[ToolResult]:
+    """Tool results in canonical order for the final document (§2.4).
+
+    Accepts the historical ``Enrichment`` object or any explicit sequence
+    (the agentic runner passes the combined V1 + OSINT list so OSINT
+    observations are listed without reshaping the frozen V1 contract).
+    """
+
+    if results is None:
+        return []
+    if all(hasattr(results, name) for name in ("virustotal", "opencti", "urlscan")):
+        return [
+            *results.virustotal,
+            *results.opencti,
+            *results.urlscan,
+        ]
+    return list(results)
 
 
 def _aggregate_usage(turns: list[dict[str, Any]]) -> dict[str, Any]:

@@ -141,7 +141,7 @@ class Observable(_Strict):
 class Evidence(_Strict):
     id: str
     provenance: Provenance
-    source_kind: Literal["parser", "virustotal", "opencti", "urlscan"]
+    source_kind: Literal["parser", "virustotal", "opencti", "urlscan", "osint"]
     observable_id: str | None = None
     predicate: Literal[
         "header_value",
@@ -172,6 +172,27 @@ class Evidence(_Strict):
         "sandbox_screenshot",
         "sandbox_dom_excerpt",
         "qr_payload",
+        "osint_threatfox_match",
+        "osint_threatfox_threat_type",
+        "osint_threatfox_malware",
+        "osint_threatfox_confidence",
+        "osint_threatfox_first_seen",
+        "osint_threatfox_last_seen",
+        "osint_rdap_registration_date",
+        "osint_rdap_expiration_date",
+        "osint_rdap_last_changed",
+        "osint_rdap_registrar",
+        "osint_rdap_status",
+        "osint_rdap_nameserver",
+        "osint_dns_a",
+        "osint_dns_aaaa",
+        "osint_dns_mx",
+        "osint_dns_ns",
+        "osint_dns_txt",
+        "osint_ct_certificate_count",
+        "osint_ct_first_not_before",
+        "osint_ct_last_not_before",
+        "osint_ct_dns_name",
     ]
     value: str | float | bool | None = None
     source_ref: str
@@ -197,7 +218,7 @@ class VisualEvidence(_Strict):
 
 
 class ToolResult(_Strict):
-    tool: Literal["virustotal", "opencti", "urlscan"]
+    tool: Literal["virustotal", "opencti", "urlscan", "osint"]
     query_observable_id: str | None = None
     status: Literal["ok", "not_found", "unavailable", "skipped"]
     reason: str | None = None

@@ -481,3 +481,66 @@ def test_real_capture_tool_results_validate_against_state_contract() -> None:
     assert any(r.status == "not_found" for r in results)
     assert any(r.status == "skipped" for r in results)
     assert any(r.status == "ok" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# TICKET-19D-OSINT §8 — osint merge (ToolResult tool=osint, no pivot)
+# ---------------------------------------------------------------------------
+
+
+def _osint_merge_evidence(observable_id: str) -> Any:
+    from src.state import Evidence
+
+    return Evidence(
+        id="ev_osint_merge_dns",
+        provenance="OSINT",
+        source_kind="osint",
+        observable_id=observable_id,
+        predicate="osint_dns_a",
+        value="93.184.216.34",
+        source_ref="osint_dns_abcd.json#/types/A/values/0",
+        observed_at="2026-09-22T00:00:00+00:00",
+        match_level="EXACT",
+        source_group="dns",
+    )
+
+
+def _osint_merge_result(observable_id: str, **overrides: Any) -> ToolResult:
+    values: dict[str, Any] = {
+        "tool": "osint",
+        "query_observable_id": observable_id,
+        "status": "ok",
+        "evidence": [_osint_merge_evidence(observable_id)],
+        "observables": [],
+        "response_sha256": "c" * 64,
+        "response_ref": "osint_bundle_abcd.json",
+        "collected_at": "2026-09-22T00:00:00+00:00",
+        "mode": "live",
+        "elapsed_ms": 5.0,
+        "requests_sent": 3,
+    }
+    values.update(overrides)
+    return ToolResult(**values)
+
+
+def test_osint_ok_result_merges_without_new_observables() -> None:
+    parsed = _parsed("phishing_simple.eml")
+    domain = next(o for o in parsed.observables if o.type == "domain")
+    evidence, observables, _ = merge_evidence(parsed, [_osint_merge_result(domain.id)])
+    assert "ev_osint_merge_dns" in evidence
+    assert domain.id in observables
+    assert set(observables) == {o.id for o in parsed.observables}
+
+
+def test_osint_non_ok_result_with_evidence_is_refused() -> None:
+    parsed = _parsed("phishing_simple.eml")
+    domain = next(o for o in parsed.observables if o.type == "domain")
+    with pytest.raises(EvidenceMergeError, match="positive"):
+        merge_evidence(parsed, [_osint_merge_result(domain.id, status="not_found")])
+
+
+def test_osint_ok_result_without_archived_bundle_is_refused() -> None:
+    parsed = _parsed("phishing_simple.eml")
+    domain = next(o for o in parsed.observables if o.type == "domain")
+    with pytest.raises(EvidenceMergeError, match="archived response"):
+        merge_evidence(parsed, [_osint_merge_result(domain.id, response_ref=None, response_sha256=None)])

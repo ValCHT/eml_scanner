@@ -232,6 +232,25 @@ def _run_pytest_in_probe(project_root: Path, probe_dir: Path, *args: str) -> sub
     )
 
 
+def test_abusech_api_key_secret_handling(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TICKET-19D-OSINT §12: ABUSECH_API_KEY is a secret like the others."""
+
+    from src.config import _SECRET_FIELDS
+
+    assert "ABUSECH_API_KEY" in _SECRET_FIELDS
+    settings = load_settings(None)
+    assert settings.ABUSECH_API_KEY is None
+    assert settings.secret_presence()["ABUSECH_API_KEY"] is False
+    assert settings.public_dump()["ABUSECH_API_KEY"] is None
+
+    canary = "abusech-synthetic-canary"
+    monkeypatch.setenv("ABUSECH_API_KEY", canary)
+    configured = load_settings(None)
+    assert configured.secret_presence()["ABUSECH_API_KEY"] is True
+    assert configured.public_dump()["ABUSECH_API_KEY"] is None
+    assert canary not in str(configured.public_dump())
+
+
 def test_pytest_live_flag_semantics(project_root: Path, tmp_path: Path) -> None:
     """A/B/C: default exclusion, flag acceptance, real execution of live."""
 

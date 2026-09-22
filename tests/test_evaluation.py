@@ -510,9 +510,31 @@ def test_abc_row_parse_failure_excluded_technical(evaluate_script):
 # ---------------------------------------------------------------------------
 
 
+def test_historical_g6_lock_detects_current_drift(evaluate_script):
+    """U1 §7: configs/experiment_lock.json is the HISTORICAL TICKET-14/G6
+    lock (dev_smoke_harness_v0). It must stay byte-identical to the frozen
+    baseline — post-G6 tickets (T19D-OSINT schema sync, tools config,
+    requirements) intentionally drift from it. The test proves the lock is
+    preserved AND that verify_experiment_lock() detects the current drift
+    instead of pretending HEAD is still byte-identical to G6."""
+
+    lock = evaluate_script.load_experiment_lock(PROJECT_ROOT / "configs" / "experiment_lock.json")
+    assert lock["ticket"] == "TICKET-14"
+    assert lock["gate"] == "G6"
+    assert lock["experiment"] == "dev_smoke_harness_v0"
+
+    problems = evaluate_script.verify_experiment_lock(lock)
+
+    # The current tree intentionally drifted (T19D-OSINT triage-report schema
+    # sync at minimum); the historical mechanism must report it. Only the
+    # detection is asserted — never the exact exhaustive drift set, which
+    # legitimately grows as post-G6 tickets land (config_tools,
+    # requirements_lock, schema_triage_report, ...).
+    assert any("schema_triage_report" in problem for problem in problems)
+
+
 def test_lock_hash_drift_fails(evaluate_script):
     lock = evaluate_script.load_experiment_lock(PROJECT_ROOT / "configs" / "experiment_lock.json")
-    assert evaluate_script.verify_experiment_lock(lock) == []
     tampered = json.loads(json.dumps(lock))
     tampered["hashes"]["config_gate"] = "0" * 64
     problems = evaluate_script.verify_experiment_lock(tampered)

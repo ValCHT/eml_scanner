@@ -26,6 +26,12 @@ ARCHITECTURE_NAME = "agentic_core_v1"
 #: T16 QR/Vision, still exactly four tools and one agent (TICKET-19C).
 CONVERGED_ARCHITECTURE_NAME = "agentic_core_v2"
 
+#: T19D-OSINT runtime marker: the same single agent and bounded loop, plus
+#: the single lookup_osint tool and the four agentic profiles
+#: (agentic_core/context/osint/full). V1/V2 markers above are kept for
+#: reading historical artifacts/tests.
+OSINT_ARCHITECTURE_NAME = "agentic_core_v3"
+
 #: A smoke never allows a performance claim (operator amendment 2026-09-21).
 MEASUREMENT_SCOPE = "smoke"
 PERFORMANCE_CLAIMS_ALLOWED = False
@@ -62,12 +68,59 @@ INVESTIGATION_TOOLS: tuple[str, ...] = (
 
 AGENT_TOOL_NAMES: tuple[str, ...] = (*INVESTIGATION_TOOLS, FINALIZE_TOOL)
 
+#: TICKET-19D-OSINT §3: exactly ONE new investigation tool. The frozen
+#: T19B triple above is untouched; the OSINT tool is declared separately so
+#: the four-tool default contract can never silently change.
+LOOKUP_OSINT_TOOL = "lookup_osint"
+
+#: All investigation tools (T19B triple + lookup_osint).
+ALL_INVESTIGATION_TOOLS: tuple[str, ...] = (*INVESTIGATION_TOOLS, LOOKUP_OSINT_TOOL)
+
 #: Agent tool name -> existing typed adapter / ToolResult producer.
 TOOL_PROVIDER: dict[str, str] = {
     "lookup_virustotal": "virustotal",
     "lookup_opencti": "opencti",
     "scan_urlscan": "urlscan",
+    "lookup_osint": "osint",
 }
+
+#: TICKET-19D-OSINT §24: exactly four agentic profiles. No registry, no
+#: framework — plain static logic.
+AgentProfile = Literal[
+    "agentic_core",
+    "agentic_context",
+    "agentic_osint",
+    "agentic_full",
+]
+
+AGENT_PROFILES: tuple[str, ...] = (
+    "agentic_core",
+    "agentic_context",
+    "agentic_osint",
+    "agentic_full",
+)
+
+#: Default profile: preserves the T19D behavior (§24).
+DEFAULT_AGENT_PROFILE: AgentProfile = "agentic_context"
+
+#: Profiles whose tools include lookup_osint (§24).
+OSINT_PROFILES: tuple[str, ...] = ("agentic_osint", "agentic_full")
+
+#: Profiles allowed to run the RAG/QR/Vision deterministic preprocessing
+#: (§24.1–§24.2). The profile ALLOWS the capability; Settings decide.
+CONTEXT_PROFILES: tuple[str, ...] = ("agentic_context", "agentic_full")
+
+
+def context_allowed(profile: str) -> bool:
+    """Whether this profile may run RAG/QR/Vision preprocessing (§24)."""
+
+    return profile in CONTEXT_PROFILES
+
+
+def osint_exposed(profile: str) -> bool:
+    """Whether this profile exposes lookup_osint (§24)."""
+
+    return profile in OSINT_PROFILES
 
 
 @dataclass
@@ -223,13 +276,18 @@ class AgentRunResult:
 
 
 __all__ = [
+    "AGENT_PROFILES",
     "AGENT_REASONING_EFFORT",
     "AGENT_TOOL_NAMES",
+    "ALL_INVESTIGATION_TOOLS",
     "ARCHITECTURE_NAME",
+    "CONTEXT_PROFILES",
     "CONVERGED_ARCHITECTURE_NAME",
     "DEFAULT_AGENT_LIMITS",
+    "DEFAULT_AGENT_PROFILE",
     "FINALIZE_TOOL",
     "INVESTIGATION_TOOLS",
+    "LOOKUP_OSINT_TOOL",
     "MAX_AGENT_SECONDS",
     "MAX_LLM_TURNS",
     "MAX_SINGLE_LLM_SECONDS",
@@ -237,11 +295,16 @@ __all__ = [
     "MAX_TOOL_RESULT_CHARS",
     "MAX_URLSCAN_CALLS",
     "MEASUREMENT_SCOPE",
+    "OSINT_ARCHITECTURE_NAME",
+    "OSINT_PROFILES",
     "PERFORMANCE_CLAIMS_ALLOWED",
     "TOOL_PROVIDER",
     "AgentLimits",
     "AgentLLMResponse",
+    "AgentProfile",
     "AgentRunResult",
     "ToolCall",
     "ToolExecution",
+    "context_allowed",
+    "osint_exposed",
 ]

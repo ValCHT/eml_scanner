@@ -474,7 +474,8 @@
             "parser",
             "virustotal",
             "opencti",
-            "urlscan"
+            "urlscan",
+            "osint"
           ]
         },
         "observable_id": {
@@ -517,7 +518,28 @@
             "sandbox_provider_malicious",
             "sandbox_screenshot",
             "sandbox_dom_excerpt",
-            "qr_payload"
+            "qr_payload",
+            "osint_threatfox_match",
+            "osint_threatfox_threat_type",
+            "osint_threatfox_malware",
+            "osint_threatfox_confidence",
+            "osint_threatfox_first_seen",
+            "osint_threatfox_last_seen",
+            "osint_rdap_registration_date",
+            "osint_rdap_expiration_date",
+            "osint_rdap_last_changed",
+            "osint_rdap_registrar",
+            "osint_rdap_status",
+            "osint_rdap_nameserver",
+            "osint_dns_a",
+            "osint_dns_aaaa",
+            "osint_dns_mx",
+            "osint_dns_ns",
+            "osint_dns_txt",
+            "osint_ct_certificate_count",
+            "osint_ct_first_not_before",
+            "osint_ct_last_not_before",
+            "osint_ct_dns_name"
           ]
         },
         "value": {
@@ -990,7 +1012,8 @@
           "enum": [
             "virustotal",
             "opencti",
-            "urlscan"
+            "urlscan",
+            "osint"
           ]
         },
         "query_observable_id": {

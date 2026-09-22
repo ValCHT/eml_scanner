@@ -64,6 +64,7 @@ PROVENANCE_BY_SOURCE_KIND: dict[str, str] = {
     "virustotal": "OSINT",
     "opencti": "OSINT",
     "urlscan": "SANDBOX",
+    "osint": "OSINT",
 }
 
 #: Provenance values a FINAL assessment may reference (never INFERENCE).

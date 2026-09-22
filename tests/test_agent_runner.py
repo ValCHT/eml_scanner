@@ -21,8 +21,8 @@ from src.agent.models import (
     AgentLLMResponse,
     ToolCall,
 )
-from src.agent.runner import run_agentic_email
-from src.agent.tools import AGENT_TOOLS, ProviderAdapterSet
+from src.agent.runner import _RagPreprocessing, _VisualPreprocessing, run_agentic_email
+from src.agent.tools import AGENT_TOOLS, ProviderAdapterSet, tool_schema_sha256, tools_for_profile
 from src.config import Settings, load_settings
 from src.parsing import ParseLimits, ParsedEmail, parse_email
 from src.state import Evidence, Observable, ToolResult
@@ -782,8 +782,8 @@ def test_manifest_archives_the_runtime_contract_fingerprints(
 
     ``tool_schema_sha256`` is recomputed here from the tools list really handed
     to the model, ``assessment_schema_sha256`` from the frozen schema FILE
-    bytes, and ``runtime_contract_sha256`` from exactly the eight declared
-    contract fields.
+    bytes, and ``runtime_contract_sha256`` from exactly the ten declared
+    contract fields (T19D-OSINT §27: + profile + effective_capabilities).
     """
 
     client = ScriptedClient([_finalize_response()])
@@ -808,6 +808,7 @@ def test_manifest_archives_the_runtime_contract_fingerprints(
 
     contract = {
         "architecture": manifest["architecture"],
+        "profile": manifest["profile"],
         "model": manifest["model_requested"],
         "reasoning_effort": manifest["reasoning_effort"],
         "max_output_tokens_per_turn": manifest["max_output_tokens_per_turn"],
@@ -815,6 +816,7 @@ def test_manifest_archives_the_runtime_contract_fingerprints(
         "effective_prompt_sha256": manifest["effective_prompt_sha256"],
         "tool_schema_sha256": manifest["tool_schema_sha256"],
         "assessment_schema_sha256": manifest["assessment_schema_sha256"],
+        "effective_capabilities": manifest["effective_capabilities"],
     }
     assert manifest["runtime_contract_sha256"] == _canonical_sha256(contract)
 
@@ -1108,7 +1110,7 @@ def test_artifacts_are_written_with_smoke_scope_and_chronological_trace(
     for name in ("manifest.json", "trace.jsonl", "final.json", "summary.txt"):
         assert (result.run_dir / name).is_file(), name
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["architecture"] == "agentic_core_v2"
+    assert manifest["architecture"] == "agentic_core_v3"
     assert manifest["run_kind"] == "t19c_agentic_runtime"
     assert manifest["measurement_scope"] == "smoke"
     assert manifest["performance_claims_allowed"] is False
@@ -1143,3 +1145,219 @@ def test_artifacts_are_written_with_smoke_scope_and_chronological_trace(
     summary = (result.run_dir / "summary.txt").read_text(encoding="utf-8")
     assert "performance_claims_allowed=false" in summary
     assert "smoke" in summary
+
+
+# ---------------------------------------------------------------------------
+# TICKET-19D-OSINT §38 — profiles, tool hashes, effective capabilities
+# ---------------------------------------------------------------------------
+
+T19D_FROZEN_TOOL_HASH = "d2b97f27ed36177a5db9c89b3357cf6e5e1bbef4723f8a051f5fb792d9fbabe8"
+
+
+def _transmitted_names(client: ScriptedClient) -> list[str]:
+    return [tool["function"]["name"] for tool in client.calls[0]["tools"]]
+
+
+def _manifest(result: Any) -> dict[str, Any]:
+    return json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _all_true_settings(settings: Settings) -> Settings:
+    return settings.model_copy(
+        update={
+            "RAG_ENABLED": True,
+            "MODEL_SUPPORTS_VISION": True,
+            "QR_DECODE_ENABLED": True,
+        }
+    )
+
+
+def _raise_rag(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("RAG preprocessing must not run on a forced-off profile")
+
+
+def _raise_vision(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("Vision/QR preprocessing must not run on a forced-off profile")
+
+
+def _counting_rag_factory(calls: list[str]) -> Any:
+    def _fake(*args: Any, **kwargs: Any) -> Any:
+        calls.append("rag")
+        return _RagPreprocessing(cases=[], enabled=True)
+
+    return _fake
+
+
+def _counting_vision_factory(calls: list[str]) -> Any:
+    from src.vision import VisionPreparation
+
+    def _fake(*args: Any, **kwargs: Any) -> Any:
+        calls.append("vision")
+        return _VisualPreprocessing(
+            preparation=VisionPreparation(
+                visuals=[],
+                staged=(),
+                qr_decode_requested=False,
+                qr_decoder_available=False,
+                pixel_decoder_available=False,
+            )
+        )
+
+    return _fake
+
+
+def test_profile_tool_sets_and_frozen_hashes() -> None:
+    core = [t["function"]["name"] for t in tools_for_profile("agentic_core")]
+    context = [t["function"]["name"] for t in tools_for_profile("agentic_context")]
+    osint = [t["function"]["name"] for t in tools_for_profile("agentic_osint")]
+    full = [t["function"]["name"] for t in tools_for_profile("agentic_full")]
+    assert core == context == [
+        "lookup_virustotal",
+        "lookup_opencti",
+        "scan_urlscan",
+        "finalize_assessment",
+    ]
+    assert osint == full == [
+        "lookup_virustotal",
+        "lookup_opencti",
+        "scan_urlscan",
+        "lookup_osint",
+        "finalize_assessment",
+    ]
+    assert tool_schema_sha256(tools_for_profile("agentic_core")) == T19D_FROZEN_TOOL_HASH
+    assert tool_schema_sha256(tools_for_profile("agentic_context")) == T19D_FROZEN_TOOL_HASH
+    assert tool_schema_sha256(tools_for_profile("agentic_osint")) == tool_schema_sha256(
+        tools_for_profile("agentic_full")
+    )
+    assert tool_schema_sha256(tools_for_profile("agentic_osint")) != T19D_FROZEN_TOOL_HASH
+
+
+def test_core_forces_context_off_even_when_settings_true(
+    runner_settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.agent.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_rag_preprocess", _raise_rag)
+    monkeypatch.setattr(runner_module, "_vision_preprocess", _raise_vision)
+    client = ScriptedClient([_finalize_response()])
+    result = _run(
+        _all_true_settings(runner_settings), client, _adapters(), tmp_path, profile="agentic_core"
+    )
+    assert _transmitted_names(client) == [
+        "lookup_virustotal",
+        "lookup_opencti",
+        "scan_urlscan",
+        "finalize_assessment",
+    ]
+    assert "lookup_osint" not in _transmitted_names(client)
+    assert "OSINT GUIDANCE" not in client.calls[0]["messages"][0]["content"]
+    manifest = _manifest(result)
+    assert manifest["profile"] == "agentic_core"
+    assert manifest["tool_schema_sha256"] == T19D_FROZEN_TOOL_HASH
+    assert manifest["effective_capabilities"] == {
+        "rag": False,
+        "rag_index_fingerprint": None,
+        "qr": False,
+        "vision": False,
+        "osint": False,
+        "threatfox_configured": False,
+        "psl_version": None,
+    }
+
+
+def test_osint_profile_exposes_lookup_and_forces_context_off(
+    runner_settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.agent.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "_rag_preprocess", _raise_rag)
+    monkeypatch.setattr(runner_module, "_vision_preprocess", _raise_vision)
+    client = ScriptedClient([_finalize_response()])
+    result = _run(
+        _all_true_settings(runner_settings), client, _adapters(), tmp_path, profile="agentic_osint"
+    )
+    assert _transmitted_names(client) == [
+        "lookup_virustotal",
+        "lookup_opencti",
+        "scan_urlscan",
+        "lookup_osint",
+        "finalize_assessment",
+    ]
+    assert "OSINT GUIDANCE" in client.calls[0]["messages"][0]["content"]
+    manifest = _manifest(result)
+    assert manifest["profile"] == "agentic_osint"
+    assert manifest["effective_capabilities"]["osint"] is True
+    assert manifest["effective_capabilities"]["psl_version"] == "1.0.2.20260921"
+    assert manifest["effective_capabilities"]["rag"] is False
+    assert manifest["effective_capabilities"]["qr"] is False
+    assert manifest["effective_capabilities"]["vision"] is False
+
+
+def test_context_and_full_follow_settings(
+    runner_settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.agent.runner as runner_module
+
+    for profile, expected_tools in (
+        ("agentic_context", 4),
+        ("agentic_full", 5),
+    ):
+        calls: list[str] = []
+        monkeypatch.setattr(runner_module, "_rag_preprocess", _counting_rag_factory(calls))
+        monkeypatch.setattr(runner_module, "_vision_preprocess", _counting_vision_factory(calls))
+        client = ScriptedClient([_finalize_response()])
+        result = _run(
+            _all_true_settings(runner_settings), client, _adapters(), tmp_path, profile=profile  # type: ignore[arg-type]
+        )
+        assert calls == ["rag", "vision"]
+        assert len(_transmitted_names(client)) == expected_tools
+        manifest = _manifest(result)
+        assert manifest["effective_capabilities"]["rag"] is True
+        assert manifest["effective_capabilities"]["qr"] is True
+        assert manifest["effective_capabilities"]["vision"] is True
+        assert manifest["effective_capabilities"]["osint"] is (expected_tools == 5)
+        assert ("OSINT GUIDANCE" in client.calls[0]["messages"][0]["content"]) is (expected_tools == 5)
+
+
+def test_threatfox_configured_follows_key_presence(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    from pydantic import SecretStr
+
+    client = ScriptedClient([_finalize_response()])
+    result = _run(runner_settings, client, _adapters(), tmp_path, profile="agentic_osint")
+    assert _manifest(result)["effective_capabilities"]["threatfox_configured"] is False
+
+    keyed = runner_settings.model_copy(update={"ABUSECH_API_KEY": SecretStr("synthetic-canary")})
+    client2 = ScriptedClient([_finalize_response()])
+    result2 = _run(keyed, client2, _adapters(), tmp_path, profile="agentic_full")
+    assert _manifest(result2)["effective_capabilities"]["threatfox_configured"] is True
+    assert "synthetic-canary" not in json.dumps(_manifest(result2))
+
+
+def test_runtime_contract_differs_across_all_four_profiles(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    contracts = []
+    for profile in ("agentic_core", "agentic_context", "agentic_osint", "agentic_full"):
+        client = ScriptedClient([_finalize_response()])
+        result = _run(runner_settings, client, _adapters(), tmp_path, profile=profile)  # type: ignore[arg-type]
+        manifest = _manifest(result)
+        assert manifest["profile"] == profile
+        contracts.append(manifest["runtime_contract_sha256"])
+    assert len(set(contracts)) == 4
+
+
+def test_capabilities_do_not_depend_on_tool_outcomes(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """Capabilities describe the active configuration, never tool results."""
+
+    client = ScriptedClient([_finalize_response()])
+    result = _run(
+        _all_true_settings(runner_settings), client, _adapters(), tmp_path, profile="agentic_full"
+    )
+    capabilities = _manifest(result)["effective_capabilities"]
+    assert capabilities["osint"] is True
+    assert capabilities["rag"] is False  # no RAG adapter injected in this run
+    assert capabilities["rag_index_fingerprint"] is None

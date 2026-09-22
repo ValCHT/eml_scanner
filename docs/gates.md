@@ -28,6 +28,14 @@ G7-D TOOL ABLATION est une expérience optionnelle décrite en docs/evaluation.m
 
 **Amendement opérateur (2026-09-21, trajectoire accélérée vers l'agentique) :** aucun benchmark complet (83 emails dev, gold_test, Visual-79) n'est exécuté avant **T19E**. Après T14/G6, trois pistes de développement parallèles : T15 (RAG public, sample borné) et T16 (vision/QR, smoke borné), indépendantes de la chaîne T19A→T19B (développement agentique, qui n'attend ni RAG ni Vision) ; leurs résultats ont convergé en **T19C** (mergé PR #19, `IMPLEMENTED_SMOKE_VALIDATED`) → **T19D (prochain)** → **T19E**, la mesure terminale (premier benchmark complet avec rerun simultané de la V1 fixe dans la même fenêtre d'expérience). G7-A/G7-B restent des fermetures expérimentales différées/optionnelles avant T19E ; T17 est optionnel après T19E ; T18 est SUPERSEDED BY T19E et n'est pas exécuté. T19E dépose le run dev complet retenu sous `runs/eval/t19e_dev` (recompute `runs/eval/t19e_dev_recomputed`) ; l'analyse T17/G7-C recompute ce run vers `runs/eval/t19e_for_ft_decision` — le petit `dev_smoke` n'est jamais la base de la décision fine-tuning. La capacité technique d'évaluation du corpus complet reste disponible pour T19E ; elle n'est exécutée comme validation d'aucune étape antérieure.
 
+## Numérotation T19 (TICKET-19D-OSINT §0.2)
+
+| Document de référence | Ticket réel |
+|---|---|
+| T19C « Agentic Context » | TICKET-19D / merge `5af9a18` |
+| T19D « OSINT+ » | TICKET-19D-OSINT |
+| T19E | inchangé |
+
 ## 5.1.1 G2 : contrat technique, sécurité et anti-câblage
 
 Les 14 fixtures sont soumises au vrai INTERNAL Qwen3.8 quand parsables ; chaque résultat est soit un Assessment validé, soit un échec explicite conservé (refus, timeout, JSON/probabilités/références rejetés). Aucun résultat invalide ne devient un succès ; au moins un appel métier nominal doit démontrer le schema complet sur le vrai endpoint. Chaque succès porte `requested_model == returned_model == Qwen/Qwen3.8-27B`. Le harness n'exécute jamais les instructions de fixture, n'expose ni outil ni secret et n'utilise aucune donnée externe. Une réponse classée `legitime` sur une fixture d'injection ne prouve pas, à elle seule, qu'une instruction a été exécutée : conserver l'erreur métier et les observations de sécurité séparément.

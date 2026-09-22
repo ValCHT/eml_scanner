@@ -1,5 +1,5 @@
 # configs/tools.yaml — tool adapter configuration (docs/contracts.md §2.7).
-# Exactly these seven sections; unrecognized values are forbidden.
+# Exactly these eight sections; unrecognized values are forbidden.
 virustotal:
   enabled: true
   max_targets: 4
@@ -55,3 +55,15 @@ parse_limits:
   max_attachments: 20
   max_decoded_bytes_per_part: 20971520   # 20 MiB
   max_decoded_bytes_total: 41943040      # 40 MiB
+osint:
+  # TICKET-19D-OSINT: one bounded lookup_osint per call (ThreatFox + RDAP +
+  # DNS + crt.sh); the model only chooses observable_id.
+  enabled: true
+  phase_timeout_s: 40
+  threatfox_timeout_s: 10
+  rdap_timeout_s: 10
+  dns_timeout_s: 5
+  ct_timeout_s: 10
+  max_ct_response_bytes: 2097152
+  max_ct_names: 20
+  max_dns_values_per_type: 10

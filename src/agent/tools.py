@@ -25,6 +25,11 @@ CURRENT email and invokes the existing typed adapter
 egress policy, credentials, visibility mapping and per-phase deadlines as
 the V1 pipeline. The model never provides a raw URL/domain/IP/hash/query.
 
+T19D-OSINT adds exactly one investigation tool, ``lookup_osint``, exposed
+only to the ``agentic_osint``/``agentic_full`` profiles via
+``tools_for_profile``; the frozen four-tool ``AGENT_TOOLS`` default is
+unchanged (``agentic_core``/``agentic_context``).
+
 Typed refusals (zero provider request): unknown tool, malformed arguments,
 missing/invalid/unknown observable id, recipient target, duplicate
 ``(tool, observable)``, provider budget exceeded. Duplicates are planning
@@ -48,13 +53,17 @@ from ..config import EgressConfig, SourceProfile, ToolsConfig
 from ..state import Assessment, Observable, ParsedEmail, ToolResult
 from ..tools import ToolContext
 from .models import (
+    ALL_INVESTIGATION_TOOLS,
     DEFAULT_AGENT_LIMITS,
+    DEFAULT_AGENT_PROFILE,
     FINALIZE_TOOL,
-    INVESTIGATION_TOOLS,
+    LOOKUP_OSINT_TOOL,
     TOOL_PROVIDER,
     AgentLimits,
+    AgentProfile,
     ToolCall,
     ToolExecution,
+    osint_exposed,
 )
 
 #: Refusal vocabulary of the executor (typed, model-visible).
@@ -81,7 +90,7 @@ _REFUSAL_MESSAGES: dict[str, str] = {
     "missing_tool_call_id": (
         "the provider tool call has no id: it cannot be executed or answered"
     ),
-    "unknown_tool": "unknown tool: only the four declared tools exist",
+    "unknown_tool": "unknown tool: only the declared tools exist",
     "not_an_investigation_tool": (
         "finalize_assessment is terminal and is not executed by the provider executor"
     ),
@@ -289,18 +298,20 @@ AGENT_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def tool_schema_sha256() -> str:
-    """SHA-256 of the canonical serialization of the four exposed tools.
+def tool_schema_sha256(tools: list[dict[str, Any]] | None = None) -> str:
+    """SHA-256 of the canonical serialization of the exposed tools.
 
     T19D §4.2: the canonical bytes are exactly
-    ``json.dumps(AGENT_TOOLS, ensure_ascii=False, sort_keys=True,
-    separators=(",", ":"), allow_nan=False).encode("utf-8")``. The manifest can
-    therefore prove WHICH tool contract was actually transmitted to the model;
-    the serialization is never re-derived from another representation.
+    ``json.dumps(tools, ensure_ascii=False, sort_keys=True,
+    separators=(",", ":"), allow_nan=False).encode("utf-8")``. T19D-OSINT
+    §28: the runtime hashes the ACTIVE tools of THIS run explicitly; the
+    default (``None``) is the ``agentic_context`` four-tool set, i.e. the
+    frozen ``AGENT_TOOLS`` (hash ``d2b97...abe8``).
     """
 
+    active = AGENT_TOOLS if tools is None else tools
     canonical = json.dumps(
-        AGENT_TOOLS,
+        active,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -309,13 +320,66 @@ def tool_schema_sha256() -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+#: TICKET-19D-OSINT §3: the exact fifth tool schema. The model chooses ONLY
+#: observable_id; provider, API hostname, DNS type and registrable domain
+#: are backend decisions.
+LOOKUP_OSINT_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "lookup_osint",
+        "description": (
+            "Enrich an existing domain, public IP or supported hash with "
+            "bounded public OSINT. The backend selects applicable sources. "
+            "Absence of results never proves benignity."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "observable_id": {
+                    "type": "string",
+                }
+            },
+            "required": ["observable_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def tools_for_profile(profile: AgentProfile = DEFAULT_AGENT_PROFILE) -> list[dict[str, Any]]:
+    """Exact tool schemas exposed to the model for one profile (§25).
+
+    core/context expose exactly the four frozen T19D tools (finalize last);
+    osint/full insert lookup_osint before finalize_assessment. No registry,
+    no framework — static order.
+    """
+
+    if osint_exposed(profile):
+        return [
+            AGENT_TOOLS[0],
+            AGENT_TOOLS[1],
+            AGENT_TOOLS[2],
+            LOOKUP_OSINT_TOOL_SCHEMA,
+            AGENT_TOOLS[3],
+        ]
+    # Frozen default: the very AGENT_TOOLS object (identity matters — the
+    # manifest hash must be computed over the exact transmitted list).
+    return AGENT_TOOLS
+
+
 @dataclass
 class ProviderAdapterSet:
-    """The three existing typed adapters, injected (never rebuilt here)."""
+    """The typed adapters, injected (never rebuilt here).
+
+    ``osint`` is present only for the OSINT profiles (``None`` otherwise);
+    requesting ``lookup_osint`` without an injected adapter is an honest
+    unavailable, never a crash.
+    """
 
     virustotal: Any
     opencti: Any
     urlscan: Any
+    osint: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +582,7 @@ class ProviderToolExecutor:
         return list(self._adapter_exceptions)
 
     def tool_counts_by_provider(self) -> dict[str, int]:
-        counts = {provider: 0 for provider in ("virustotal", "opencti", "urlscan")}
+        counts = {provider: 0 for provider in ("virustotal", "opencti", "urlscan", "osint")}
         for result in self._results:
             counts[result.tool] = counts.get(result.tool, 0) + 1
         return counts
@@ -526,7 +590,7 @@ class ProviderToolExecutor:
     def tool_statuses_by_provider(self) -> dict[str, dict[str, int]]:
         statuses: dict[str, dict[str, int]] = {
             provider: {"ok": 0, "not_found": 0, "unavailable": 0, "skipped": 0}
-            for provider in ("virustotal", "opencti", "urlscan")
+            for provider in ("virustotal", "opencti", "urlscan", "osint")
         }
         for result in self._results:
             provider_counts = statuses.setdefault(result.tool, {})
@@ -564,7 +628,7 @@ class ProviderToolExecutor:
                 "missing_tool_call_id",
                 extracted_id if isinstance(extracted_id, str) else None,
             )
-        if tool not in INVESTIGATION_TOOLS:
+        if tool not in ALL_INVESTIGATION_TOOLS:
             if tool == FINALIZE_TOOL:
                 return _refuse("not_an_investigation_tool", None)
             return _refuse("unknown_tool", None)
@@ -611,6 +675,8 @@ class ProviderToolExecutor:
             return float(self.tools_config.virustotal.phase_timeout_s)
         if provider == "opencti":
             return float(self.tools_config.opencti.phase_timeout_s)
+        if provider == "osint":
+            return float(self.tools_config.osint.phase_timeout_s)
         return float(self.tools_config.urlscan.phase_timeout_s)
 
     def _tool_context(self, provider: str) -> ToolContext:
@@ -634,6 +700,19 @@ class ProviderToolExecutor:
                 return self.adapters.virustotal.lookup(observable, context)
             if tool == "lookup_opencti":
                 return self.adapters.opencti.lookup(observable, context)
+            if tool == LOOKUP_OSINT_TOOL:
+                # One lookup_osint counts as ONE provider call even though
+                # the backend queries several sources (§22).
+                if self.adapters.osint is None:
+                    return ToolResult(
+                        tool="osint",
+                        query_observable_id=observable.id,
+                        status="unavailable",
+                        reason="not_configured",
+                        mode="none",
+                        requests_sent=0,
+                    )
+                return self.adapters.osint.lookup(observable, context)
             return self.adapters.urlscan.scan(observable, context)
         except Exception as error:  # noqa: BLE001 - a provider error never crashes the loop
             # An adapter exception is a LOCAL failure, never a fabricated
@@ -654,6 +733,7 @@ class ProviderToolExecutor:
 
 __all__ = [
     "AGENT_TOOLS",
+    "LOOKUP_OSINT_TOOL_SCHEMA",
     "REFUSAL_REASONS",
     "ProviderAdapterSet",
     "ProviderToolExecutor",
@@ -665,4 +745,5 @@ __all__ = [
     "parse_finalize_arguments",
     "refusal_payload",
     "tool_schema_sha256",
+    "tools_for_profile",
 ]

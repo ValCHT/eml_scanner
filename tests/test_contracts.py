@@ -222,7 +222,8 @@ def test_gate_and_policy_configs(configs_dir: Path) -> None:
 def test_tools_config_exact_sections(configs_dir: Path) -> None:
     tools = load_yaml_config(configs_dir / "tools.yaml", ToolsConfig)
     assert set(ToolsConfig.model_fields) == {
-        "virustotal", "opencti", "urlscan", "rag", "vision", "egress", "parse_limits"
+        "virustotal", "opencti", "urlscan", "rag", "vision", "egress", "parse_limits",
+        "osint",
     }
     assert tools.virustotal.max_targets == 4
     assert tools.virustotal.phase_timeout_s == 20
