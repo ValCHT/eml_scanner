@@ -11,7 +11,31 @@
 
 ## STATUT
 
-READY_TO_IMPLEMENT
+IMPLEMENTED_OSINT_PROFILES_VALIDATED
+
+## CLÔTURE
+
+Validation finale au 2026-09-22 :
+
+- ThreatFox live PASS sur `example.com` et `1.1.1.1` : vrais POST HTTP, résultats `not_found` ;
+- RDAP live PASS ;
+- DNS live PASS ;
+- Certificate Transparency : `external_unavailable` sur le run final, best-effort et non bloquant, avec tests offline PASS ;
+- `secret_persisted=false` ;
+- verifier : `compatible_not_confirming` ; V09 inchangé ;
+- `schemas/assessment.schema.json` inchangé ;
+- hash tools `agentic_core` / `agentic_context` inchangé depuis T19D ;
+- `max_tool_calls=4` inchangé ;
+- tests ciblés post-review : 368 PASS ;
+- full pytest post-review : 895 PASS / 27 deselected ;
+- `pip check` PASS ;
+- `git diff --check` PASS ;
+- `gold_test` fermé ;
+- Visual-79 non exécuté ;
+- aucun benchmark complet ;
+- T19E non commencé.
+
+Le ticket est clos. Aucun tuning supplémentaire avant T19E.
 
 ## GATE
 
