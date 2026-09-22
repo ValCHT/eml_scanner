@@ -134,6 +134,12 @@ class AgentLLMResponse:
     reasoning_tokens: int | None = None
     request_sha256: str | None = None
     response_sha256: str | None = None
+    # T19D §5: passive observation of a native provider reasoning text field.
+    # The text itself is NEVER stored, interpreted or reinjected; only
+    # presence, character count and SHA-256 are archived (metadata only).
+    reasoning_content_present: bool = False
+    reasoning_content_chars: int | None = None
+    reasoning_content_sha256: str | None = None
     attempts: int = 0
     elapsed_ms: float = 0.0
     error: str | None = None

@@ -206,6 +206,24 @@ class AgentChatClient:
         return calls
 
     @staticmethod
+    def _observe_reasoning_content(
+        message: dict[str, Any],
+    ) -> tuple[bool, int | None, str | None]:
+        """Passive observation of a native provider reasoning text field (T19D §5).
+
+        When the provider returns an explicit ``reasoning_content`` string, only
+        its presence, character count and SHA-256 are derived. The text is never
+        persisted, never interpreted and never reinjected into a later turn; a
+        provider that returns nothing yields ``(False, None, None)`` and the
+        runtime continues normally.
+        """
+
+        raw = message.get("reasoning_content")
+        if not isinstance(raw, str) or not raw:
+            return False, None, None
+        return True, len(raw), hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None]:
         if not usage:
             return {
@@ -283,6 +301,11 @@ class AgentChatClient:
             return response
         response.content = content
         response.tool_calls = AgentChatClient._parse_tool_calls(message)
+        (
+            response.reasoning_content_present,
+            response.reasoning_content_chars,
+            response.reasoning_content_sha256,
+        ) = AgentChatClient._observe_reasoning_content(message)
 
         if finish_reason not in _OK_FINISH_REASONS and not (
             finish_reason is None and response.tool_calls
@@ -326,6 +349,11 @@ class AgentChatClient:
             "request_bytes": request_bytes,
             "response_sha256": response.response_sha256,
             "response_bytes": response_bytes,
+            # T19D §5: reasoning-metadata observation only — presence, length
+            # and hash; the reasoning text itself is never written to disk.
+            "reasoning_content_present": response.reasoning_content_present,
+            "reasoning_content_chars": response.reasoning_content_chars,
+            "reasoning_content_sha256": response.reasoning_content_sha256,
             "usage": {
                 "input_tokens": response.input_tokens,
                 "cached_input_tokens": response.cached_input_tokens,

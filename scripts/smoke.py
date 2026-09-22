@@ -1254,24 +1254,56 @@ SMOKE_VISION_EFFORT = "medium"
 SMOKE_VISION_DEADLINE_SECONDS = 60.0
 
 
-def _smoke_vision_facts(capture_dir: Path) -> dict[str, object]:
-    """Read the client's per-attempt artifacts (metadata only, expurgated)."""
+def _smoke_vision_artifact(capture_dir: Path, name: str) -> dict[str, object]:
+    """Read one attempt artifact as a JSON object; missing/invalid => {}."""
 
-    metas = sorted(capture_dir.glob("internal_attempt_*_response_meta.json"))
-    meta: dict[str, object] = {}
-    if metas:
-        try:
-            meta = json.loads(metas[-1].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            meta = {}
-    errors = sorted(capture_dir.glob("internal_attempt_*_error.txt"))
+    try:
+        data = json.loads((capture_dir / name).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _smoke_vision_facts(capture_dir: Path, attempt: int) -> dict[str, object]:
+    """Read the client's per-attempt artifacts (metadata only, expurgated).
+
+    TICKET-19D §1: ``LunaClient`` really writes
+    ``attempt_<n>_response_meta.json`` (hash/size of the exact provider bytes,
+    returned model, usage), ``attempt_<n>_error.txt`` and
+    ``internal_attempt_<n>.input_audit.json``. The T16 version of this helper
+    searched for ``internal_attempt_*_response_meta.json`` /
+    ``internal_attempt_*_error.txt`` — names the client never writes — so an
+    already produced response hash/size was silently dropped from the receipt.
+
+    Only the artifacts of the attempt that actually produced the returned
+    record are read (no stale file from another run can be mis-attributed); a
+    missing file yields null/[] and no value is ever invented. The raw
+    response body is never read: metadata only.
+    """
+
+    meta = (
+        _smoke_vision_artifact(capture_dir, f"attempt_{attempt}_response_meta.json")
+        if attempt >= 1
+        else {}
+    )
+    audit = (
+        _smoke_vision_artifact(
+            capture_dir, f"internal_attempt_{attempt}.input_audit.json"
+        )
+        if attempt >= 1
+        else {}
+    )
     error_lines: list[str] = []
-    for path in errors:
-        try:
-            error_lines.append(expurgate(path.read_text(encoding="utf-8")[:400]))
-        except OSError:
-            continue
-    return {"meta": meta, "errors": error_lines}
+    if attempt >= 1:
+        error_path = capture_dir / f"attempt_{attempt}_error.txt"
+        if error_path.is_file():
+            try:
+                error_lines.append(
+                    expurgate(error_path.read_text(encoding="utf-8")[:400])
+                )
+            except OSError:
+                pass
+    return {"meta": meta, "errors": error_lines, "audit": audit}
 
 
 def smoke_vision(if_configured: bool = False, require_configured: bool = False) -> int:
@@ -1421,7 +1453,7 @@ def smoke_vision(if_configured: bool = False, require_configured: bool = False) 
         deadline=time.monotonic() + SMOKE_VISION_DEADLINE_SECONDS,
     )
 
-    facts = _smoke_vision_facts(capture_dir)
+    facts = _smoke_vision_facts(capture_dir, record.attempts)
     schema_valid = result is not None and record.status == "ok"
     if schema_valid and isinstance(result, dict):
         issues = validate_assessment_shape_and_refs(
@@ -1442,6 +1474,8 @@ def smoke_vision(if_configured: bool = False, require_configured: bool = False) 
         for line in facts["errors"]
     )
     status = "live_ok" if accepted else ("vision_rejected" if provider_rejection else "live_failed")
+    meta_facts = facts["meta"] if isinstance(facts["meta"], dict) else {}
+    audit_facts = facts["audit"] if isinstance(facts["audit"], dict) else {}
 
     payload = {
         "smoke": "vision",
@@ -1466,11 +1500,9 @@ def smoke_vision(if_configured: bool = False, require_configured: bool = False) 
         },
         "supplied_visual_ids": envelope["SUPPLIED_VISUAL_IDS"],
         "visual_blocks_in_request": supplied_count,
-        "untrusted_email_sha256": facts["meta"].get("untrusted_email_sha256")
-        if isinstance(facts["meta"], dict)
-        else None,
-        "response_sha256": facts["meta"].get("response_sha256") if isinstance(facts["meta"], dict) else None,
-        "response_bytes": facts["meta"].get("response_bytes") if isinstance(facts["meta"], dict) else None,
+        "untrusted_email_sha256": audit_facts.get("untrusted_email_sha256"),
+        "response_sha256": meta_facts.get("response_sha256"),
+        "response_bytes": meta_facts.get("response_bytes"),
         "provider_errors": facts["errors"],
         "qr_local_decode": {
             "enabled": settings.QR_DECODE_ENABLED,

@@ -720,6 +720,65 @@ def test_index_row_carries_the_per_sample_effective_prompt_sha256(
     assert with_rag.to_index_row()["effective_prompt_sha256"] == with_rag.prompt_sha256
 
 
+def test_runtime_contract_hash_follows_the_conditional_prompt_guidance(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """T19D §9: the RAG/visual guidance changes ``effective_prompt_sha256``
+    and therefore ``runtime_contract_sha256``; the tool/schema hashes and the
+    applied limits stay identical (same runtime, different context)."""
+
+    text_only = _run(
+        runner_settings,
+        ScriptedClient([_finalize_response()]),
+        _adapters(),
+        tmp_path,
+    )
+    with_rag = _run(
+        runner_settings,
+        ScriptedClient([_finalize_response()]),
+        _adapters(),
+        tmp_path,
+        rag=StubRagAdapter([_rag_case()]),
+    )
+    vision_settings = runner_settings.model_copy(update={"MODEL_SUPPORTS_VISION": True})
+    with_visuals = _run(
+        vision_settings,
+        ScriptedClient([_finalize_response()]),
+        _adapters(),
+        tmp_path,
+        email_name="vision/benign_image.eml",
+    )
+
+    text_manifest = _manifest(text_only)
+    rag_manifest = _manifest(with_rag)
+    visual_manifest = _manifest(with_visuals)
+    assert (
+        rag_manifest["effective_prompt_sha256"]
+        != text_manifest["effective_prompt_sha256"]
+    )
+    assert (
+        visual_manifest["effective_prompt_sha256"]
+        != text_manifest["effective_prompt_sha256"]
+    )
+    assert (
+        rag_manifest["runtime_contract_sha256"]
+        != text_manifest["runtime_contract_sha256"]
+    )
+    assert (
+        visual_manifest["runtime_contract_sha256"]
+        != text_manifest["runtime_contract_sha256"]
+    )
+    for key in (
+        "tool_schema_sha256",
+        "assessment_schema_sha256",
+        "limits",
+        "reasoning_effort",
+        "max_output_tokens_per_turn",
+    ):
+        assert rag_manifest[key] == text_manifest[key]
+        assert visual_manifest[key] == text_manifest[key]
+
+
 def test_v1_prompt_bytes_are_unchanged() -> None:
     for name, expected in V1_PROMPT_SHA256.items():
         data = (PROJECT_ROOT / "prompts" / name).read_bytes()
