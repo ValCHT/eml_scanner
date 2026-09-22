@@ -2,7 +2,12 @@
 
 ## STATUT
 
-READY_TO_IMPLEMENT
+`IMPLEMENTED_FREEZE_VALIDATED` (2026-09-22)
+
+Implémenté sur `feature/t19d-hardening-freeze` (PR #20), base `main`
+`a6a75f0` ; validations offline vertes, smoke Vision live borné `live_ok`
+(receipt `runs/gates/G7-B/smoke_vision/`), `reasoning_metadata = not_observed`.
+Voir `runs/tickets/TICKET-19D/report.md` et `status.json`.
 
 Point de départ obligatoire :
 
@@ -228,12 +233,22 @@ max_single_llm_seconds
 max_tool_result_chars
 ```
 
-et que :
+et que, selon leur portée :
 
-- le runtime applique réellement la valeur ;
-- le prompt annonce la même valeur ;
-- le manifest archive la même valeur ;
-- les messages de refus utilisent la même valeur.
+- **limites modèle-visibles** — `max_llm_turns`, `max_tool_calls`,
+  `max_urlscan_calls`, `max_agent_seconds` : le runtime applique réellement la
+  valeur, le prompt annonce la même valeur, le manifest archive la même valeur
+  et les messages de refus utilisent la même valeur ;
+- **limites runtime-only** — `max_single_llm_seconds` (borne de chaque requête
+  LLM) et `max_tool_result_chars` (borne du payload `role=tool`) : le runtime
+  applique réellement la valeur et le manifest l'archive ; elles ne sont ni
+  annoncées dans le prompt ni dans les refus, car le prompt gelé n'est pas
+  modifié par T19D ;
+- toutes les limites restent appliquées, archivées dans le manifest et
+  couvertes par `runtime_contract_sha256`.
+
+Cette portée est celle du runtime gelé T19D : la corriger ici est un ajustement
+de spec, pas une invitation à modifier le prompt.
 
 ### Exception
 
@@ -609,7 +624,12 @@ max_single_llm_seconds
 max_tool_result_chars
 ```
 
-et vérifier que manifest/prompt/runtime utilisent bien ces valeurs.
+et vérifier que le manifest et le runtime utilisent bien ces valeurs. Pour les
+limites modèle-visibles (`max_llm_turns`, `max_tool_calls`, `max_agent_seconds`)
+le prompt annonce la même valeur et les refus typés dérivent de la même valeur.
+Les limites runtime-only (`max_single_llm_seconds`, `max_tool_result_chars`) ne
+sont ni annoncées dans le prompt ni dans les refus : le prompt gelé n'est pas
+modifié (voir §3).
 
 Tester également que :
 
