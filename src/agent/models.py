@@ -19,8 +19,12 @@ from typing import Any, Literal
 
 from ..state import Assessment, ToolResult
 
-#: Artifact architecture marker (docs/tickets/TICKET-19B.md §22).
+#: Historical T19A/B artifact architecture marker (docs/tickets/TICKET-19B.md §22).
 ARCHITECTURE_NAME = "agentic_core_v1"
+
+#: T19C converged runtime marker: bounded agentic loop + T15 public RAG +
+#: T16 QR/Vision, still exactly four tools and one agent (TICKET-19C).
+CONVERGED_ARCHITECTURE_NAME = "agentic_core_v2"
 
 #: A smoke never allows a performance claim (operator amendment 2026-09-21).
 MEASUREMENT_SCOPE = "smoke"
@@ -211,6 +215,7 @@ __all__ = [
     "AGENT_REASONING_EFFORT",
     "AGENT_TOOL_NAMES",
     "ARCHITECTURE_NAME",
+    "CONVERGED_ARCHITECTURE_NAME",
     "DEFAULT_AGENT_LIMITS",
     "FINALIZE_TOOL",
     "INVESTIGATION_TOOLS",

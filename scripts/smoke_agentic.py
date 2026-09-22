@@ -51,6 +51,7 @@ from src.agent.client import AgentChatClient  # noqa: E402
 from src.agent.models import (  # noqa: E402
     AGENT_REASONING_EFFORT,
     ARCHITECTURE_NAME,
+    CONVERGED_ARCHITECTURE_NAME,
     DEFAULT_AGENT_LIMITS,
     MAX_AGENT_SECONDS,
     MAX_SINGLE_LLM_SECONDS,
@@ -395,6 +396,11 @@ def run_smoke(args: argparse.Namespace) -> int:
             )
             email_file = Path(temp_dir.name) / f"{index:04d}_{sample_id}.eml"
             email_file.write_bytes(verified_bytes[sample_id])
+            # Caller-owned current-email identity, exactly like the V1 RAG
+            # node: the adapter excludes these groups and V15 re-checks them.
+            current_family_group = str(gold_row.get("family_group") or "").strip() or None
+            current_duplicate_group = str(gold_row.get("duplicate_group") or "").strip() or None
+            current_campaign_id = str(gold_row.get("campaign_id") or "").strip() or None
             try:
                 result = run_agentic_email(
                     email_file,
@@ -402,6 +408,18 @@ def run_smoke(args: argparse.Namespace) -> int:
                     source_profile=source_profile,  # type: ignore[arg-type]
                     run_root=run_root,
                     sample_id=sample_id,
+                    rag_exclusions={
+                        item
+                        for item in (
+                            current_family_group,
+                            current_duplicate_group,
+                            current_campaign_id,
+                        )
+                        if item
+                    },
+                    current_duplicate_group=current_duplicate_group,
+                    current_family_group=current_family_group,
+                    current_campaign_id=current_campaign_id,
                 )
             except Exception as error:
                 print(
@@ -432,8 +450,8 @@ def run_smoke(args: argparse.Namespace) -> int:
 
     index = {
         "schema_version": "1.0",
-        "architecture": ARCHITECTURE_NAME,
-        "run_kind": "t19b_agentic_core_smoke",
+        "architecture": CONVERGED_ARCHITECTURE_NAME,
+        "run_kind": "t19c_agentic_runtime_smoke",
         "measurement_scope": MEASUREMENT_SCOPE,
         "performance_claims_allowed": PERFORMANCE_CLAIMS_ALLOWED,
         "batch_id": batch_id,

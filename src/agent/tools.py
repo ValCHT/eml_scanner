@@ -1,4 +1,4 @@
-"""Exact agent tool set and the typing-safe executor (TICKET-19A/B §9-§20).
+"""Exact agent tool set and the typing-safe executor (TICKET-19A/B/C §6-§8).
 
 Exactly four tools are exposed to the LLM::
 
@@ -6,6 +6,14 @@ Exactly four tools are exposed to the LLM::
     lookup_opencti    <observable_id>
     scan_urlscan      <observable_id>
     finalize_assessment {assessment}
+
+T19C §7: ``finalize_assessment.assessment`` exposes the COMPLETE frozen
+Assessment JSON Schema (``schemas/assessment.schema.json``, loaded here and
+never duplicated) instead of a generic object; the validation chain remains
+tool JSON schema -> Pydantic ``src.state.Assessment`` -> existing verifier ->
+existing policy. T19C §8: each tool description is short and states only
+WHAT it checks, WHEN it is useful and WHAT a negative/unavailable result does
+NOT prove; long documentation stays out of the system prompt.
 
 The three investigation tools accept ONLY ``observable_id``. The executor
 resolves the identifier against the trusted parser-produced registry of the
@@ -121,6 +129,22 @@ def _refusal_message(reason: str, limits: AgentLimits | None = None) -> str:
     return _REFUSAL_MESSAGES.get(reason, "request refused")
 
 
+#: Frozen Assessment JSON Schema (schemas/ is normative, read-only): the
+#: EXACT object ``parse_finalize_arguments`` validates with
+#: ``Assessment.model_validate``. Never a second format.
+_ASSESSMENT_SCHEMA_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "schemas" / "assessment.schema.json"
+)
+
+
+def assessment_schema() -> dict[str, Any]:
+    """Load the frozen Assessment JSON Schema exposed by finalize_assessment."""
+
+    schema = json.loads(_ASSESSMENT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert isinstance(schema, dict)
+    return schema
+
+
 #: The exact four tool schemas exposed to the model (§9). No description
 #: carries a configurable number: the urlscan claim ("at most one submission
 #: exists per run") matches the structurally frozen
@@ -132,10 +156,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_virustotal",
             "description": (
-                "One real VirusTotal GET lookup through the existing typed adapter. "
-                "The only accepted argument is observable_id, an identifier from "
-                "OBSERVABLE_REGISTRY. Returns the normalized ToolResult; unavailable "
-                "or not_found is a valid honest outcome, never benign evidence."
+                "WHAT: one real VirusTotal GET lookup for an observable_id from "
+                "OBSERVABLE_REGISTRY. WHEN: a reputation signal on this exact "
+                "observable could change the assessment. NOT PROOF: unavailable, "
+                "not_found or zero detections never prove benignity."
             ),
             "parameters": {
                 "type": "object",
@@ -155,10 +179,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_opencti",
             "description": (
-                "One real read-only OpenCTI lookup through the existing typed "
-                "adapter. The only accepted argument is observable_id from "
-                "OBSERVABLE_REGISTRY. An exact match is returned as normalized "
-                "evidence; unavailability is honest and never benign evidence."
+                "WHAT: one real read-only OpenCTI lookup for an observable_id from "
+                "OBSERVABLE_REGISTRY. WHEN: knowing whether this exact observable is "
+                "known in CTI could change the assessment. NOT PROOF: presence is "
+                "not proof of malice; unavailability never proves benignity."
             ),
             "parameters": {
                 "type": "object",
@@ -178,10 +202,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "scan_urlscan",
             "description": (
-                "One real urlscan submission through the existing typed adapter. "
-                "Only URL observables from OBSERVABLE_REGISTRY are submittable and "
-                "at most one submission exists per run. Privacy/egress refusals and "
-                "unavailability are returned as normalized statuses."
+                "WHAT: one real urlscan submission for a URL observable_id from "
+                "OBSERVABLE_REGISTRY; at most one submission exists per run. WHEN: "
+                "an unvisited URL's real page could change the assessment. NOT "
+                "PROOF: refusal, unavailable or a clean page never proves benignity."
             ),
             "parameters": {
                 "type": "object",
@@ -202,23 +226,18 @@ AGENT_TOOLS: list[dict[str, Any]] = [
             "name": FINALIZE_TOOL,
             "description": (
                 "Terminal call: deliver the final Assessment. The assessment "
-                "object must validate exactly as the frozen Assessment schema "
-                "(six probabilities summing to 1 within 1e-6, only existing "
-                "evidence/observable IDs, at most six inferences, at most three "
-                "decisive_evidence_ids). An invalid assessment is rejected and "
+                "object must validate exactly against the exposed frozen "
+                "Assessment JSON Schema. An invalid assessment is rejected and "
                 "never becomes a verdict."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "assessment": {
-                        "type": "object",
-                        "description": (
-                            "the complete Assessment object exactly as described by "
-                            "the SORTIE section of the system prompt and the frozen "
-                            "Assessment schema (schemas/assessment.schema.json)"
-                        ),
-                    }
+                    # T19C §7: the COMPLETE frozen Assessment JSON Schema
+                    # (schemas/assessment.schema.json), never a generic object
+                    # and never a second format. Validated by
+                    # parse_finalize_arguments exactly as src.state.Assessment.
+                    "assessment": assessment_schema(),
                 },
                 "required": ["assessment"],
                 "additionalProperties": False,
@@ -576,6 +595,7 @@ __all__ = [
     "REFUSAL_REASONS",
     "ProviderAdapterSet",
     "ProviderToolExecutor",
+    "assessment_schema",
     "execution_payload",
     "normalize_result_payload",
     "parse_finalize_arguments",
