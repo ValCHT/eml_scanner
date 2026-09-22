@@ -9,9 +9,12 @@ Exactly four tools are exposed to the LLM::
 
 T19C §7: ``finalize_assessment.assessment`` exposes the COMPLETE frozen
 Assessment JSON Schema (``schemas/assessment.schema.json``, loaded here and
-never duplicated) instead of a generic object; the validation chain remains
-tool JSON schema -> Pydantic ``src.state.Assessment`` -> existing verifier ->
-existing policy. T19C §8: each tool description is short and states only
+never duplicated) instead of a generic object; the frozen file's root-only
+``$defs`` are hoisted to the tool root so its ``#/$defs/...`` references
+resolve inside the tool parameters (PR #19 review, blocker 1). The
+validation chain remains tool JSON schema -> Pydantic
+``src.state.Assessment`` -> existing verifier -> existing policy. T19C §8:
+each tool description is short and states only
 WHAT it checks, WHEN it is useful and WHAT a negative/unavailable result does
 NOT prove; long documentation stays out of the system prompt.
 
@@ -145,6 +148,38 @@ def assessment_schema() -> dict[str, Any]:
     return schema
 
 
+#: Root-only JSON Schema keywords of the frozen file: ``$schema`` is a
+#: document-level keyword that must not travel into a subschema, and ``$defs``
+#: is hoisted to the tool root (PR #19 review, blocker 1).
+_SCHEMA_ROOT_ONLY = ("$schema", "$defs")
+
+
+def build_finalize_parameters(schema: dict[str, Any]) -> dict[str, Any]:
+    """Tool parameters exposing the frozen Assessment schema with valid refs.
+
+    The frozen file is embedded unchanged except for its root-only keywords:
+    ``$schema`` is dropped (a subschema is not a schema resource) and
+    ``$defs`` is hoisted to the tool root, so every ``#/$defs/...`` reference
+    written by the frozen schema resolves INSIDE the tool parameters instead
+    of pointing at an absent root. No reference is rewritten, no definition is
+    duplicated and no second Assessment format is invented.
+    """
+
+    defs = schema.get("$defs")
+    embedded = {
+        key: value for key, value in schema.items() if key not in _SCHEMA_ROOT_ONLY
+    }
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {"assessment": embedded},
+        "required": ["assessment"],
+        "additionalProperties": False,
+    }
+    if defs:
+        parameters["$defs"] = defs
+    return parameters
+
+
 #: The exact four tool schemas exposed to the model (§9). No description
 #: carries a configurable number: the urlscan claim ("at most one submission
 #: exists per run") matches the structurally frozen
@@ -230,18 +265,13 @@ AGENT_TOOLS: list[dict[str, Any]] = [
                 "Assessment JSON Schema. An invalid assessment is rejected and "
                 "never becomes a verdict."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    # T19C §7: the COMPLETE frozen Assessment JSON Schema
-                    # (schemas/assessment.schema.json), never a generic object
-                    # and never a second format. Validated by
-                    # parse_finalize_arguments exactly as src.state.Assessment.
-                    "assessment": assessment_schema(),
-                },
-                "required": ["assessment"],
-                "additionalProperties": False,
-            },
+            # T19C §7: the COMPLETE frozen Assessment JSON Schema
+            # (schemas/assessment.schema.json), never a generic object and
+            # never a second format. Its `$defs` are hoisted to this tool
+            # root so every `#/$defs/...` reference resolves (PR #19 review,
+            # blocker 1). Validated by parse_finalize_arguments exactly as
+            # src.state.Assessment.
+            "parameters": build_finalize_parameters(assessment_schema()),
         },
     },
 ]
@@ -596,6 +626,7 @@ __all__ = [
     "ProviderAdapterSet",
     "ProviderToolExecutor",
     "assessment_schema",
+    "build_finalize_parameters",
     "execution_payload",
     "normalize_result_payload",
     "parse_finalize_arguments",

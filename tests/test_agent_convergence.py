@@ -589,6 +589,36 @@ def test_text_plus_rag_plus_qr_plus_vision_converged(
 # ---------------------------------------------------------------------------
 
 
+def _frozen_assessment_schema() -> dict[str, Any]:
+    return json.loads(
+        (PROJECT_ROOT / "schemas" / "assessment.schema.json").read_text(encoding="utf-8")
+    )
+
+
+def _collect_refs(node: Any, refs: list[str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str):
+                refs.append(value)
+            else:
+                _collect_refs(value, refs)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_refs(item, refs)
+
+
+def _resolve_local_ref(document: dict[str, Any], ref: str) -> Any:
+    """Resolve a local JSON pointer ``#/...`` against the tool schema."""
+
+    assert ref.startswith("#/"), ref
+    node: Any = document
+    for token in ref[2:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        assert isinstance(node, dict) and token in node, ref
+        node = node[token]
+    return node
+
+
 def test_finalize_exposes_the_complete_frozen_assessment_schema() -> None:
     finalize = next(
         tool for tool in AGENT_TOOLS if tool["function"]["name"] == "finalize_assessment"
@@ -596,14 +626,17 @@ def test_finalize_exposes_the_complete_frozen_assessment_schema() -> None:
     parameters = finalize["function"]["parameters"]
     assert parameters["required"] == ["assessment"]
     assert parameters["additionalProperties"] is False
+    frozen = _frozen_assessment_schema()
+    # The loader still returns the frozen file VERBATIM (never rewritten).
+    assert assessment_schema() == frozen
     exposed = parameters["properties"]["assessment"]
-    frozen = json.loads(
-        (PROJECT_ROOT / "schemas" / "assessment.schema.json").read_text(encoding="utf-8")
-    )
-    assert exposed == frozen
+    # The frozen file is embedded unchanged except for its root-only keywords.
+    assert exposed == {
+        key: value for key, value in frozen.items() if key not in ("$schema", "$defs")
+    }
+    assert "$schema" not in exposed
     assert exposed["type"] == "object"
     assert exposed["additionalProperties"] is False
-    assert "$defs" in exposed
     assert set(exposed["required"]) == {
         "probabilities",
         "observations",
@@ -613,7 +646,27 @@ def test_finalize_exposes_the_complete_frozen_assessment_schema() -> None:
         "missing_information",
         "decisive_evidence_ids",
     }
-    assert assessment_schema() == frozen
+    # The frozen `$defs` are hoisted to the tool root (PR #19 blocker 1).
+    assert parameters["$defs"] == frozen["$defs"]
+
+
+def test_finalize_tool_parameters_have_resolvable_local_refs() -> None:
+    """PR #19 blocker 1: every `#/$defs/...` reference written by the frozen
+    schema must resolve inside the tool parameters, not at an absent root."""
+
+    finalize = next(
+        tool for tool in AGENT_TOOLS if tool["function"]["name"] == "finalize_assessment"
+    )
+    parameters = finalize["function"]["parameters"]
+    refs: list[str] = []
+    _collect_refs(parameters, refs)
+    assert refs  # the frozen schema is not flattened into nothing
+    for ref in refs:
+        resolved = _resolve_local_ref(parameters, ref)
+        assert resolved is not None
+    # Every frozen definition is reachable through the hoisted root `$defs`.
+    for name in _frozen_assessment_schema()["$defs"]:
+        assert _resolve_local_ref(parameters, f"#/$defs/{name}") is not None
 
 
 def test_only_the_three_investigation_tools_plus_finalize_are_provider_tools(
@@ -640,6 +693,31 @@ def test_only_the_three_investigation_tools_plus_finalize_are_provider_tools(
     client = ScriptedClient([_finalize_response()])
     _run(runner_settings, client, _adapters(), tmp_path)
     assert client.calls[0]["tools"] is AGENT_TOOLS
+
+
+def test_index_row_carries_the_per_sample_effective_prompt_sha256(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """PR #19 blocker 2: the T19C prompt carries conditional RAG/visual
+    guidance, so the smoke index archives the hash PER SAMPLE; no batch-wide
+    value could be true for every sample."""
+
+    text_only = _run(
+        runner_settings,
+        ScriptedClient([_finalize_response()]),
+        _adapters(),
+        tmp_path,
+    )
+    with_rag = _run(
+        runner_settings,
+        ScriptedClient([_finalize_response()]),
+        _adapters(),
+        tmp_path,
+        rag=StubRagAdapter([_rag_case()]),
+    )
+    assert text_only.prompt_sha256 != with_rag.prompt_sha256
+    assert text_only.to_index_row()["effective_prompt_sha256"] == text_only.prompt_sha256
+    assert with_rag.to_index_row()["effective_prompt_sha256"] == with_rag.prompt_sha256
 
 
 def test_v1_prompt_bytes_are_unchanged() -> None:

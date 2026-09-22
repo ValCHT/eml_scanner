@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TICKET-19A/B real smokes: native tool calling and the bounded agentic core.
+"""TICKET-19A/B/C real smokes: native tool calling and the converged agentic runtime.
 
 Two explicit subcommands, both requiring the real configured runtime
 (``LITELLM_*``); credentials are never printed and no observation is ever
@@ -15,13 +15,16 @@ simulated.
     ``BLOCKED_PROVIDER_NATIVE_TOOL_CALLING``, never replaced by a JSON
     planner fallback.
 
-``smoke`` (T19B)
-    Runs the bounded agentic core on EXACTLY the five T14 dev-smoke samples
+``smoke`` (T19C, converged runtime)
+    Runs the bounded agentic runtime (T19B loop + T15 RAG preprocessing +
+    T16 QR/Vision preprocessing) on EXACTLY the five T14 dev-smoke samples
     (deterministic selection re-verified, all 83 gold_dev records and raw
     bytes validated first). Each sample runs exactly once; a driver/provider
     outcome stays honest (no selective rerun, no budget change). Every run
     writes ``runs/agentic/<run_id>/{manifest,trace,final,summary}`` with
     ``measurement_scope=smoke`` and ``performance_claims_allowed=false``.
+    The effective prompt hash is archived PER SAMPLE (the prompt carries
+    conditional RAG/visual guidance), never as a batch-wide value.
 
 No full benchmark exists here: the 83-email dev run, gold_test, Visual-79
 and any architecture/model comparison belong to TICKET-19E.
@@ -83,12 +86,12 @@ T14_SMOKE_SAMPLE_IDS: tuple[str, ...] = (
     "nazario_phishing_2025_00404",
 )
 
-#: Explicit status vocabulary of the two smokes (docs/tickets/TICKET-19A/B).
+#: Explicit status vocabulary of the two smokes (docs/tickets/TICKET-19A/C).
 STATUS_T19A_READY = "IMPLEMENTED_WAITING_FOR_LIVE_TOOLCALL_SMOKE"
 STATUS_T19A_BLOCKED = "BLOCKED_PROVIDER_NATIVE_TOOL_CALLING"
 STATUS_T19A_DONE = "DONE"
-STATUS_T19B_READY = "IMPLEMENTED_NOT_LIVE_VALIDATED"
-STATUS_T19B_DONE = "IMPLEMENTED_SMOKE_VALIDATED"
+STATUS_T19C_READY = "IMPLEMENTED_NOT_LIVE_VALIDATED"
+STATUS_T19C_DONE = "IMPLEMENTED_SMOKE_VALIDATED"
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -134,7 +137,7 @@ def _write_blocked_receipt(args: argparse.Namespace, ticket: str, status: str) -
 def _require_llm_key(settings: Settings, ticket: str, args: argparse.Namespace) -> int | None:
     if settings.LITELLM_API_KEY is not None:
         return None
-    status = STATUS_T19A_READY if ticket == "T19A" else STATUS_T19B_READY
+    status = STATUS_T19A_READY if ticket == "T19A" else STATUS_T19C_READY
     print(
         f"BLOCKED: LITELLM_API_KEY absent: no real {ticket} smoke is possible; "
         "no response is simulated",
@@ -345,13 +348,13 @@ def run_capability(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# T19B — bounded agentic core on the frozen five T14 smoke samples
+# T19C — converged agentic runtime on the frozen five T14 smoke samples
 # ---------------------------------------------------------------------------
 
 
 def run_smoke(args: argparse.Namespace) -> int:
     settings = _settings()
-    blocked = _require_llm_key(settings, "T19B", args)
+    blocked = _require_llm_key(settings, "T19C", args)
     if blocked is not None:
         return blocked
 
@@ -459,7 +462,15 @@ def run_smoke(args: argparse.Namespace) -> int:
         "completed_at": datetime.now(UTC).isoformat(),
         "selected_sample_ids": selected_ids,
         "model_requested": settings.LITELLM_MODEL,
-        "effective_prompt_sha256": agent_system_prompt_sha256(DEFAULT_AGENT_LIMITS),
+        # PR #19 review (blocker 2): NO batch-wide effective_prompt_sha256.
+        # The T19C prompt carries conditional RAG/visual guidance, so the
+        # effective hash is archived PER SAMPLE in each row and in each run
+        # manifest; a single global value would be false whenever two samples
+        # received different guidance.
+        "effective_prompt_sha256_policy": (
+            "per-sample only: see rows[].effective_prompt_sha256 and each "
+            "run manifest; no batch-wide hash exists"
+        ),
         "limits": {
             "max_llm_turns": 5,
             "max_tool_calls": 4,
@@ -475,11 +486,13 @@ def run_smoke(args: argparse.Namespace) -> int:
             "each sample ran exactly once; no selective rerun and no budget change",
             "no performance, Macro-F1 or architecture/model winner claim is allowed "
             "before TICKET-19E",
+            "the effective prompt hash is per sample (conditional RAG/visual "
+            "guidance): no batch-wide effective_prompt_sha256 is archived",
         ],
     }
     _write_json(batch_dir / "index.json", index)
-    print(f"[T19B] batch index: {batch_dir / 'index.json'}")
-    print(f"T19B status: {STATUS_T19B_DONE}")
+    print(f"[T19C] batch index: {batch_dir / 'index.json'}")
+    print(f"T19C status: {STATUS_T19C_DONE}")
     return EXIT_OK
 
 
@@ -505,7 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
     capability.set_defaults(func=run_capability)
 
     smoke = subparsers.add_parser(
-        "smoke", help="T19B bounded agentic core on the frozen T14 five samples"
+        "smoke", help="T19C converged agentic runtime on the frozen T14 five samples"
     )
     smoke.add_argument("--run-root", default="runs/agentic")
     smoke.set_defaults(func=run_smoke)

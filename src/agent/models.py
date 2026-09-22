@@ -189,6 +189,11 @@ class AgentRunResult:
         return {
             "run_id": self.run_id,
             "sample_id": self.sample_id,
+            # T19C: the prompt carries conditional RAG/visual guidance, so the
+            # effective hash is archived PER SAMPLE; a batch-wide value would
+            # be false whenever two samples received different guidance
+            # (PR #19 review, blocker 2).
+            "effective_prompt_sha256": self.prompt_sha256,
             "status": self.status,
             "action": self.action,
             "verdict": self.verdict,
