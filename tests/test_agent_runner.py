@@ -8,6 +8,7 @@ come from ``scripts/smoke_agentic.py``.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -755,6 +756,190 @@ def test_custom_limits_drive_the_prompt_hash_and_the_manifest(
     assert manifest["effective_prompt_sha256"] == agent_system_prompt_sha256(custom)
     assert manifest["effective_prompt_sha256"] != agent_system_prompt_sha256()
     assert manifest["effective_prompt_sha256"] == result.prompt_sha256
+
+
+# ---------------------------------------------------------------------------
+# T19D §4 — runtime contract fingerprints
+# ---------------------------------------------------------------------------
+
+
+def _canonical_sha256(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_manifest_archives_the_runtime_contract_fingerprints(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """T19D §4: the manifest pins exactly the contract the run transmitted.
+
+    ``tool_schema_sha256`` is recomputed here from the tools list really handed
+    to the model, ``assessment_schema_sha256`` from the frozen schema FILE
+    bytes, and ``runtime_contract_sha256`` from exactly the eight declared
+    contract fields.
+    """
+
+    client = ScriptedClient([_finalize_response()])
+    result = _run(runner_settings, client, _adapters(), tmp_path)
+    manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    transmitted_tools = client.calls[0]["tools"]
+    assert [tool["function"]["name"] for tool in transmitted_tools] == [
+        "lookup_virustotal",
+        "lookup_opencti",
+        "scan_urlscan",
+        "finalize_assessment",
+    ]
+    assert manifest["tool_schema_sha256"] == _canonical_sha256(transmitted_tools)
+
+    frozen_schema_bytes = (
+        runner_settings.CONFIG_DIR.parent / "schemas" / "assessment.schema.json"
+    ).read_bytes()
+    assert manifest["assessment_schema_sha256"] == hashlib.sha256(
+        frozen_schema_bytes
+    ).hexdigest()
+
+    contract = {
+        "architecture": manifest["architecture"],
+        "model": manifest["model_requested"],
+        "reasoning_effort": manifest["reasoning_effort"],
+        "max_output_tokens_per_turn": manifest["max_output_tokens_per_turn"],
+        "limits": manifest["limits"],
+        "effective_prompt_sha256": manifest["effective_prompt_sha256"],
+        "tool_schema_sha256": manifest["tool_schema_sha256"],
+        "assessment_schema_sha256": manifest["assessment_schema_sha256"],
+    }
+    assert manifest["runtime_contract_sha256"] == _canonical_sha256(contract)
+
+
+def test_same_runtime_contract_gives_the_same_fingerprint(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """T19D §4.4: no timestamp/run_id/email/result enters the contract hash."""
+
+    first = _run(
+        runner_settings, ScriptedClient([_finalize_response()]), _adapters(), tmp_path
+    )
+    second = _run(
+        runner_settings, ScriptedClient([_finalize_response()]), _adapters(), tmp_path
+    )
+    first_manifest = json.loads((first.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    second_manifest = json.loads(
+        (second.run_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert first_manifest["run_id"] != second_manifest["run_id"]
+    assert (
+        first_manifest["runtime_contract_sha256"]
+        == second_manifest["runtime_contract_sha256"]
+    )
+
+    changed_limits = _run(
+        runner_settings,
+        ScriptedClient([_finalize_response()]),
+        _adapters(),
+        tmp_path,
+        limits=AgentLimits(max_tool_calls=3),
+    )
+    changed_manifest = json.loads(
+        (changed_limits.run_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert (
+        changed_manifest["runtime_contract_sha256"]
+        != first_manifest["runtime_contract_sha256"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# T19D §3 — AgentLimits are injectable and really applied
+# ---------------------------------------------------------------------------
+
+
+def test_non_default_max_single_llm_seconds_bounds_every_llm_request(
+    runner_settings: Settings, tmp_path: Path
+) -> None:
+    """The per-request deadline is the applied limit, bounded by the run budget."""
+
+    clock = ManualClock()
+    client = ScriptedClient([_text_response(), _text_response(), _text_response()])
+    result = _run(
+        runner_settings,
+        client,
+        _adapters(),
+        tmp_path,
+        clock=clock,
+        limits=AgentLimits(max_llm_turns=2, max_single_llm_seconds=45.0),
+    )
+    assert result.status == "incomplete"
+    assert result.llm_turn_count == 2  # max_llm_turns=2 really applied
+    assert [call["deadline"] for call in client.calls] == [45.0, 45.0]
+
+    # A smaller whole-run budget bounds the same per-request deadline too.
+    bounded_client = ScriptedClient([_text_response()])
+    _run(
+        runner_settings,
+        bounded_client,
+        _adapters(),
+        tmp_path,
+        clock=ManualClock(),
+        limits=AgentLimits(max_agent_seconds=30.0, max_single_llm_seconds=90.0),
+    )
+    assert bounded_client.calls[0]["deadline"] == 30.0
+
+
+def test_non_default_max_tool_result_chars_bounds_the_model_visible_payload(
+    runner_settings: Settings, tmp_path: Path, parsed_email: ParsedEmail
+) -> None:
+    """The role=tool payload obeys the applied ``max_tool_result_chars``."""
+
+    url_id, _ = _url_and_domain(parsed_email)
+    evidence = [
+        Evidence(
+            id=f"ev_bulk_{index:03d}",
+            provenance="OSINT",
+            source_kind="virustotal",
+            observable_id=url_id,
+            predicate="vt_malicious_count",
+            value=float(index),
+            source_ref=f"response.json:/data/attributes/{index}",
+            observed_at=OBSERVED_AT,
+            match_level="EXACT",
+            source_group="virustotal",
+        )
+        for index in range(60)
+    ]
+    vt = RecordingAdapter(
+        lambda query, _ctx: _ok_result("virustotal", query.id, evidence=evidence)
+    )
+    client = ScriptedClient(
+        [_tool_response("lookup_virustotal", url_id), _finalize_response()]
+    )
+    result = _run(
+        runner_settings,
+        client,
+        _adapters(vt=vt),
+        tmp_path,
+        limits=AgentLimits(max_tool_result_chars=2000),
+    )
+    payload = _tool_messages(client)[0]["content"]
+    assert len(payload) <= 2000
+    assert json.loads(payload)["truncated"] is True
+    manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["limits"]["max_tool_result_chars"] == 2000
+
+
+def test_max_urlscan_calls_stays_structurally_frozen_to_one() -> None:
+    """T19D §3 exception: the urlscan budget remains exactly 1."""
+
+    assert AgentLimits().max_urlscan_calls == 1
+    with pytest.raises(ValueError, match="max_urlscan_calls"):
+        AgentLimits(max_urlscan_calls=2)
 
 
 def test_non_fixture_trace_keeps_only_prose_length_and_hash(

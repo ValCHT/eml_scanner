@@ -715,6 +715,60 @@ def test_smoke_vision_schema_is_the_frozen_assessment_schema(project_root: Path)
     assert schema == frozen
 
 
+def test_smoke_vision_receipt_recovers_the_real_attempt_metadata(tmp_path: Path) -> None:
+    """TICKET-19D §1: the receipt reads the files ``LunaClient`` really writes.
+
+    The T16 receipt globbed ``internal_attempt_*_response_meta.json`` while the
+    client writes ``attempt_<n>_response_meta.json``, so a real response hash
+    and size were dropped. Recovery must be exact: no network, no raw body,
+    no invented value.
+    """
+
+    smoke = _load_smoke_module()
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    response = b'{"choices": []}'
+    (capture / "attempt_1_response_meta.json").write_text(
+        json.dumps(
+            {
+                "response_sha256": hashlib.sha256(response).hexdigest(),
+                "response_bytes": len(response),
+                "returned_model": "Qwen/Qwen3.8-27B",
+                "usage": {"input_tokens": 12, "output_tokens": 3},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (capture / "internal_attempt_1.input_audit.json").write_text(
+        json.dumps({"untrusted_email_sha256": "a" * 64}), encoding="utf-8"
+    )
+
+    facts = smoke._smoke_vision_facts(capture, 1)
+    meta = facts["meta"]
+    assert meta["response_sha256"] == hashlib.sha256(response).hexdigest()
+    assert meta["response_bytes"] == len(response)
+    assert facts["audit"]["untrusted_email_sha256"] == "a" * 64
+    assert facts["errors"] == []
+
+
+def test_smoke_vision_receipt_is_null_without_metadata(tmp_path: Path) -> None:
+    """TICKET-19D §1: no attempt metadata -> null/null, never an invented value."""
+
+    smoke = _load_smoke_module()
+    capture = tmp_path / "capture"
+    capture.mkdir()
+
+    no_attempt = smoke._smoke_vision_facts(capture, 0)
+    assert no_attempt["meta"].get("response_sha256") is None
+    assert no_attempt["meta"].get("response_bytes") is None
+
+    # An attempt number without a produced metadata file stays null as well.
+    missing_file = smoke._smoke_vision_facts(capture, 1)
+    assert missing_file["meta"].get("response_sha256") is None
+    assert missing_file["meta"].get("response_bytes") is None
+    assert missing_file["errors"] == []
+
+
 # ---------------------------------------------------------------------------
 # LLM multipart envelope (docs/tickets/TICKET-16.md §12 contract)
 # ---------------------------------------------------------------------------

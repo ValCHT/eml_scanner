@@ -103,8 +103,10 @@ from .tools import (
     AGENT_TOOLS,
     ProviderAdapterSet,
     ProviderToolExecutor,
+    assessment_schema_sha256,
     execution_payload,
     parse_finalize_arguments,
+    tool_schema_sha256,
 )
 
 #: Subdirectory of ``settings.RUNS_DIR`` holding every agentic run.
@@ -459,6 +461,14 @@ def run_agentic_email(
     has_rag = False
     has_visuals = False
     prompt_sha = agent_system_prompt_sha256(limits)
+    # T19D §4: the exact values used by THIS run are captured once and reused
+    # by the manifest, so the runtime contract fingerprint cannot diverge from
+    # what the loop and the callers actually applied.
+    max_output_tokens = int(
+        getattr(settings, "FINAL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+    tool_schema_sha = tool_schema_sha256()
+    assessment_schema_sha = assessment_schema_sha256()
 
     parsed = parse_email(
         Path(email_path), ParseLimits.from_config(tools_config.parse_limits)
@@ -562,13 +572,7 @@ def run_agentic_email(
                 limits=limits,
                 agent_deadline=agent_deadline,
                 effort=effort,
-                max_output_tokens=int(
-                    getattr(
-                        settings,
-                        "FINAL_MAX_OUTPUT_TOKENS",
-                        _DEFAULT_MAX_OUTPUT_TOKENS,
-                    )
-                ),
+                max_output_tokens=max_output_tokens,
                 finalize_attempts=finalize_attempts,
                 include_content_excerpt=(source_profile == "fixture"),
             )
@@ -715,6 +719,41 @@ def run_agentic_email(
         merged_ok=merged_ok,
     )
 
+    model_requested = (
+        turns_meta[0]["requested_model"] if turns_meta else settings.LITELLM_MODEL
+    )
+    limits_payload = {
+        "max_llm_turns": limits.max_llm_turns,
+        "max_tool_calls": limits.max_tool_calls,
+        "max_urlscan_calls": limits.max_urlscan_calls,
+        "max_agent_seconds": limits.max_agent_seconds,
+        "max_single_llm_seconds": limits.max_single_llm_seconds,
+        "max_tool_result_chars": limits.max_tool_result_chars,
+    }
+    # T19D §4.4: canonical runtime contract — exactly the eight required
+    # fields, taken from the run actually executed. No timestamp, run_id,
+    # email, model/tool result or secret enters it, so two runs under the
+    # same contract share the same fingerprint (no second versioning system).
+    runtime_contract = {
+        "architecture": CONVERGED_ARCHITECTURE_NAME,
+        "model": model_requested,
+        "reasoning_effort": effort,
+        "max_output_tokens_per_turn": max_output_tokens,
+        "limits": limits_payload,
+        "effective_prompt_sha256": prompt_sha,
+        "tool_schema_sha256": tool_schema_sha,
+        "assessment_schema_sha256": assessment_schema_sha,
+    }
+    runtime_contract_sha = hashlib.sha256(
+        json.dumps(
+            runtime_contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
     manifest = {
         "schema_version": "1.0",
         "architecture": CONVERGED_ARCHITECTURE_NAME,
@@ -728,23 +767,15 @@ def run_agentic_email(
         "started_at": started_at,
         "completed_at": _iso_now(),
         "code_commit": _code_commit(),
-        "model_requested": (
-            turns_meta[0]["requested_model"] if turns_meta else settings.LITELLM_MODEL
-        ),
+        "model_requested": model_requested,
         "model_returned": returned_models[0] if len(returned_models) == 1 else returned_models,
         "effective_prompt_sha256": prompt_sha,
+        "tool_schema_sha256": tool_schema_sha,
+        "assessment_schema_sha256": assessment_schema_sha,
+        "runtime_contract_sha256": runtime_contract_sha,
         "reasoning_effort": effort,
-        "max_output_tokens_per_turn": int(
-            getattr(settings, "FINAL_MAX_OUTPUT_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS)
-        ),
-        "limits": {
-            "max_llm_turns": limits.max_llm_turns,
-            "max_tool_calls": limits.max_tool_calls,
-            "max_urlscan_calls": limits.max_urlscan_calls,
-            "max_agent_seconds": limits.max_agent_seconds,
-            "max_single_llm_seconds": limits.max_single_llm_seconds,
-            "max_tool_result_chars": limits.max_tool_result_chars,
-        },
+        "max_output_tokens_per_turn": max_output_tokens,
+        "limits": limits_payload,
         "llm_turn_count": len(turns_meta),
         "provider_tool_call_count": provider_tool_calls,
         "duplicate_tool_refusal_count": duplicate_refusals,

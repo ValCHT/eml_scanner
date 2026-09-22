@@ -105,6 +105,116 @@ def test_payload_uses_tools_and_tool_choice_auto(
     assert headers["Authorization"] == f"Bearer {CANARY}"
 
 
+def test_payload_parameters_are_frozen_for_the_agentic_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T19D §2: the agentic payload stays exactly the frozen parameter set.
+
+    ``tool_choice="auto"`` and ``reasoning_effort="medium"`` are transmitted;
+    ``response_format`` and every sampling parameter stay ABSENT (the provider
+    applies its defaults). No temperature/top_p/effort/budget variant is ever
+    probed by the runtime.
+    """
+
+    from src.agent.models import AGENT_REASONING_EFFORT
+
+    client = _client(monkeypatch, tmp_path)
+    payload = client.build_payload(
+        [{"role": "user", "content": "ping"}],
+        AGENT_TOOLS,
+        effort=AGENT_REASONING_EFFORT,
+        max_output_tokens=256,
+    )
+    assert set(payload) == {
+        "model",
+        "messages",
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "max_completion_tokens",
+    }
+    assert payload["tool_choice"] == "auto"
+    assert AGENT_REASONING_EFFORT == "medium"
+    assert payload["reasoning_effort"] == "medium"
+    for absent in (
+        "response_format",
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        "top_k",
+        "repetition_penalty",
+    ):
+        assert absent not in payload
+
+
+def test_reasoning_content_is_observed_as_metadata_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T19D §5: a native reasoning field is observed, never persisted whole.
+
+    Only presence, character count and SHA-256 may be archived; the text is
+    neither written to disk nor interpreted nor reinjected.
+    """
+
+    import hashlib
+
+    client = _client(monkeypatch, tmp_path)
+    reasoning = "intermediate reasoning text that must never be archived"
+    body = _response_bytes(
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": reasoning,
+            "tool_calls": [
+                _call("call_1", "lookup_virustotal", '{"observable_id": "obs_a"}')
+            ],
+        }
+    )
+    response = AgentChatClient._extract_response(body, REQUESTED_MODEL)
+    assert response.status == "ok"
+    assert response.reasoning_content_present is True
+    assert response.reasoning_content_chars == len(reasoning)
+    assert response.reasoning_content_sha256 == hashlib.sha256(
+        reasoning.encode("utf-8")
+    ).hexdigest()
+
+    client._capture_meta(1, response.request_sha256 or "", 1, response, len(body))
+    meta_text = (
+        tmp_path / "captures" / "agent_turn_1_meta.json"
+    ).read_text(encoding="utf-8")
+    meta = json.loads(meta_text)
+    assert meta["reasoning_content_present"] is True
+    assert meta["reasoning_content_chars"] == len(reasoning)
+    assert meta["reasoning_content_sha256"] == hashlib.sha256(
+        reasoning.encode("utf-8")
+    ).hexdigest()
+    assert reasoning not in meta_text
+
+
+def test_absent_reasoning_content_is_false_and_never_invented(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T19D §5: no provider reasoning field -> present=false, no fabricated value."""
+
+    client = _client(monkeypatch, tmp_path)
+    body = _response_bytes(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                _call("call_1", "lookup_virustotal", '{"observable_id": "obs_a"}')
+            ],
+        }
+    )
+    response = AgentChatClient._extract_response(body, REQUESTED_MODEL)
+    assert response.status == "ok"
+    assert response.reasoning_content_present is False
+    assert response.reasoning_content_chars is None
+    assert response.reasoning_content_sha256 is None
+
+
 def test_effective_agent_prompt_is_the_dedicated_t19c_prompt() -> None:
     """T19C §2: ONE dedicated compact prompt with exactly the five sections.
 

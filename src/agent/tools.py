@@ -35,6 +35,7 @@ never extended (no recursive pivot in T19B).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -146,6 +147,17 @@ def assessment_schema() -> dict[str, Any]:
     schema = json.loads(_ASSESSMENT_SCHEMA_PATH.read_text(encoding="utf-8"))
     assert isinstance(schema, dict)
     return schema
+
+
+def assessment_schema_sha256() -> str:
+    """SHA-256 of the EXACT bytes of the frozen ``schemas/assessment.schema.json``.
+
+    T19D §4.3: the raw file bytes are hashed (never a Pydantic reconstruction
+    and never a re-serialization of the parsed object), so the archived
+    fingerprint can only match the frozen normative file.
+    """
+
+    return hashlib.sha256(_ASSESSMENT_SCHEMA_PATH.read_bytes()).hexdigest()
 
 
 #: Root-only JSON Schema keywords of the frozen file: ``$schema`` is a
@@ -275,6 +287,26 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+def tool_schema_sha256() -> str:
+    """SHA-256 of the canonical serialization of the four exposed tools.
+
+    T19D §4.2: the canonical bytes are exactly
+    ``json.dumps(AGENT_TOOLS, ensure_ascii=False, sort_keys=True,
+    separators=(",", ":"), allow_nan=False).encode("utf-8")``. The manifest can
+    therefore prove WHICH tool contract was actually transmitted to the model;
+    the serialization is never re-derived from another representation.
+    """
+
+    canonical = json.dumps(
+        AGENT_TOOLS,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 @dataclass
@@ -626,9 +658,11 @@ __all__ = [
     "ProviderAdapterSet",
     "ProviderToolExecutor",
     "assessment_schema",
+    "assessment_schema_sha256",
     "build_finalize_parameters",
     "execution_payload",
     "normalize_result_payload",
     "parse_finalize_arguments",
     "refusal_payload",
+    "tool_schema_sha256",
 ]
