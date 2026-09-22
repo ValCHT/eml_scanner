@@ -19,6 +19,10 @@ dependencies = [
     "vt-py>=0.22,<0.23",
     "pycti>=7.260914,<8",
     "requests>=2.33,<3",
+    # TICKET-19D-OSINT: bounded public OSINT (RDAP/DNS/CT use the bundled
+    # list; no runtime download). Exact pins frozen by the ticket.
+    "dnspython==2.8.0",
+    "publicsuffixlist==1.0.2.20260921",
 ]
 
 [project.optional-dependencies]

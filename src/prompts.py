@@ -72,8 +72,15 @@ FINAL_PHASE_SECONDS = 90.0
 RAG_MAX_CASES = 3
 RAG_MAX_CASE_CHARS = 1_200
 
-#: Canonical tool order (docs/architecture.md §1.2 pipeline order).
-TOOL_ORDER: tuple[str, ...] = ("virustotal", "opencti", "urlscan")
+#: Attribute names identifying the frozen V1 Enrichment object (virustotal /
+#: opencti / urlscan lists). Distinct from TOOL_ORDER (which additionally
+#: ranks the T19D-OSINT "osint" producer for explicit sequences): the V1
+#: Enrichment contract itself never carries an osint list.
+ENRICHMENT_TOOL_ATTRS: tuple[str, ...] = ("virustotal", "opencti", "urlscan")
+
+#: Canonical tool order (docs/architecture.md §1.2 pipeline order, plus the
+#: T19D-OSINT osint producer for explicit result sequences).
+TOOL_ORDER: tuple[str, ...] = ("virustotal", "opencti", "urlscan", "osint")
 
 
 class ContextLimits(BaseModel):
@@ -510,7 +517,7 @@ def canonical_tool_results(tool_results: Any) -> tuple[ToolResult, ...]:
 
     if tool_results is None:
         items: list[Any] = []
-    elif all(hasattr(tool_results, name) for name in TOOL_ORDER):
+    elif all(hasattr(tool_results, name) for name in ENRICHMENT_TOOL_ATTRS):
         items = [
             *getattr(tool_results, "virustotal", ()),
             *getattr(tool_results, "opencti", ()),

@@ -39,7 +39,7 @@ Provenance = Literal["INTERNE", "OSINT", "SANDBOX", "INFERENCE"]
 SourceProfile = Literal["fixture", "public_corpus", "private_authorized"]
 
 #: Secret-bearing fields; never exposed in the public dump.
-_SECRET_FIELDS = ("LITELLM_API_KEY", "VT_API_KEY", "OPENCTI_API_KEY", "URLSCAN_API_KEY")
+_SECRET_FIELDS = ("LITELLM_API_KEY", "VT_API_KEY", "OPENCTI_API_KEY", "URLSCAN_API_KEY", "ABUSECH_API_KEY")
 
 class Settings(BaseSettings):
     """Canonical settings; secrets are ``SecretStr | None`` (§2.7)."""
@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     OPENCTI_URL: str = "https://demo.opencti.io"
     OPENCTI_API_KEY: SecretStr | None = None
     URLSCAN_API_KEY: SecretStr | None = None
+    # TICKET-19D-OSINT: ThreatFox/abuse.ch read-only key. The application
+    # only knows this variable; keychain handling belongs to the operator.
+    ABUSECH_API_KEY: SecretStr | None = None
     MODEL_SUPPORTS_VISION: bool = False
     RAG_ENABLED: bool = False
     QR_DECODE_ENABLED: bool = False
@@ -223,6 +226,20 @@ class VisionToolConfig(_YamlStrict):
     max_pixels: int = Field(gt=0)
 
 
+class OsintToolConfig(_YamlStrict):
+    """configs/tools.yaml `osint` — bounded public OSINT (TICKET-19D-OSINT)."""
+
+    enabled: bool
+    phase_timeout_s: float = Field(gt=0)
+    threatfox_timeout_s: float = Field(gt=0)
+    rdap_timeout_s: float = Field(gt=0)
+    dns_timeout_s: float = Field(gt=0)
+    ct_timeout_s: float = Field(gt=0)
+    max_ct_response_bytes: int = Field(gt=0)
+    max_ct_names: int = Field(gt=0)
+    max_dns_values_per_type: int = Field(gt=0)
+
+
 class EgressConfig(_YamlStrict):
     allow_real_urls: bool
     approved_services: list[str] = Field(default_factory=list)
@@ -242,7 +259,7 @@ class ParseLimitsConfig(_YamlStrict):
 
 
 class ToolsConfig(_YamlStrict):
-    """configs/tools.yaml — exactly the seven sections of §2.7."""
+    """configs/tools.yaml — exactly the eight sections of §2.7 (+ osint)."""
 
     virustotal: VirustotalToolConfig
     opencti: OpenctiToolConfig
@@ -251,6 +268,7 @@ class ToolsConfig(_YamlStrict):
     vision: VisionToolConfig
     egress: EgressConfig
     parse_limits: ParseLimitsConfig
+    osint: OsintToolConfig
 
 
 def load_yaml_config(path: Path, model: type[_YamlStrict]) -> _YamlStrict:

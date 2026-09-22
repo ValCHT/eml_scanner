@@ -163,6 +163,7 @@ def _executor(
     *,
     egress: Any = None,
     limits: AgentLimits | None = None,
+    profile: str = "agentic_context",
 ) -> ProviderToolExecutor:
     import time
 
@@ -176,6 +177,7 @@ def _executor(
         capture_dir=Path("."),
         deadline=time.monotonic() + 60,
         limits=limits if limits is not None else DEFAULT_AGENT_LIMITS,
+        profile=profile,  # type: ignore[arg-type]
     )
 
 
@@ -765,3 +767,158 @@ def test_executor_result_merges_with_the_existing_evidence_module(
     assert evidence.id in merged_evidence
     assert domain.id in merged_observables
     assert visuals == list(parsed_email.images)
+
+
+# ---------------------------------------------------------------------------
+# TICKET-19D-OSINT §39 — lookup_osint executor behavior
+# ---------------------------------------------------------------------------
+
+
+def _osint_recording(factory: Any) -> Any:
+    return RecordingAdapter(factory)
+
+
+def _executor_with_osint(
+    parsed_email: ParsedEmail,
+    tools_config: ToolsConfig,
+    osint_factory: Any,
+    *,
+    limits: Any = None,
+) -> Any:
+    vt = RecordingAdapter(lambda query, _ctx: _unavailable(query, _ctx))
+    osint = RecordingAdapter(osint_factory)
+    adapters = ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt, osint=osint)
+    executor = _executor(parsed_email, adapters, tools_config, limits=limits, profile="agentic_osint")
+    return executor, osint
+
+
+def _osint_ok(query: Observable, _context: ToolContext) -> ToolResult:
+    return ToolResult(
+        tool="osint",
+        query_observable_id=query.id,
+        status="not_found",
+        mode="live",
+        requests_sent=2,
+    )
+
+
+def test_lookup_osint_accepts_only_observable_id(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    from src.agent.models import ToolCall
+
+    executor, osint = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    extra = ToolCall(
+        call_id="call_1",
+        name="lookup_osint",
+        arguments_raw='{"observable_id": "x", "provider": "rdap"}',
+        arguments={"observable_id": "x", "provider": "rdap"},
+    )
+    execution = executor.execute(extra)
+    assert execution.outcome == "refused"
+    assert execution.refusal_reason == "unexpected_argument"
+    assert osint.calls == []
+    assert executor.provider_tool_call_count == 0
+
+
+def test_lookup_osint_unknown_observable_refused_with_zero_adapter_call(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    executor, osint = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    execution = executor.execute(_call("lookup_osint", "obs_ghost"))
+    assert execution.outcome == "refused"
+    assert execution.refusal_reason == "unknown_observable_id"
+    assert osint.calls == []
+
+
+def test_lookup_osint_recipient_refused(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    recipient = _observable_by_role(parsed_email, "recipient")
+    executor, osint = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    execution = executor.execute(_call("lookup_osint", recipient.id))
+    assert execution.outcome == "refused"
+    assert execution.refusal_reason == "recipient_not_a_query_target"
+    assert osint.calls == []
+
+
+def test_lookup_osint_duplicate_refused(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    domain = _observable_by(parsed_email, type="domain")
+    executor, osint = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    first = executor.execute(_call("lookup_osint", domain.id, call_id="c1"))
+    second = executor.execute(_call("lookup_osint", domain.id, call_id="c2"))
+    assert first.outcome == "executed"
+    assert second.outcome == "refused"
+    assert second.refusal_reason == "duplicate_tool_call"
+    assert len(osint.calls) == 1
+
+
+def test_lookup_osint_counts_as_one_provider_call(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    domain = _observable_by(parsed_email, type="domain")
+    ipv4 = _observable_by(parsed_email, type="ipv4")
+    url = _observable_by(parsed_email, type="url")
+    message = _observable_by(parsed_email, type="message_id")
+    executor, _ = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    assert executor.execute(_call("lookup_virustotal", domain.id, call_id="c0")).outcome == "executed"
+    assert executor.execute(_call("lookup_opencti", ipv4.id, call_id="c1")).outcome == "executed"
+    assert executor.execute(_call("lookup_osint", domain.id, call_id="c2")).outcome == "executed"
+    assert executor.execute(_call("scan_urlscan", url.id, call_id="c3")).outcome == "executed"
+    assert executor.provider_tool_call_count == 4
+    fifth = executor.execute(_call("lookup_osint", ipv4.id, call_id="c4"))
+    assert fifth.outcome == "refused"
+    assert fifth.refusal_reason == "tool_budget_exhausted"
+
+
+def test_lookup_osint_without_adapter_is_honest_unavailable(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    domain = _observable_by(parsed_email, type="domain")
+    vt = RecordingAdapter(lambda query, _ctx: _unavailable(query, _ctx))
+    executor = _executor(
+        parsed_email,
+        ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt),
+        tools_config,
+        profile="agentic_osint",
+    )
+    execution = executor.execute(_call("lookup_osint", domain.id))
+    assert execution.outcome == "executed"
+    assert execution.result is not None
+    assert execution.result.tool == "osint"
+    assert execution.result.status == "unavailable"
+    assert execution.provider_status == "unavailable"
+    assert executor.provider_tool_call_count == 1
+
+
+def test_lookup_osint_refused_on_non_osint_profiles(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    """Review PR #21 blocker 4: fail-closed backend profile isolation."""
+
+    domain = _observable_by(parsed_email, type="domain")
+    for profile in ("agentic_core", "agentic_context"):
+        vt = RecordingAdapter(lambda query, _ctx: _unavailable(query, _ctx))
+        osint = RecordingAdapter(_osint_ok)
+        executor = _executor(
+            parsed_email,
+            ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt, osint=osint),
+            tools_config,
+            profile=profile,
+        )
+        execution = executor.execute(_call("lookup_osint", domain.id))
+        assert execution.outcome == "refused"
+        assert execution.refusal_reason == "not_exposed_for_profile"
+        assert osint.calls == []
+        assert executor.provider_tool_call_count == 0
+
+
+def test_historical_tools_execute_on_osint_profiles(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    domain = _observable_by(parsed_email, type="domain")
+    executor, _ = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    execution = executor.execute(_call("lookup_virustotal", domain.id))
+    assert execution.outcome == "executed"

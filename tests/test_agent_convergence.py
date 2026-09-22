@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from src.agent.models import (
-    CONVERGED_ARCHITECTURE_NAME,
+    OSINT_ARCHITECTURE_NAME,
     AgentLLMResponse,
     ToolCall,
 )
@@ -311,7 +311,7 @@ def test_text_only_has_no_rag_and_no_visual_guidance(
     assert "RAG GUIDANCE" not in system
     assert "VISUAL GUIDANCE" not in system
     manifest = _manifest(result)
-    assert manifest["architecture"] == CONVERGED_ARCHITECTURE_NAME
+    assert manifest["architecture"] == OSINT_ARCHITECTURE_NAME
     assert manifest["run_kind"] == "t19c_agentic_runtime"
     assert manifest["rag_enabled"] is False
     assert manifest["rag_case_count"] == 0
@@ -319,7 +319,7 @@ def test_text_only_has_no_rag_and_no_visual_guidance(
     assert manifest["qr_decode_enabled"] is False
     assert manifest["visual_count_sent"] == 0
     assert manifest["qr_payload_count"] == 0
-    assert manifest["prompt_guidance"] == {"rag": False, "visuals": False}
+    assert manifest["prompt_guidance"] == {"rag": False, "visuals": False, "osint": False}
     assert result.status == "finalized"
 
 
@@ -346,7 +346,7 @@ def test_text_plus_rag_adds_context_and_conditional_guidance(
     manifest = _manifest(result)
     assert manifest["rag_enabled"] is True
     assert manifest["rag_case_count"] == 1
-    assert manifest["prompt_guidance"] == {"rag": True, "visuals": False}
+    assert manifest["prompt_guidance"] == {"rag": True, "visuals": False, "osint": False}
     assert "rag_contamination" not in _verification_codes(result)
     assert result.status == "finalized"
 
@@ -488,7 +488,7 @@ def test_text_plus_vision_attaches_pixels_to_the_same_request(
     manifest = _manifest(result)
     assert manifest["vision_enabled"] is True
     assert manifest["visual_count_sent"] == 1
-    assert manifest["prompt_guidance"] == {"rag": False, "visuals": True}
+    assert manifest["prompt_guidance"] == {"rag": False, "visuals": True, "osint": False}
     assert result.status == "finalized"
 
 
@@ -580,7 +580,7 @@ def test_text_plus_rag_plus_qr_plus_vision_converged(
     assert manifest["qr_decode_enabled"] is True
     assert manifest["visual_count_sent"] == 1
     assert manifest["qr_payload_count"] == 1
-    assert manifest["prompt_guidance"] == {"rag": True, "visuals": True}
+    assert manifest["prompt_guidance"] == {"rag": True, "visuals": True, "osint": False}
     assert result.status == "finalized"
 
 

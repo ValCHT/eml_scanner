@@ -445,6 +445,7 @@ PROVENANCE_BY_PRODUCER: dict[str, str] = {
     "virustotal": "OSINT",
     "opencti": "OSINT",
     "urlscan": "SANDBOX",
+    "osint": "OSINT",
 }
 
 #: V08: roles that may never inherit an M/S category from another object.

@@ -76,3 +76,17 @@ Les lacunes matérielles sont destination à vérifier pour un lien ayant porté
 Les scores ne sont pas calibrés. En G6, mesurer aussi la couverture AUTO et le nombre d'emails réellement malveillants classés AUTO, afin qu'une policy « tout REVIEW » ne paraisse artificiellement excellente.
 
 **Remarque TICKET-10 — codes et lectures d'implémentation (non normatif).** Le vérificateur déterministe (`src/verify.py`) émet un code stable par règle : V01 `invalid_assessment`/`missing_assessment`, V02 `unsupported_claim`, V03 `fabricated_ioc`, V04 `impossible_provenance`, V05 `unsupported_external_fact`, V06 `false_exact_match`, V07 `recipient_as_ioc`, V08 `unjustified_global_attribution`, V09 `insufficient_malicious_confirmation`, V10 `invented_sandbox_assertion`/`screenshot_not_provided`, V11 `unsupported_external_claim`/`targeting_without_context`, V12 `benign_insufficient_basis`, V13 `verdict_evidence_conflict`, V14 `confidence_rise_without_new_evidence` (warning), V15 `rag_contamination`, V16 `run_inconsistency` (+ l'avertissement de fallback `final_fallback_internal_copy`). Une confirmation M admissible est aujourd'hui l'assertion fournisseur explicite `sandbox_provider_malicious == true`, EXACT, sur le même observable : les compteurs VT, la présence/les labels CTI et un voisin RAG ne confirment jamais M. V14 réutilise exactement le compteur FINAL `external_evidence_count_sent` et le seuil 0,05 de `signals_gain_without_external_evidence`. La liste acceptée d'observables exclut les propositions fabriquées/altérées et les destinataires, sans jamais réécrire l'Assessment conservé pour audit. La policy (`src/policy.py`) lit les lacunes matérielles dans la liste typée de V12/§4.3 (`destination_unverified` inclus, `authentication_untrusted` seul exclu) ; `tool_unavailable` n'est matériel que si un résultat indisponible portait une cible pertinente. Le fallback interne reste REVIEW avant la règle 4, conformément à l'ordre gelé. Toute confirmation librement sémantique reste hors du code déterministe et relève de l'évaluation humaine.
+
+## 4.4 DNS egress actif (TICKET-19D-OSINT §17.1)
+
+Le backend OSINT (`lookup_osint`, source `dns`) émet de vraies requêtes DNS
+via le resolver configuré (`dns.resolver.Resolver(configure=True)`,
+types A/AAAA/MX/NS/TXT, budget total 5 s). C'est un EGRESS ACTIF :
+
+- la requête peut atteindre l'infrastructure autoritative du domaine ;
+- elle peut révéler l'analyse d'un sous-domaine unique ;
+- elle est visible par le resolver configuré ;
+- elle peut déclencher des contrôles DNS de l'organisation.
+
+Décision POC : **autorisé sur corpus public**. Cette décision n'implique
+PAS automatiquement une autorisation en production.
