@@ -8,6 +8,8 @@ G7-B
 
 Aucun benchmark complet avant T19E : T16 exécute un **smoke visuel borné uniquement** — préférer le subset visual-essential (`essential_visual_content`) une fois matérialisé, sinon le smoke dev T14 ; jamais le run complet Visual-79 avant T19E. Le développement de T16 est **parallèle à T15 et à la chaîne T19A→T19B** (indépendant du RAG, de l'agentique et de G7-A) ; la fermeture expérimentale G7-B peut être enregistrée plus tard. Statut de fin de phase d'implémentation parallèle : **`IMPLEMENTED_WAITING_FOR_LIVE_VISION_SMOKE`** puis **`IMPLEMENTED_WAITING_FOR_G6_SYNC`** après le smoke visuel live (voir VALIDATION COMMANDS). Sortie sous `runs/eval/dev_vision_smoke`. Les métriques restent diagnostiques (`performance_claims_allowed=false`) ; INCONCLUSIVE est un résultat valide. Les résultats alimentent T19C ; le premier benchmark complet (texte seul / texte+QR / texte+QR+vision sur les cas visuels, rerun simultané de la V1 fixe) est T19E.
 
+**Réconciliation opérateur (2026-09-22, après merge PR #18) :** le smoke de capacité vision live a passé sur le proxy réel (`runs/gates/G7-B/smoke_vision/smoke_result.json` : `status=live_ok`, `requested_model=returned_model=Qwen/Qwen3.8-27B`, 1 bloc visuel réellement transmis, `measurement_scope=capability_smoke`, `performance_claims_allowed=false`) — **T16 live Vision capability smoke PASS**. T16 est **mergé dans `main` via PR #18**. Aucun reçu de gate G7-B n'est enregistré : la fermeture expérimentale G7-B (évaluation live appariée `--variant vision` + `check_gate.py G7-B --record`) reste **différée/optionnelle avant T19E** (le point de synchronisation G6 sur `main` propre a été établi le 22/09/2026, merge commit `c0273d61689ee7df55d25d33106b652d36c88d47`). Les résultats alimentent T19C (mergé PR #19, `IMPLEMENTED_SMOKE_VALIDATED`) ; l'ablation visuelle complète reste à T19E.
+
 ## OBJECTIF
 
 Mesurer l’apport des images et du décodage QR.
@@ -65,6 +67,12 @@ python -m pytest tests/test_vision.py --live -q
 Statut de fin de phase :
 - **`IMPLEMENTED_WAITING_FOR_LIVE_VISION_SMOKE`** si le smoke visuel live n'a pas été exécuté (proxy indisponible/non synchronisé) ;
 - **`IMPLEMENTED_WAITING_FOR_G6_SYNC`** dès que le smoke visuel live a passé.
+
+État atteint (réconciliation 2026-09-22) : smoke visuel live passé
+(`runs/gates/G7-B/smoke_vision/smoke_result.json`, `status=live_ok`) ; statut de
+phase `IMPLEMENTED_WAITING_FOR_G6_SYNC`, puis T16 mergé dans `main` via PR #18
+(le point de synchronisation G6 sur `main` propre a été établi le 22/09/2026).
+La fermeture expérimentale G7-B reste différée/optionnelle avant T19E.
 
 Dans les deux cas, l'agent s'arrête ici : c'est un succès de la phase d'implémentation parallèle, pas un BLOCKED/FAIL.
 

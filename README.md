@@ -2,23 +2,38 @@
 
 Implementation repository prepared from the frozen V1.2 specification dated 18/09/2026.
 
-**Implementation status (updated 21/09/2026):** TICKET-01 through TICKET-14 are
-implemented; gate receipts G0–G5 are recorded under `runs/gates/`. TICKET-14
+**Scope.** This is an independent suspicious-email / phishing analysis tool.
+It analyses individual messages only: there is no mailbox history, no
+organizational relationship model and no BusinessContext. AUTO/REVIEW/ESCALATE
+are recommendations only — the runtime never acts on a mailbox.
+
+**Implementation status (updated 22/09/2026):** TICKET-01 through TICKET-14 are
+implemented; gate receipts G0–G6 are recorded under `runs/gates/` (G6 PASS,
+re-recorded 22/09/2026 on clean main `c0273d61689ee7df55d25d33106b652d36c88d47`
+with `Qwen/Qwen3.8-27B`; bounded 5-email HARNESS validation only). TICKET-14
 (G6 harness-validation gate) implements the bounded real dev smoke and its
 exact offline recompute: `src/metrics.py`, `scripts/evaluate.py`,
 `configs/evaluation.yaml`, `configs/experiment_lock.json`, documented in
-`docs/evaluation.md` §8.6. TICKET-15 (public-only local RAG) is merged in
-PR #16 (phase status `IMPLEMENTED_WAITING_FOR_G6_SYNC` in its ticket; the
-G7-A experimental closure remains later). TICKET-19A (native tool calling)
-and TICKET-19B (bounded minimum agentic core) are implemented — their ticket
-files are materialized under `docs/tickets/TICKET-19A.md`/`TICKET-19B.md`
-and the real smokes are archived under `runs/agentic/`. Operator trajectory
-(2026-09-21, accelerated agentic path): after T14, three parallel
-development tracks — T15 (RAG), T16 (vision/QR), T19A→T19B (agentic chain,
-independent of RAG and Vision) — converge in T19C → T19D → **T19E**. T19E is
-the first **full benchmark** (complete dev, sealed test, Visual-79) and
-reruns the fixed V1 in the same experiment window; `gold_test` is never
-opened before it. T17 is optional after T19E; T18 is SUPERSEDED BY T19E.
+`docs/evaluation.md` §8.6. The three post-T14 tracks are merged: TICKET-15
+(public-only local RAG) in PR #16 — its G7-A experimental closure remains
+deferred/optional; TICKET-16 (vision/QR) in PR #18 — its **live Vision
+capability smoke PASSED** (`runs/gates/G7-B/smoke_vision/smoke_result.json`,
+`status=live_ok`, real pixels, `Qwen/Qwen3.8-27B`; capability only, no
+performance claim) and its G7-B experimental closure remains deferred/optional;
+TICKET-19A (native tool calling) and TICKET-19B (bounded minimum agentic core)
+in PR #17 — their ticket files are materialized under
+`docs/tickets/TICKET-19A.md`/`TICKET-19B.md` and the real smokes are archived
+under `runs/agentic/`. TICKET-19C (agentic convergence with T15 RAG and
+T16 QR/Vision) is **merged in PR #19** and remains
+`IMPLEMENTED_SMOKE_VALIDATED`. Operator trajectory (2026-09-21, accelerated
+agentic path): after T14, three parallel development tracks — T15 (RAG),
+T16 (vision/QR), T19A→T19B (agentic chain, independent of RAG and Vision) —
+converged in T19C; **T19D is next** (ticket file not yet materialized), then
+**T19E**, the first **full benchmark** (complete dev, sealed test, Visual-79)
+with a simultaneous rerun of the fixed V1 in the same experiment window;
+`gold_test` is never opened before it. G7-A/G7-B experimental closures remain
+deferred/optional before T19E; T17 is optional after T19E; T18 is SUPERSEDED
+BY T19E.
 
 ## Real dev baseline (TICKET-14)
 
@@ -36,6 +51,12 @@ python scripts/evaluate.py --mode recompute --from-run runs/eval/dev_smoke \
 # never deleted/overwritten)
 python scripts/check_gate.py G6 --record
 ```
+
+The current receipt `runs/gates/G6/gate.json` is PASS on the clean current-main
+merge commit `c0273d61689ee7df55d25d33106b652d36c88d47` (PR #19), re-recorded
+22/09/2026 with `Qwen/Qwen3.8-27B`: 109 targeted tests, 5/5 live smoke records,
+exact offline recompute equal. This stays a bounded harness validation, not a
+performance baseline.
 
 Per the operator amendment (2026-09-21), **G6 is a harness-validation gate, not a
 performance benchmark**: the full 83-record dev benchmark is executed for the
@@ -119,7 +140,7 @@ an `sk-*` key. No provider-specific credential mapping exists.
 - `CLAUDE.md` — Claude Code entry point importing `AGENTS.md`.
 - `opencode.jsonc` — project permissions for OpenCode V2; no model is hard-coded.
 - `docs/` — active normative architecture/contracts/gates and domain documents.
-- `docs/tickets/` — TICKET-01 … TICKET-18 plus TICKET-19A/TICKET-19B (materialized and implemented: native tool calling + bounded agentic core); T19C–T19E remain planned (ticket files not yet materialized; graph in `docs/gates.md`). T18 is superseded by T19E. Execute one ticket per agent session.
+- `docs/tickets/` — TICKET-01 … TICKET-18 plus TICKET-19A/TICKET-19B (materialized; native tool calling and bounded agentic core implemented and merged); TICKET-19C (agentic convergence) is implemented and merged, tracked by `runs/tickets/TICKET-19C/{status.json,report.md}`. **T19D is next** (ticket file not yet materialized) and T19E remains the terminal full benchmark (graph in `docs/gates.md`). T18 is superseded by T19E. Execute one ticket per agent session.
 - `docs/spec/` — frozen V1.2 audit snapshot, changelog, QA, matrix and research inspections.
 - `prompts/` — runtime INTERNAL / FINAL prompts.
 - `schemas/` — runtime JSON schemas.
@@ -137,10 +158,10 @@ Use one Git branch per implementation gate and one commit per ticket:
 - `gate/g4`: TICKET-06 → 08
 - `gate/g5`: TICKET-09 → 11
 - `gate/g6`: TICKET-12 → 14
-- after T14, three parallel tracks: T15 (RAG; merged in PR #16, G7-A closure later), T16 (vision/QR), T19A → T19B (agentic; independent of RAG and Vision; T19A/B implemented and smoke-validated — see `docs/tickets/TICKET-19A.md`, `docs/tickets/TICKET-19B.md`)
-- planned convergence (T19C–T19E ticket files not yet materialized; graph in `docs/gates.md`): T19C → T19D → T19E
+- after T14, three parallel tracks, all merged: T15 (RAG; PR #16, G7-A closure deferred/optional), T16 (vision/QR; PR #18, live Vision capability smoke PASS, G7-B closure deferred/optional), T19A → T19B (agentic; PR #17, independent of RAG and Vision — see `docs/tickets/TICKET-19A.md`, `docs/tickets/TICKET-19B.md`)
+- post-G6 convergence: T19C (PR #19, merged, `IMPLEMENTED_SMOKE_VALIDATED`) → **T19D (next; ticket file not yet materialized)** → T19E (terminal)
 - T19E: terminal sealed evaluation — first full benchmark with a simultaneous rerun of the fixed V1; only after the experiment is frozen and the holdout is released by the evaluator
-- optional G7-A/G7-B closures may be recorded later; TICKET-17 is optional after T19E
+- G7-A/G7-B experimental closures remain deferred/optional before T19E; TICKET-17 is optional after T19E
 - TICKET-18: SUPERSEDED BY T19E (not executed as a standalone ticket)
 
 Start a fresh OpenCode session for every ticket. Do not reuse the previous ticket's conversational context as a source of truth; the filesystem, Git history and ticket are the state.
@@ -166,7 +187,10 @@ RFC822 `.eml` files are byte-sensitive. `.gitattributes` deliberately disables G
 
 ## Next implementation step
 
-Review the G5 receipt (`runs/gates/G5/`), the TICKET-11 report
-(`runs/tickets/TICKET-11/report.md`) and the batch evidence
-(`runs/gates/G5/batch/`). TICKET-12–14 (G6 corpus, metrics and evaluation)
-start only after that review; TICKET-11 must not be re-run.
+**TICKET-19D is next** (ticket file not yet materialized; dependency graph in
+`docs/gates.md`); it starts only when the operator materializes the ticket and
+explicitly launches it. TICKET-19E follows and remains the first full benchmark
+(complete dev, sealed test, Visual-79, simultaneous rerun of the fixed V1);
+`gold_test` stays closed until then. The current G6 receipt
+(`runs/gates/G6/gate.json`) is PASS on clean main
+`c0273d61689ee7df55d25d33106b652d36c88d47`.
