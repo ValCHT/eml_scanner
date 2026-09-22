@@ -923,7 +923,8 @@ def test_artifacts_are_written_with_smoke_scope_and_chronological_trace(
     for name in ("manifest.json", "trace.jsonl", "final.json", "summary.txt"):
         assert (result.run_dir / name).is_file(), name
     manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["architecture"] == "agentic_core_v1"
+    assert manifest["architecture"] == "agentic_core_v2"
+    assert manifest["run_kind"] == "t19c_agentic_runtime"
     assert manifest["measurement_scope"] == "smoke"
     assert manifest["performance_claims_allowed"] is False
     assert manifest["limits"]["max_llm_turns"] == 5

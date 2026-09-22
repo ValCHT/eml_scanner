@@ -1,4 +1,4 @@
-"""Exact agent tool set and the typing-safe executor (TICKET-19A/B §9-§20).
+"""Exact agent tool set and the typing-safe executor (TICKET-19A/B/C §6-§8).
 
 Exactly four tools are exposed to the LLM::
 
@@ -6,6 +6,17 @@ Exactly four tools are exposed to the LLM::
     lookup_opencti    <observable_id>
     scan_urlscan      <observable_id>
     finalize_assessment {assessment}
+
+T19C §7: ``finalize_assessment.assessment`` exposes the COMPLETE frozen
+Assessment JSON Schema (``schemas/assessment.schema.json``, loaded here and
+never duplicated) instead of a generic object; the frozen file's root-only
+``$defs`` are hoisted to the tool root so its ``#/$defs/...`` references
+resolve inside the tool parameters (PR #19 review, blocker 1). The
+validation chain remains tool JSON schema -> Pydantic
+``src.state.Assessment`` -> existing verifier -> existing policy. T19C §8:
+each tool description is short and states only
+WHAT it checks, WHEN it is useful and WHAT a negative/unavailable result does
+NOT prove; long documentation stays out of the system prompt.
 
 The three investigation tools accept ONLY ``observable_id``. The executor
 resolves the identifier against the trusted parser-produced registry of the
@@ -121,6 +132,54 @@ def _refusal_message(reason: str, limits: AgentLimits | None = None) -> str:
     return _REFUSAL_MESSAGES.get(reason, "request refused")
 
 
+#: Frozen Assessment JSON Schema (schemas/ is normative, read-only): the
+#: EXACT object ``parse_finalize_arguments`` validates with
+#: ``Assessment.model_validate``. Never a second format.
+_ASSESSMENT_SCHEMA_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "schemas" / "assessment.schema.json"
+)
+
+
+def assessment_schema() -> dict[str, Any]:
+    """Load the frozen Assessment JSON Schema exposed by finalize_assessment."""
+
+    schema = json.loads(_ASSESSMENT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert isinstance(schema, dict)
+    return schema
+
+
+#: Root-only JSON Schema keywords of the frozen file: ``$schema`` is a
+#: document-level keyword that must not travel into a subschema, and ``$defs``
+#: is hoisted to the tool root (PR #19 review, blocker 1).
+_SCHEMA_ROOT_ONLY = ("$schema", "$defs")
+
+
+def build_finalize_parameters(schema: dict[str, Any]) -> dict[str, Any]:
+    """Tool parameters exposing the frozen Assessment schema with valid refs.
+
+    The frozen file is embedded unchanged except for its root-only keywords:
+    ``$schema`` is dropped (a subschema is not a schema resource) and
+    ``$defs`` is hoisted to the tool root, so every ``#/$defs/...`` reference
+    written by the frozen schema resolves INSIDE the tool parameters instead
+    of pointing at an absent root. No reference is rewritten, no definition is
+    duplicated and no second Assessment format is invented.
+    """
+
+    defs = schema.get("$defs")
+    embedded = {
+        key: value for key, value in schema.items() if key not in _SCHEMA_ROOT_ONLY
+    }
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {"assessment": embedded},
+        "required": ["assessment"],
+        "additionalProperties": False,
+    }
+    if defs:
+        parameters["$defs"] = defs
+    return parameters
+
+
 #: The exact four tool schemas exposed to the model (§9). No description
 #: carries a configurable number: the urlscan claim ("at most one submission
 #: exists per run") matches the structurally frozen
@@ -132,10 +191,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_virustotal",
             "description": (
-                "One real VirusTotal GET lookup through the existing typed adapter. "
-                "The only accepted argument is observable_id, an identifier from "
-                "OBSERVABLE_REGISTRY. Returns the normalized ToolResult; unavailable "
-                "or not_found is a valid honest outcome, never benign evidence."
+                "WHAT: one real VirusTotal GET lookup for an observable_id from "
+                "OBSERVABLE_REGISTRY. WHEN: a reputation signal on this exact "
+                "observable could change the assessment. NOT PROOF: unavailable, "
+                "not_found or zero detections never prove benignity."
             ),
             "parameters": {
                 "type": "object",
@@ -155,10 +214,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "lookup_opencti",
             "description": (
-                "One real read-only OpenCTI lookup through the existing typed "
-                "adapter. The only accepted argument is observable_id from "
-                "OBSERVABLE_REGISTRY. An exact match is returned as normalized "
-                "evidence; unavailability is honest and never benign evidence."
+                "WHAT: one real read-only OpenCTI lookup for an observable_id from "
+                "OBSERVABLE_REGISTRY. WHEN: knowing whether this exact observable is "
+                "known in CTI could change the assessment. NOT PROOF: presence is "
+                "not proof of malice; unavailability never proves benignity."
             ),
             "parameters": {
                 "type": "object",
@@ -178,10 +237,10 @@ AGENT_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "scan_urlscan",
             "description": (
-                "One real urlscan submission through the existing typed adapter. "
-                "Only URL observables from OBSERVABLE_REGISTRY are submittable and "
-                "at most one submission exists per run. Privacy/egress refusals and "
-                "unavailability are returned as normalized statuses."
+                "WHAT: one real urlscan submission for a URL observable_id from "
+                "OBSERVABLE_REGISTRY; at most one submission exists per run. WHEN: "
+                "an unvisited URL's real page could change the assessment. NOT "
+                "PROOF: refusal, unavailable or a clean page never proves benignity."
             ),
             "parameters": {
                 "type": "object",
@@ -202,27 +261,17 @@ AGENT_TOOLS: list[dict[str, Any]] = [
             "name": FINALIZE_TOOL,
             "description": (
                 "Terminal call: deliver the final Assessment. The assessment "
-                "object must validate exactly as the frozen Assessment schema "
-                "(six probabilities summing to 1 within 1e-6, only existing "
-                "evidence/observable IDs, at most six inferences, at most three "
-                "decisive_evidence_ids). An invalid assessment is rejected and "
+                "object must validate exactly against the exposed frozen "
+                "Assessment JSON Schema. An invalid assessment is rejected and "
                 "never becomes a verdict."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "assessment": {
-                        "type": "object",
-                        "description": (
-                            "the complete Assessment object exactly as described by "
-                            "the SORTIE section of the system prompt and the frozen "
-                            "Assessment schema (schemas/assessment.schema.json)"
-                        ),
-                    }
-                },
-                "required": ["assessment"],
-                "additionalProperties": False,
-            },
+            # T19C §7: the COMPLETE frozen Assessment JSON Schema
+            # (schemas/assessment.schema.json), never a generic object and
+            # never a second format. Its `$defs` are hoisted to this tool
+            # root so every `#/$defs/...` reference resolves (PR #19 review,
+            # blocker 1). Validated by parse_finalize_arguments exactly as
+            # src.state.Assessment.
+            "parameters": build_finalize_parameters(assessment_schema()),
         },
     },
 ]
@@ -576,6 +625,8 @@ __all__ = [
     "REFUSAL_REASONS",
     "ProviderAdapterSet",
     "ProviderToolExecutor",
+    "assessment_schema",
+    "build_finalize_parameters",
     "execution_payload",
     "normalize_result_payload",
     "parse_finalize_arguments",

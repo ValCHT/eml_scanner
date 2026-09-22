@@ -1,15 +1,25 @@
-"""Bounded minimum agentic SOC triage loop (TICKET-19B).
+"""Bounded converged agentic SOC triage loop (TICKET-19B, converged by T19C).
 
 ``run_agentic_email`` is a simple bounded Python loop. It does NOT use
 LangGraph, does not touch ``src/graph.py`` and adds no second agent:
 
     parse email
+      -> T15 deterministic public RAG retrieval (preprocessing, never a tool)
+      -> T16 deterministic QR decode / bounded pixel staging (preprocessing)
       -> LLM turn (native tool calls, real endpoint)
       -> validate each call / execute allowed provider calls in order
       -> normalized ToolResult returned as role=tool
       -> ... until finalize_assessment or a frozen limit
       -> existing deterministic merge / verifier / policy
       -> runs/agentic/<run_id>/{manifest,trace,final,summary}
+
+The T19C convergence adds NO agent, NO tool and NO architectural redesign:
+RAG stays a deterministic preprocessing step (its results travel in
+``RAG_CONTEXT`` and its conditional guidance in the system prompt), QR
+payloads join the existing parser contracts (INTERNE evidence/observables)
+and staged pixels travel as ``image_url`` parts of the same Qwen request.
+The tool set is unchanged: ``lookup_virustotal``, ``lookup_opencti``,
+``scan_urlscan``, ``finalize_assessment``.
 
 Frozen limits (§15): 5 LLM turns, 4 provider calls, 1 urlscan call, 300 s
 total, 90 s per LLM request, 12,000 chars per tool result. A duplicate
@@ -32,7 +42,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterable, Literal
 
 import yaml
 
@@ -52,20 +62,34 @@ from ..state import (
     Assessment,
     Enrichment,
     Evidence,
+    Link,
     Observable,
     ParsedEmail,
+    RagCase,
     ToolResult,
     VerificationIssue,
+)
+from ..tools.rag import (
+    RagError,
+    RagUnavailableError,
+    create_rag_adapter_if_enabled,
+    rag_query_from_parsed,
 )
 from ..verify import (
     RunContext,
     is_admissible_malicious_confirmation,
     verify_assessment,
 )
+from ..vision import (
+    VisionPreparation,
+    load_image_bytes,
+    prepare_visual_bundle,
+    qr_contract,
+)
 from .client import AgentChatClient
 from .models import (
     AGENT_REASONING_EFFORT,
-    ARCHITECTURE_NAME,
+    CONVERGED_ARCHITECTURE_NAME,
     DEFAULT_AGENT_LIMITS,
     FINALIZE_TOOL,
     MEASUREMENT_SCOPE,
@@ -175,6 +199,136 @@ def _build_real_adapters(
     )
 
 
+# ---------------------------------------------------------------------------
+# Deterministic preprocessing: T15 RAG + T16 QR/Vision (TICKET-19C §3-§5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RagPreprocessing:
+    """T15 retrieval outcome; a typed failure is fail-closed (no context)."""
+
+    cases: list[RagCase] = field(default_factory=list)
+    error: str | None = None
+    enabled: bool = False
+
+
+@dataclass
+class _VisualPreprocessing:
+    """T16 preparation outcome: prepared visuals + QR contract entries."""
+
+    preparation: VisionPreparation
+    links: list[Link] = field(default_factory=list)
+    observables: list[Observable] = field(default_factory=list)
+    evidence: list[Evidence] = field(default_factory=list)
+    vision_enabled: bool = False
+    qr_enabled: bool = False
+
+
+def _empty_visual_preprocessing() -> _VisualPreprocessing:
+    return _VisualPreprocessing(
+        preparation=VisionPreparation(
+            visuals=[],
+            staged=(),
+            qr_decode_requested=False,
+            qr_decoder_available=False,
+            pixel_decoder_available=False,
+        )
+    )
+
+
+def _rag_preprocess(
+    parsed: ParsedEmail,
+    settings: Settings,
+    tools_config: ToolsConfig,
+    rag: Any | None,
+    exclusions: set[str],
+) -> _RagPreprocessing:
+    """Deterministic public-only RAG retrieval, exactly as the V1 RAG node.
+
+    The adapter is the existing T15 one (injected in tests, built from
+    ``RAG_ENABLED`` + ``tools.rag.enabled`` in production); the query and the
+    retrieval limits are the frozen T15 ones. A RAG failure is typed,
+    fail-closed state: empty context and a recorded error, never a fabricated
+    neighbour and never an agent tool.
+    """
+
+    adapter = (
+        rag
+        if rag is not None
+        else create_rag_adapter_if_enabled(settings, tools_config.rag)
+    )
+    if adapter is None:
+        return _RagPreprocessing()
+    query = rag_query_from_parsed(parsed, tools_config.rag.max_case_chars)
+    if not query:
+        return _RagPreprocessing(enabled=True)
+    try:
+        cases = adapter.search(query, exclusions=set(exclusions), k=tools_config.rag.k)
+        validated = [
+            case if isinstance(case, RagCase) else RagCase.model_validate(case)
+            for case in cases
+        ]
+    except RagUnavailableError as error:
+        return _RagPreprocessing(error=f"rag_unavailable:{type(error).__name__}", enabled=True)
+    except RagError as error:
+        return _RagPreprocessing(
+            error=f"rag_lookup_failed:{type(error).__name__}", enabled=True
+        )
+    except Exception as error:  # noqa: BLE001 - fail-closed, never simulated
+        return _RagPreprocessing(
+            error=f"rag_lookup_failed:{type(error).__name__}", enabled=True
+        )
+    return _RagPreprocessing(cases=validated, enabled=True)
+
+
+def _vision_preprocess(
+    parsed: ParsedEmail,
+    raw_email: bytes,
+    settings: Settings,
+    tools_config: ToolsConfig,
+) -> _VisualPreprocessing:
+    """T16 QR decode + bounded pixel staging, exactly as the T16 capability.
+
+    Pixel staging obeys ``MODEL_SUPPORTS_VISION`` (the frozen
+    ``configs/tools.yaml`` keeps ``vision.enabled=false``; the operator
+    switch is applied IN MEMORY for this run only, exactly like the T16
+    capability smoke). QR decoding obeys ``QR_DECODE_ENABLED`` independently:
+    ``text+QR`` decodes without staging a pixel and a disabled QR switch
+    never executes the decoder. The optional stack is never imported when
+    neither switch is requested. QR payloads join the existing parser
+    contracts through ``qr_contract`` (INTERNE evidence/observables); no
+    decoded URL is ever visited or submitted by this preprocessing.
+    """
+
+    limits = tools_config.vision
+    if settings.MODEL_SUPPORTS_VISION and not limits.enabled:
+        limits = limits.model_copy(update={"enabled": True})
+    qr_enabled = bool(settings.QR_DECODE_ENABLED)
+    needs_bytes = bool(limits.enabled) or qr_enabled
+    image_bytes = (
+        load_image_bytes(
+            raw_email,
+            parsed,
+            ParseLimits.from_config(tools_config.parse_limits),
+        )
+        if needs_bytes
+        else None
+    )
+    preparation = prepare_visual_bundle(
+        parsed, limits, image_bytes=image_bytes, qr_enabled=qr_enabled
+    )
+    links, observables, evidence = qr_contract(preparation.visuals)
+    return _VisualPreprocessing(
+        preparation=preparation,
+        links=links,
+        observables=observables,
+        evidence=evidence,
+        vision_enabled=bool(limits.enabled),
+        qr_enabled=qr_enabled,
+    )
+
+
 def _issue(
     code: str,
     severity: str,
@@ -256,13 +410,21 @@ def run_agentic_email(
     limits: AgentLimits = DEFAULT_AGENT_LIMITS,
     sample_id: str | None = None,
     effort: str = AGENT_REASONING_EFFORT,
+    rag: Any | None = None,
+    rag_exclusions: Iterable[str] | None = None,
+    current_duplicate_group: str | None = None,
+    current_family_group: str | None = None,
+    current_campaign_id: str | None = None,
 ) -> AgentRunResult:
-    """Execute the bounded agentic core for ONE email and write its artifacts.
+    """Execute the bounded converged agentic runtime for ONE email.
 
-    ``client``/``adapters`` are injection points used by deterministic unit
-    tests (stub clients are never live evidence). In production both are
+    ``client``/``adapters``/``rag`` are injection points used by deterministic
+    unit tests (stub clients are never live evidence). In production they are
     built from the real Settings/configs and every LLM/tool observation is a
-    real response.
+    real response. ``rag`` defaults to the existing T15 factory
+    (``RAG_ENABLED`` + ``tools.rag.enabled``); ``rag_exclusions`` and the
+    three current-email group identities are caller-owned metadata exactly
+    like the V1 RAG node (the adapter excludes them and V15 re-checks them).
     """
 
     started = clock()
@@ -276,7 +438,6 @@ def run_agentic_email(
     capture_dir.mkdir(parents=True, exist_ok=True)
     trace = _RunTrace(started_monotonic=started, clock=clock)
 
-    prompt_sha = agent_system_prompt_sha256(limits)
     tools_config = load_yaml_config(Path(settings.CONFIG_DIR) / "tools.yaml", ToolsConfig)
     policy_config = load_yaml_config(Path(settings.CONFIG_DIR) / "policy.yaml", PolicyConfig)
     assert isinstance(tools_config, ToolsConfig) and isinstance(policy_config, PolicyConfig)
@@ -290,6 +451,14 @@ def run_agentic_email(
     turns_meta: list[dict[str, Any]] = []
     assessment: Assessment | None = None
     status: Literal["finalized", "incomplete", "error"] = "incomplete"
+    rag_info = _RagPreprocessing()
+    visual = _empty_visual_preprocessing()
+    staged: tuple[Any, ...] = ()
+    augmented: ParsedEmail | None = None
+    exclusions: set[str] = set()
+    has_rag = False
+    has_visuals = False
+    prompt_sha = agent_system_prompt_sha256(limits)
 
     parsed = parse_email(
         Path(email_path), ParseLimits.from_config(tools_config.parse_limits)
@@ -302,8 +471,49 @@ def run_agentic_email(
         executor = None
     else:
         email_hash = parsed.email_sha256
+
+        # --- deterministic T15/T16 preprocessing (never an agent tool) ------
+        exclusions = {item for item in (rag_exclusions or ()) if isinstance(item, str)}
+        rag_info = _rag_preprocess(parsed, settings, tools_config, rag, exclusions)
+        visual = _vision_preprocess(
+            parsed, Path(email_path).read_bytes(), settings, tools_config
+        )
+        augmented = parsed.model_copy(
+            update={
+                "links": [*parsed.links, *visual.links],
+                "observables": [*parsed.observables, *visual.observables],
+                "evidence": [*parsed.evidence, *visual.evidence],
+                "images": list(visual.preparation.visuals),
+            }
+        )
+        staged = visual.preparation.staged
+        has_rag = bool(rag_info.cases)
+        has_visuals = bool(staged)
+        prompt_sha = agent_system_prompt_sha256(
+            limits, has_rag=has_rag, has_visuals=has_visuals
+        )
+        trace.add(
+            "rag_lookup",
+            enabled=rag_info.enabled,
+            case_count=len(rag_info.cases),
+            exclusion_count=len(exclusions),
+            error=rag_info.error,
+        )
+        trace.add(
+            "visual_preparation",
+            vision_enabled=visual.vision_enabled,
+            qr_decode_enabled=visual.qr_enabled,
+            visual_count=len(visual.preparation.visuals),
+            staged_count=len(staged),
+            qr_payload_count=sum(
+                len(entry.qr_payloads) for entry in visual.preparation.visuals
+            ),
+            qr_observable_count=len(visual.observables),
+            statuses=[entry.status for entry in visual.preparation.visuals],
+        )
+
         executor = ProviderToolExecutor(
-            parsed=parsed,
+            parsed=augmented,
             adapters=adapters
             if adapters is not None
             else _build_real_adapters(settings, tools_config, clock),
@@ -336,9 +546,15 @@ def run_agentic_email(
                     persist_request_body=(source_profile == "fixture"),
                 )
         if agent_client is not None:
-            messages = initial_messages(parsed, ContextLimits(), limits)
+            messages = initial_messages(
+                augmented,
+                ContextLimits(),
+                limits,
+                rag_cases=rag_info.cases,
+                staged=staged,
+            )
             assessment, status, llm_error, agent_error, turns_meta = _run_loop(
-                parsed=parsed,
+                parsed=augmented,
                 executor=executor,
                 client=agent_client,
                 messages=messages,
@@ -363,7 +579,7 @@ def run_agentic_email(
             virustotal=[r for r in executor.results if r.tool == "virustotal"],
             opencti=[r for r in executor.results if r.tool == "opencti"],
             urlscan=[r for r in executor.results if r.tool == "urlscan"],
-            rag=[],
+            rag=list(rag_info.cases),
         )
         tool_counts = executor.tool_counts_by_provider()
         tool_statuses = executor.tool_statuses_by_provider()
@@ -386,9 +602,9 @@ def run_agentic_email(
     evidence: dict[str, Evidence]
     observables: dict[str, Observable]
     merged_ok = True
-    if parsed is not None and not isinstance(parsed, ParseFailure):
+    if augmented is not None:
         try:
-            evidence, observables, _visuals = merge_evidence(parsed, enrichment)
+            evidence, observables, _visuals = merge_evidence(augmented, enrichment)
         except EvidenceMergeError as error:
             merged_ok = False
             agent_errors.append(
@@ -399,8 +615,8 @@ def run_agentic_email(
                     str(error),
                 )
             )
-            evidence = {entry.id: entry for entry in parsed.evidence}
-            observables = {entry.id: entry for entry in parsed.observables}
+            evidence = {entry.id: entry for entry in augmented.evidence}
+            observables = {entry.id: entry for entry in augmented.observables}
     else:
         evidence, observables = {}, {}
 
@@ -409,11 +625,18 @@ def run_agentic_email(
         "final",
         registry={"evidence": evidence, "observables": observables},
         tool_results=enrichment,
-        parsed=None if isinstance(parsed, ParseFailure) else parsed,
-        rag_context=[],
+        parsed=augmented,
+        rag_context=rag_info.cases,
         internal=None,
         run_context=RunContext(
-            final_source="final_llm" if assessment is not None else "none"
+            final_source="final_llm" if assessment is not None else "none",
+            # Pixels actually attached to the agent request (0 when the
+            # Vision switch is off): V10 can then tell a supplied screenshot
+            # from an unprovided one.
+            visual_count_sent=len(staged),
+            current_duplicate_group=current_duplicate_group,
+            current_family_group=current_family_group,
+            current_campaign_id=current_campaign_id,
         ),
     )
     verdict = verification.verdict
@@ -494,8 +717,8 @@ def run_agentic_email(
 
     manifest = {
         "schema_version": "1.0",
-        "architecture": ARCHITECTURE_NAME,
-        "run_kind": "t19b_agentic_core",
+        "architecture": CONVERGED_ARCHITECTURE_NAME,
+        "run_kind": "t19c_agentic_runtime",
         "measurement_scope": MEASUREMENT_SCOPE,
         "performance_claims_allowed": PERFORMANCE_CLAIMS_ALLOWED,
         "run_id": run_id,
@@ -540,8 +763,19 @@ def run_agentic_email(
         "final_margin": margin,
         "verification_issue_codes": [issue.code for issue in verification.issues],
         "finalize_attempt_count": len(finalize_attempts),
-        "rag_enabled": False,
-        "vision_enabled": False,
+        # --- T19C convergence facts (effective, never inferred) --------------
+        "rag_enabled": rag_info.enabled,
+        "rag_case_count": len(rag_info.cases),
+        "rag_lookup_error": rag_info.error,
+        "rag_exclusion_count": len(exclusions),
+        "vision_enabled": visual.vision_enabled,
+        "qr_decode_enabled": visual.qr_enabled,
+        "visual_count_sent": len(staged),
+        "qr_payload_count": sum(
+            len(entry.qr_payloads) for entry in visual.preparation.visuals
+        ),
+        "qr_observable_count": len(visual.observables),
+        "prompt_guidance": {"rag": has_rag, "visuals": has_visuals},
         "parse_error": parse_error,
         "llm_error": llm_error,
         "agent_error": agent_error,
