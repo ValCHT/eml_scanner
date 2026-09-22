@@ -163,6 +163,7 @@ def _executor(
     *,
     egress: Any = None,
     limits: AgentLimits | None = None,
+    profile: str = "agentic_context",
 ) -> ProviderToolExecutor:
     import time
 
@@ -176,6 +177,7 @@ def _executor(
         capture_dir=Path("."),
         deadline=time.monotonic() + 60,
         limits=limits if limits is not None else DEFAULT_AGENT_LIMITS,
+        profile=profile,  # type: ignore[arg-type]
     )
 
 
@@ -786,7 +788,7 @@ def _executor_with_osint(
     vt = RecordingAdapter(lambda query, _ctx: _unavailable(query, _ctx))
     osint = RecordingAdapter(osint_factory)
     adapters = ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt, osint=osint)
-    executor = _executor(parsed_email, adapters, tools_config, limits=limits)
+    executor = _executor(parsed_email, adapters, tools_config, limits=limits, profile="agentic_osint")
     return executor, osint
 
 
@@ -880,6 +882,7 @@ def test_lookup_osint_without_adapter_is_honest_unavailable(
         parsed_email,
         ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt),
         tools_config,
+        profile="agentic_osint",
     )
     execution = executor.execute(_call("lookup_osint", domain.id))
     assert execution.outcome == "executed"
@@ -888,3 +891,34 @@ def test_lookup_osint_without_adapter_is_honest_unavailable(
     assert execution.result.status == "unavailable"
     assert execution.provider_status == "unavailable"
     assert executor.provider_tool_call_count == 1
+
+
+def test_lookup_osint_refused_on_non_osint_profiles(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    """Review PR #21 blocker 4: fail-closed backend profile isolation."""
+
+    domain = _observable_by(parsed_email, type="domain")
+    for profile in ("agentic_core", "agentic_context"):
+        vt = RecordingAdapter(lambda query, _ctx: _unavailable(query, _ctx))
+        osint = RecordingAdapter(_osint_ok)
+        executor = _executor(
+            parsed_email,
+            ProviderAdapterSet(virustotal=vt, opencti=vt, urlscan=vt, osint=osint),
+            tools_config,
+            profile=profile,
+        )
+        execution = executor.execute(_call("lookup_osint", domain.id))
+        assert execution.outcome == "refused"
+        assert execution.refusal_reason == "not_exposed_for_profile"
+        assert osint.calls == []
+        assert executor.provider_tool_call_count == 0
+
+
+def test_historical_tools_execute_on_osint_profiles(
+    parsed_email: ParsedEmail, tools_config: ToolsConfig
+) -> None:
+    domain = _observable_by(parsed_email, type="domain")
+    executor, _ = _executor_with_osint(parsed_email, tools_config, _osint_ok)
+    execution = executor.execute(_call("lookup_virustotal", domain.id))
+    assert execution.outcome == "executed"

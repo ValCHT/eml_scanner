@@ -927,6 +927,45 @@ def test_ct_names_dedup_sorted_capped_at_twenty(tmp_path: Path, clean_env: None)
     assert len(set(projected)) == 20
 
 
+def test_ct_transport_read_is_bounded(tmp_path: Path, clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review PR #21 blocker 1: at most max_bytes+1 cross the socket."""
+
+    import urllib.request
+
+    recorded: list[int | None] = []
+    body = b"0123456789"
+
+    class _FakeResponse:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def read(self, limit: int | None = None) -> bytes:
+            recorded.append(limit)
+            return body if limit is None else body[:limit]
+
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    class _FakeOpener:
+        def open(self, request: object, timeout: float = 0) -> _FakeResponse:
+            return _FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: _FakeOpener())
+    clock = ManualClock()
+    context = _context(tmp_path, clock)
+    # Real CT transport (no injected fake) with a tiny bound.
+    adapter = OsintAdapter(
+        _settings_no_key(clean_env), _config(max_ct_response_bytes=4), clock=clock,
+        threatfox_post=FakePost(_not_found_post), http_get=None, dns_resolve=FakeDns({}),
+    )
+    adapter.lookup(_observable("domain", "example.com"), context)
+    # RDAP uses the unbounded GET path (None); CT must pass max_bytes + 1.
+    assert 5 in recorded
+
+
 def test_ct_exact_limit_allowed_over_limit_refused(tmp_path: Path, clean_env: None) -> None:
     clock = ManualClock()
     limit = 2097152
@@ -946,6 +985,33 @@ def test_ct_exact_limit_allowed_over_limit_refused(tmp_path: Path, clean_env: No
     assert bundle2["sources"]["certificate_transparency"]["status"] == "unavailable"
     assert bundle2["sources"]["certificate_transparency"]["reason"] == "response_over_limit"
     assert not [e for e in result2.evidence if e.source_group == "certificate_transparency"]
+
+
+def test_subdomain_parent_data_is_generic(tmp_path: Path, clean_env: None) -> None:
+    """Review PR #21 blocker 3: RDAP/CT about the registrable parent of the
+    queried hostname are GENERIC, not EXACT. ThreatFox/DNS query the exact
+    hostname and stay EXACT."""
+
+    clock = ManualClock()
+    get = FakeGet(lambda u, t: (200, {}, json.dumps(_rdap_domain_doc()).encode() if "rdap" in u else json.dumps(_ct_entries(1)).encode()))
+    dns = FakeDns({("www.example.com", "A"): ["93.184.216.34"]})
+    adapter, context = _quiet_adapter(_settings_no_key(clean_env), tmp_path, clock, get=get, dns=dns)
+    result = adapter.lookup(_observable("domain", "www.example.com"), context)
+    assert result.status == "ok"
+    levels = {}
+    for e in result.evidence:
+        levels.setdefault(e.source_group, set()).add(e.match_level)
+    assert levels["rdap"] == {"GENERIC"}
+    assert levels["certificate_transparency"] == {"GENERIC"}
+    assert levels["dns"] == {"EXACT"}
+
+    adapter2, context2 = _quiet_adapter(_settings_no_key(clean_env), tmp_path, clock, get=get, dns=FakeDns({("example.com", "A"): ["93.184.216.34"]}))
+    result2 = adapter2.lookup(_observable("domain", "example.com"), context2)
+    levels2 = {}
+    for e in result2.evidence:
+        levels2.setdefault(e.source_group, set()).add(e.match_level)
+    assert levels2["rdap"] == {"EXACT"}
+    assert levels2["certificate_transparency"] == {"EXACT"}
 
 
 def test_ct_malformed_and_no_pivot(tmp_path: Path, clean_env: None) -> None:

@@ -71,6 +71,7 @@ REFUSAL_REASONS: tuple[str, ...] = (
     "missing_tool_call_id",
     "unknown_tool",
     "not_an_investigation_tool",
+    "not_exposed_for_profile",
     "malformed_arguments",
     "unexpected_argument",
     "missing_observable_id",
@@ -93,6 +94,10 @@ _REFUSAL_MESSAGES: dict[str, str] = {
     "unknown_tool": "unknown tool: only the declared tools exist",
     "not_an_investigation_tool": (
         "finalize_assessment is terminal and is not executed by the provider executor"
+    ),
+    "not_exposed_for_profile": (
+        "this tool is not exposed by the active agent profile: it cannot be "
+        "executed; finalize with the evidence already available"
     ),
     "malformed_arguments": "the tool arguments are not a valid JSON object",
     "unexpected_argument": (
@@ -523,7 +528,11 @@ class ProviderToolExecutor:
     """Typed execution of the three investigation tools against real adapters.
 
     The registry is the parser registry of the CURRENT email only; it is
-    never extended with tool-discovered observables (§19).
+    never extended with tool-discovered observables (§19). ``profile`` is
+    the active agentic profile: a tool the profile does not expose
+    (``lookup_osint`` on ``agentic_core``/``agentic_context``) is refused
+    with zero provider call (fail-closed backend isolation, review PR #21
+    blocker 4).
     """
 
     parsed: ParsedEmail
@@ -537,6 +546,7 @@ class ProviderToolExecutor:
     mode: Literal["live", "recorded"] = "live"
     clock: Callable[[], float] = time.monotonic
     limits: AgentLimits = field(default_factory=lambda: DEFAULT_AGENT_LIMITS)
+    profile: AgentProfile = DEFAULT_AGENT_PROFILE
 
     def __post_init__(self) -> None:
         self._registry: dict[str, Observable] = {
@@ -632,6 +642,11 @@ class ProviderToolExecutor:
             if tool == FINALIZE_TOOL:
                 return _refuse("not_an_investigation_tool", None)
             return _refuse("unknown_tool", None)
+        if tool == LOOKUP_OSINT_TOOL and not osint_exposed(self.profile):
+            # Fail-closed profile isolation: the model never sees this tool
+            # on core/context, and the backend refuses it too — zero
+            # provider call even if it were emitted.
+            return _refuse("not_exposed_for_profile", None)
         if call.arguments_error is not None or call.arguments is None:
             return _refuse("malformed_arguments", None)
         unexpected = sorted(set(call.arguments) - {"observable_id"})

@@ -238,6 +238,27 @@ def _real_get(url: str, timeout_s: float) -> tuple[int, dict[str, str], bytes]:
         return int(error.code), dict(error.headers or {}), payload
 
 
+def _real_get_bounded(url: str, timeout_s: float, limit: int) -> tuple[int, dict[str, str], bytes]:
+    """One real HTTP GET with a hard transport-level read bound.
+
+    At most ``limit`` bytes are ever pulled from the socket (review PR #21
+    blocker 1): a provider sending more cannot force an unbounded read and
+    the caller refuses to parse the truncated body.
+    """
+
+    opener = urllib.request.build_opener(_HttpRedirectBlock)
+    request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    try:
+        with opener.open(request, timeout=timeout_s) as response:
+            return int(response.status), dict(response.headers), response.read(limit)
+    except urllib.error.HTTPError as error:
+        try:
+            payload = error.read(limit)
+        except Exception:
+            payload = b""
+        return int(error.code), dict(error.headers or {}), payload
+
+
 def _classify_transport(error: Exception) -> str:
     """Map a local transport failure to an unavailable cause (§§14–18)."""
 
@@ -307,6 +328,7 @@ def _evidence(
     capture_ref: str,
     pointer: str,
     observed_at: str,
+    match_level: str = "EXACT",
 ) -> Evidence:
     return Evidence(
         id=det_id("ev", "osint", predicate, str(value), query.id, pointer),
@@ -317,7 +339,7 @@ def _evidence(
         value=value,
         source_ref=f"{capture_ref}#/{pointer}",
         observed_at=observed_at,
-        match_level="EXACT",
+        match_level=match_level,  # type: ignore[arg-type]
         source_group=source_group,
     )
 
@@ -452,6 +474,7 @@ def _lookup_rdap(
     digest: str,
     get: Callable[[str, float], tuple[int, dict[str, str], bytes]] | None,
     clock: Callable[[], float],
+    match_level: str = "EXACT",
 ) -> dict[str, Any]:
     """Bounded RDAP bootstrap + at most one safe redirect (§§15–16)."""
 
@@ -542,7 +565,7 @@ def _lookup_rdap(
         for index, event in enumerate(events):
             if isinstance(event, dict) and event.get("eventAction") == action and isinstance(event.get("eventDate"), str):
                 evidence.append(
-                    _evidence(query, predicate, event["eventDate"], "rdap", capture, f"events/{index}/eventDate", observed_at)
+                    _evidence(query, predicate, event["eventDate"], "rdap", capture, f"events/{index}/eventDate", observed_at, match_level)
                 )
                 break
     entities = document.get("entities") if isinstance(document.get("entities"), list) else []
@@ -559,14 +582,14 @@ def _lookup_rdap(
                         break
             if name:
                 evidence.append(
-                    _evidence(query, "osint_rdap_registrar", name, "rdap", capture, "entities/registrar/vcardArray/fn", observed_at)
+                    _evidence(query, "osint_rdap_registrar", name, "rdap", capture, "entities/registrar/vcardArray/fn", observed_at, match_level)
                 )
             break
     statuses = document.get("status") if isinstance(document.get("status"), list) else []
     for index, value in enumerate(statuses[:10]):
         if isinstance(value, str) and value:
             evidence.append(
-                _evidence(query, "osint_rdap_status", value, "rdap", capture, f"status/{index}", observed_at)
+                _evidence(query, "osint_rdap_status", value, "rdap", capture, f"status/{index}", observed_at, match_level)
             )
     nameservers = document.get("nameservers") if isinstance(document.get("nameservers"), list) else []
     count = 0
@@ -575,7 +598,7 @@ def _lookup_rdap(
             break
         if isinstance(entry, dict) and isinstance(entry.get("ldhName"), str) and entry["ldhName"]:
             evidence.append(
-                _evidence(query, "osint_rdap_nameserver", entry["ldhName"], "rdap", capture, f"nameservers/{index}/ldhName", observed_at)
+                _evidence(query, "osint_rdap_nameserver", entry["ldhName"], "rdap", capture, f"nameservers/{index}/ldhName", observed_at, match_level)
             )
             count += 1
     if not evidence:
@@ -616,6 +639,10 @@ def _lookup_dns(
         if remaining < _MIN_REQUEST_BUDGET_S:
             timed_out = True
             break
+        # Every initiated query counts as a sent request — successes,
+        # NXDOMAIN/NoAnswer empties, timeouts and transport errors alike
+        # (review PR #21 blocker 2). Only a query never started (budget
+        # exhausted above) counts zero.
         try:
             if resolve is not None:
                 values = resolve(normalized, rdtype, remaining)
@@ -623,9 +650,11 @@ def _lookup_dns(
                 values = _real_dns_query(normalized, rdtype, remaining)
             sent += 1
         except _DnsEmpty:
+            sent += 1
             answers["types"][rdtype] = {"status": "empty"}
             continue
         except Exception as error:
+            sent += 1
             message = f"{type(error).__name__}: {error}".lower()
             if "timeout" in message or "timed out" in message or "lifetime" in message:
                 timed_out = True
@@ -668,6 +697,7 @@ def _lookup_ct(
     context: ToolContext,
     digest: str,
     get: Callable[[str, float], tuple[int, dict[str, str], bytes]] | None,
+    match_level: str = "EXACT",
 ) -> dict[str, Any]:
     """Best-effort crt.sh lookup, bounded read (limit+1) (§§18–19)."""
 
@@ -687,9 +717,13 @@ def _lookup_ct(
     base["query_target"] = registrable
     params = urllib.parse.urlencode({"q": f"%.{registrable}", "output": "json", "deduplicate": "Y"})
     url = f"{CT_ORIGIN}/?{params}"
-    fetch = get if get is not None else _real_get
     try:
-        http_status, headers, raw = fetch(url, timeout_s)
+        if get is not None:
+            http_status, headers, raw = get(url, timeout_s)
+        else:
+            # Transport-level bound: at most max_bytes+1 ever cross the
+            # socket; over-limit bodies are never parsed (§18).
+            http_status, headers, raw = _real_get_bounded(url, timeout_s, max_bytes + 1)
     except Exception as error:
         return {**base, "status": "unavailable", "reason": _classify_transport(error), "requests_sent": 1}
     base["requests_sent"] = 1
@@ -718,16 +752,16 @@ def _lookup_ct(
     entries = document if isinstance(document, list) else []
     if not entries:
         return {**base, "status": "not_found", "reason": None}
-    evidence = [_evidence(query, "osint_ct_certificate_count", float(len(entries)), "certificate_transparency", capture, "count", observed_at)]
+    evidence = [_evidence(query, "osint_ct_certificate_count", float(len(entries)), "certificate_transparency", capture, "count", observed_at, match_level)]
     not_before = sorted(
         str(entry["not_before"]) for entry in entries if isinstance(entry, dict) and entry.get("not_before")
     )
     if not_before:
         evidence.append(
-            _evidence(query, "osint_ct_first_not_before", not_before[0], "certificate_transparency", capture, "not_before/min", observed_at)
+            _evidence(query, "osint_ct_first_not_before", not_before[0], "certificate_transparency", capture, "not_before/min", observed_at, match_level)
         )
         evidence.append(
-            _evidence(query, "osint_ct_last_not_before", not_before[-1], "certificate_transparency", capture, "not_before/max", observed_at)
+            _evidence(query, "osint_ct_last_not_before", not_before[-1], "certificate_transparency", capture, "not_before/max", observed_at, match_level)
         )
     names: set[str] = set()
     for entry in entries:
@@ -739,7 +773,7 @@ def _lookup_ct(
                 names.add(cleaned)
     for index, name in enumerate(sorted(names)[:max_names]):
         evidence.append(
-            _evidence(query, "osint_ct_dns_name", name, "certificate_transparency", capture, f"names/{index}", observed_at)
+            _evidence(query, "osint_ct_dns_name", name, "certificate_transparency", capture, f"names/{index}", observed_at, match_level)
         )
     return {**base, "status": "ok", "reason": None, "evidence": evidence}
 
@@ -819,6 +853,11 @@ class OsintAdapter:
 
         digest = _target_digest(query, normalized)
         per_source: dict[str, dict[str, Any]] = {}
+        # RDAP/CT query the registrable parent: their evidence is EXACT
+        # only when the observable IS the registrable domain, GENERIC
+        # otherwise (review PR #21 blocker 3). ThreatFox/DNS always query
+        # the exact normalized observable and stay EXACT.
+        parent_level = "EXACT" if normalized == (registrable or normalized) else "GENERIC"
 
         def _budget(source_timeout: float) -> float:
             return max(0.0, min(source_timeout, osint_deadline - self._clock()))
@@ -854,7 +893,7 @@ class OsintAdapter:
                 else:
                     per_source["rdap"] = _lookup_rdap(
                         query, normalized, kind, registrable, budget, context,
-                        digest, self._http_get, self._clock,
+                        digest, self._http_get, self._clock, parent_level,
                     )
         if "dns" in sources:
             budget = _budget(float(self._config.dns_timeout_s))
@@ -888,6 +927,7 @@ class OsintAdapter:
                     per_source["certificate_transparency"] = _lookup_ct(
                         query, registrable, budget, int(self._config.max_ct_response_bytes),
                         int(self._config.max_ct_names), context, digest, self._http_get,
+                        parent_level,
                     )
 
         # --- aggregate (§21) -------------------------------------------------

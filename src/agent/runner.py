@@ -585,6 +585,7 @@ def run_agentic_email(
             mode="live",
             clock=clock,
             limits=limits,
+            profile=profile,
         )
         agent_client = client
         if agent_client is None:
@@ -751,7 +752,7 @@ def run_agentic_email(
             final_source="final_llm" if assessment is not None else "none",
             parser_error=parse_error is not None,
             llm_error=llm_error,
-            tool_results=enrichment,
+            tool_results=combined_results,
             admissible_confirmation=admissible,
             confirmation_contradicted=contradicted,
         ),
@@ -796,10 +797,13 @@ def run_agentic_email(
     # T19D-OSINT §27.1: effective capabilities = the configuration ACTIVE
     # for THIS run (profile ∧ Settings ∧ tool config). Never the verdict,
     # never whether Qwen called a tool, never a provider hit.
+    # rag_index_fingerprint is systematically null: no stable index
+    # fingerprint is available independently of the retrieval result, and
+    # deriving it from returned neighbours would make the runtime contract
+    # vary with the email content instead of the active configuration
+    # (review PR #21 blocker 5). rag=true still reports the active RAG
+    # preprocessing exactly like rag_info.enabled.
     rag_index_fingerprint: str | None = None
-    if rag_info.enabled and rag_info.cases:
-        candidate_fp = rag_info.cases[0].embedding_model_id
-        rag_index_fingerprint = candidate_fp if isinstance(candidate_fp, str) else None
     effective_capabilities = {
         "rag": bool(rag_info.enabled),
         "rag_index_fingerprint": rag_index_fingerprint,
