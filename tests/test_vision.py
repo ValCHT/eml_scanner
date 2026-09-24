@@ -937,3 +937,213 @@ def test_no_shell_browser_or_http_side_effect_in_the_whole_path(
         parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed), qr_enabled=True
     )
     qr_contract(bundle.visuals)
+
+
+# ---------------------------------------------------------------------------
+# TICKET-20 — HTML-embedded images through the EXISTING Vision pipeline
+#
+# Same module, same limits, same QR decoder, same envelope contract: the
+# only difference is where the bytes came from (an <img src="data:...">
+# blob decoded by the parser instead of a MIME part). Offline only.
+# ---------------------------------------------------------------------------
+
+
+def _eml_with_html(html_body: str) -> bytes:
+    return (
+        "From: Sender <sender@example.org>\r\n"
+        "To: Analyst <analyst@example.test>\r\n"
+        "Subject: controlled T20 html fixture\r\n"
+        "MIME-Version: 1.0\r\n"
+        'Content-Type: text/html; charset="utf-8"\r\n'
+        "\r\n" + html_body
+    ).encode("utf-8")
+
+
+def _parsed_html(html_body: str) -> tuple[ParsedEmail, bytes]:
+    eml = _eml_with_html(html_body)
+    parsed = parse_bytes(eml, "rfc822", ParseLimits())
+    assert isinstance(parsed, ParsedEmail), parsed
+    return parsed, eml
+
+
+def _embedded_src(mime: str, data: bytes) -> str:
+    return f'src="data:{mime};base64,{base64.b64encode(data).decode("ascii")}"'
+
+
+def test_t20_09_embedded_png_staged_with_exact_pixels_and_id() -> None:
+    """T20-09: Vision ON really attaches the embedded pixels (one exact id)."""
+
+    png = _fixture("benign_banner.png")
+    parsed, eml = _parsed_html(f'<img alt="b" {_embedded_src("image/png", png)}>')
+    assert len(parsed.images) == 1
+    visual_id = parsed.images[0].id
+    image_bytes = load_image_bytes(eml, parsed)
+    assert set(image_bytes) == {parsed.images[0].part_id}
+    bundle = prepare_visual_bundle(parsed, VISION_LIMITS, image_bytes=image_bytes)
+    assert [visual.status for visual in bundle.visuals] == ["supplied_to_model"]
+    staged = bundle.staged[0]
+    assert staged.visual_id == visual_id
+    assert staged.derived_sha256 == staged.sha256 == hashlib.sha256(png).hexdigest()
+    assert base64.b64decode(staged.data_uri.split(",", 1)[1]) == png
+
+    messages, envelope = build_internal_messages(parsed, ContextLimits(), bundle.staged)
+    assert envelope["SUPPLIED_VISUAL_IDS"] == [visual_id]
+    user_content = messages[1]["content"]
+    assert isinstance(user_content, list)
+    assert [part["type"] for part in user_content] == ["text", "image_url"]
+    data_uri = user_content[1]["image_url"]["url"]
+    assert data_uri.startswith("data:image/png;base64,")
+    assert base64.b64decode(data_uri.split(",", 1)[1]) == png
+
+
+def test_t20_10_vision_off_keeps_placeholder_and_sends_no_pixel() -> None:
+    """T20-10: no image_url, SUPPLIED_VISUAL_IDS=[], HTML cleaned anyway."""
+
+    png = _fixture("benign_banner.png")
+    payload = base64.b64encode(png).decode("ascii")
+    parsed, eml = _parsed_html(f'<img {_embedded_src("image/png", png)}>')
+    disabled = VISION_LIMITS.model_copy(update={"enabled": False})
+    bundle = prepare_visual_bundle(
+        parsed, disabled, image_bytes=load_image_bytes(eml, parsed)
+    )
+    assert [visual.status for visual in bundle.visuals] == ["metadata_only"]
+    assert bundle.staged == ()
+    assert bundle.supplied_ids == []
+
+    messages, envelope = build_internal_messages(parsed, ContextLimits())
+    assert envelope["SUPPLIED_VISUAL_IDS"] == []
+    assert isinstance(messages[1]["content"], str)  # text-only form
+    serialized = json.dumps(envelope, ensure_ascii=False)
+    assert payload not in serialized  # no Base64 blob in the envelope
+    assert "[embedded-image:" in serialized  # compact deterministic reference
+    assert "data:image" not in json.dumps(messages)
+
+
+def test_t20_08_qr_in_embedded_html_image_reuses_the_existing_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T20-08: the same decode_qr / qr_contract path, zero network."""
+
+    import socket
+
+    def _forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("network/shell side effect attempted during embedded QR handling")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+    monkeypatch.setattr(socket.socket, "connect", _forbidden, raising=False)
+    monkeypatch.setattr(socket, "create_connection", _forbidden, raising=False)
+    monkeypatch.setattr(subprocess.Popen, "__init__", _forbidden, raising=False)
+
+    parsed, eml = _parsed_html(f'<img {_embedded_src("image/png", _fixture("qr_https.png"))}>')
+    disabled = VISION_LIMITS.model_copy(update={"enabled": False})
+    bundle = prepare_visual_bundle(
+        parsed, disabled, image_bytes=load_image_bytes(eml, parsed), qr_enabled=True
+    )
+    assert [visual.qr_payloads for visual in bundle.visuals] == [
+        ["https://qr.example.com/verify?id=42"]
+    ]
+    assert bundle.staged == ()  # text+QR: payloads without any pixel
+    links, observables, evidence = qr_contract(bundle.visuals)
+    assert [link.role for link in links] == ["qr_url"]
+    assert [link.raw_value for link in links] == ["https://qr.example.com/verify?id=42"]
+    assert all(observable.provenance == "INTERNE" for observable in observables)
+    assert {entry.predicate for entry in evidence} == {"qr_payload", "url_found"}
+    assert all(entry.provenance == "INTERNE" for entry in evidence)
+
+
+def test_t20_06_embedded_image_over_4mib_is_over_limit_without_pixels() -> None:
+    """T20-06: the frozen 4 MiB per-image limit applies before any decode."""
+
+    big = b"\x89PNG\r\n\x1a\n" + b"x" * 4_200_000  # declared PNG, over 4 MiB
+    parsed, eml = _parsed_html(f'<img {_embedded_src("image/png", big)}>')
+    assert len(parsed.images) == 1  # parser metadata-only state, bounded
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed)
+    )
+    assert [visual.status for visual in bundle.visuals] == ["over_limit"]
+    assert bundle.staged == ()
+    assert bundle.supplied_ids == []
+
+
+def test_t20_07_embedded_images_keep_document_order_and_vision_cap() -> None:
+    """T20-07: HTML order preserved; the existing max_images cap still applies."""
+
+    png = _fixture("benign_banner.png")
+    jpeg = _fixture("benign_photo.jpeg")
+    html = "".join(
+        f'<img {_embedded_src("image/png" if index % 2 == 0 else "image/jpeg", png if index % 2 == 0 else jpeg)}>'
+        for index in range(5)
+    )
+    parsed, eml = _parsed_html(html)
+    assert [visual.part_id for visual in parsed.images] == [
+        f"part_0001:img{index}" for index in range(5)
+    ]
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed)
+    )
+    assert [visual.status for visual in bundle.visuals] == [
+        "supplied_to_model",
+        "supplied_to_model",
+        "supplied_to_model",
+        "supplied_to_model",
+        "over_limit",
+    ]
+    assert [staged.visual_id for staged in bundle.staged] == [
+        visual.id for visual in parsed.images[:4]
+    ]
+
+
+def test_t20_cap_never_leaks_supported_base64_into_the_envelope() -> None:
+    """PR #22-1: beyond the parser cap, no supported blob stays as text."""
+
+    tiny_png = _solid_png(1, 1)  # valid, small, decodable
+    html = "".join(f'<img {_embedded_src("image/png", tiny_png)}>' for _ in range(65))
+    parsed, eml = _parsed_html(html)
+    assert len(parsed.images) == 64  # extraction bounded
+    assert "max_html_embedded_images" in parsed.content_limits
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed)
+    )
+    assert len(bundle.staged) == VISION_LIMITS.max_images  # staged pixels bounded
+    _, envelope = build_internal_messages(parsed, ContextLimits())
+    serialized = json.dumps(envelope, ensure_ascii=False)
+    assert "base64," not in serialized  # no supported blob in the LLM context
+    assert "data:image" not in serialized
+    assert serialized.count("[embedded-image:over-limit]") == 1
+    assert serialized.count("[embedded-image:vis_") == 64
+
+
+def test_t20_11_embedded_injection_image_is_pixels_only_never_ocr() -> None:
+    """T20-11: hostile pixels are staged as pixels; no OCR, no instruction."""
+
+    hostile = _fixture("prompt_injection_image.png")
+    parsed, eml = _parsed_html(f'<img {_embedded_src("image/png", hostile)}>')
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed), qr_enabled=True
+    )
+    assert [visual.status for visual in bundle.visuals] == ["supplied_to_model"]
+    assert bundle.staged[0].visual_id == parsed.images[0].id
+    assert parsed.text_parts == []  # no text was invented from the pixels
+
+    messages, envelope = build_internal_messages(parsed, ContextLimits(), bundle.staged)
+    assert "IGNORE SYSTEM PROMPT" not in messages[0]["content"]
+    assert "IGNORE SYSTEM PROMPT" not in messages[1]["content"][0]["text"]
+    assert "IGNORE SYSTEM PROMPT" not in json.dumps(envelope)
+    # The pixels themselves are still really attached to the call.
+    assert messages[1]["content"][1]["type"] == "image_url"
+
+
+def test_t20_05_embedded_forbidden_type_never_supplied_to_model() -> None:
+    """T20-05: an embedded SVG never reaches the model as an image."""
+
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='4' height='4'/></svg>"
+    parsed, eml = _parsed_html(f'<img {_embedded_src("image/svg+xml", svg)}>')
+    assert parsed.images == []
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed)
+    )
+    assert bundle.visuals == []
+    assert bundle.staged == ()
+    messages, envelope = build_internal_messages(parsed, ContextLimits())
+    assert envelope["SUPPLIED_VISUAL_IDS"] == []
+    assert "image_url" not in json.dumps(messages)

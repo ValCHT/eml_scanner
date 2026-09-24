@@ -2,9 +2,16 @@
 
 Extracts headers (preserving repetitions and order), text/HTML bodies, links
 (href / visible URL / form action / remote resource as distinct roles),
-attachments with hashes over decoded bytes, image metadata (never decoded at
-runtime), and authentication observations reported as ``reported_unverified``
-by default.
+attachments with hashes over decoded bytes, image metadata (never
+pixel-decoded at runtime), and authentication observations reported as
+``reported_unverified`` by default.
+
+TICKET-20: ``<img src="data:image/png|jpeg;base64,...">`` blobs of an HTML
+part are base64-decoded locally (never written to disk, never fetched) and
+represented as ``VisualEvidence`` exactly like MIME images; the projected
+HTML keeps a compact deterministic ``[embedded-image:<visual id>]``
+placeholder instead of the blob. Pixel decoding, format detection, limits
+and staging stay exclusively in ``src/vision.py``.
 
 Limits of docs/architecture.md §1.5 (25 MiB email, 200 MIME parts, depth 20,
 20 attachments, 20 MiB decoded per part, 40 MiB decoded total) are enforced;
@@ -19,11 +26,13 @@ exception. The LLM projection is not created here.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import ipaddress
 import json
 import re
+from collections.abc import Collection, Iterator
 from email import message_from_bytes
 from email.message import Message
 from email.utils import getaddresses
@@ -187,6 +196,30 @@ _SRC_ACTION_RE = re.compile(
 )
 _PLAIN_URL_RE = re.compile(r"(?<![\w.])https?://[^\s<>\"']+")
 
+# TICKET-20: embedded HTML images. Only an ``<img src>`` data URI with a
+# declared PNG/JPEG type and a ``;base64`` payload is recognized; SVG, GIF,
+# remote (http/https), cid: and every other source keeps the existing
+# behavior. Attribute scanning is quote-aware (see ``_iter_img_src_values``):
+# a ``src=`` written inside another quoted attribute value or a ``data-src``
+# attribute is never a real ``src``.
+_IMG_TAG_START_RE = re.compile(r"<img\b", re.IGNORECASE)
+_DATA_IMAGE_RE = re.compile(r"data:image/(png|jpeg|jpg);base64,", re.IGNORECASE)
+_BASE64_WHITESPACE_RE = re.compile(r"[ \t\r\n\f\v]+")
+
+#: ASCII whitespace separating HTML attributes (never Unicode whitespace).
+_ATTR_WS = " \t\r\n\f"
+
+#: TICKET-20: deterministic parser-side bound on recognized embedded HTML
+#: images per email. The frozen Vision limits (max_images, bytes, pixels)
+#: decide which images are actually staged; this bound only prevents a
+#: crafted HTML part from producing an unbounded number of VisualEvidence
+#: records. Beyond it, supported blobs are still replaced by this compact
+#: deterministic placeholder — never decoded, never staged, never sent as
+#: Base64 text — and the limit is recorded in content_limits.
+_MAX_HTML_EMBEDDED_IMAGES = 64
+_LIMIT_HTML_IMAGES = "max_html_embedded_images"
+_OVER_LIMIT_PLACEHOLDER = "[embedded-image:over-limit]"
+
 
 def _unescape_attr(raw: str) -> tuple[str, bool]:
     """Decode HTML entities exactly once; report whether a decode happened."""
@@ -218,13 +251,22 @@ def _extract_plain_urls(text: str, part_id: str) -> list[Link]:
     return links
 
 
-def _extract_html_links(html_text: str, part_id: str) -> list[Link]:
+def _extract_html_links(
+    html_text: str,
+    part_id: str,
+    embedded_image_values: Collection[str] = frozenset(),
+) -> list[Link]:
     """Extract href / form action / remote resource / visible URL roles.
 
     ``href`` and ``display`` are kept separately; the mismatch flag compares
     only explicitly visible hosts, never a generic "click here" text.
     HTML entities are decoded exactly once (recorded as a transformation).
     No network happens.
+
+    ``embedded_image_values`` carries the exact ``<img src>`` values already
+    handled by TICKET-20 (replaced by a placeholder): those are never remote
+    resources. Every other ``data:`` URI — unsupported type, form action,
+    value written inside another attribute — keeps the pre-T20 behavior.
     """
 
     links: list[Link] = []
@@ -263,6 +305,17 @@ def _extract_html_links(html_text: str, part_id: str) -> list[Link]:
         raw_value = next(g for g in attr_m.groups()[1:] if g is not None)
         if not raw_value:
             continue
+        if (
+            tag_m.group(1).lower() == "img"
+            and attr_m.group(1).lower() == "src"
+            and raw_value in embedded_image_values
+        ):
+            # TICKET-20: this exact supported PNG/JPEG/JPG ``<img src>`` value
+            # was extracted as VisualEvidence (or replaced by the compact
+            # over-limit placeholder) and must never re-enter the model
+            # context as a remote resource. Every other data: URI keeps the
+            # pre-T20 behavior.
+            continue
         role = "form_action" if attr_m.group(1).lower() == "action" else "remote_resource"
         _add(raw_value, role)
 
@@ -295,6 +348,210 @@ def _extract_html_links(html_text: str, part_id: str) -> list[Link]:
 
 
 # ---------------------------------------------------------------------------
+# TICKET-20: embedded HTML images (data:image/png|jpeg;base64,...)
+# ---------------------------------------------------------------------------
+
+
+def _embedded_image_visual(
+    mime_type: str,
+    payload: bytes | None,
+    html_part_id: str,
+    index: int,
+    state: _WalkState,
+) -> VisualEvidence:
+    """VisualEvidence for ONE recognized ``data:image`` blob of an HTML part.
+
+    Deterministic identity: HTML part id, position of the image in that part,
+    SHA-256 of the decoded bytes and declared MIME type (TICKET-20 §10). The
+    synthetic ``part_id`` ``<html part id>:img<index>`` is the byte-extraction
+    key shared with :func:`extract_image_parts` and ``src/vision.py``; the
+    parser's metadata-only contract is unchanged (bytes are retained only when
+    the bounded extraction helper explicitly asks for them). An undecodable
+    Base64 payload becomes a typed ``unavailable`` visual (no bytes, no hash)
+    — never a crash and never a valid image.
+    """
+
+    image_id = f"{html_part_id}:img{index}"
+    if payload is None:
+        state.defects.append(f"{image_id}: embedded image base64 decode error")
+        digest, status = "", "unavailable"
+    else:
+        size = len(payload)
+        over_part = size > state.limits.max_decoded_bytes_per_part
+        if over_part:
+            state.limits_hit.append(_LIMIT_DECODED_PART)
+            state.defects.append(f"{image_id}: embedded image over per-part limit")
+        _count_decoded(state, size)
+        if over_part or state.aborted:
+            state.defects.append(f"{image_id}: embedded image not accepted (decode limit)")
+            digest, status = "", "over_limit"
+        else:
+            digest, status = hashlib.sha256(payload).hexdigest(), "metadata_only"
+            if state.keep_image_bytes:
+                state.image_bytes[image_id] = payload
+    return VisualEvidence(
+        id=_det_id("vis", html_part_id, "html_embedded", index, digest, mime_type),
+        sha256=digest,
+        mime_type=mime_type,
+        provenance="INTERNE",
+        part_id=image_id,
+        content_id=None,
+        local_ref=f"html:{image_id}",
+        status=status,  # type: ignore[assignment]
+    )
+
+
+def _iter_img_src_values(html_text: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(start, end, value)`` of every REAL ``src`` attribute value of
+    an ``<img>`` tag, in document order (TICKET-20).
+
+    Minimal quote-aware attribute scan, no HTML tree and no document rewrite:
+
+    - a tag ends at the first ``>`` outside a quoted attribute value, so a
+      real ``src`` is still found when another quoted attribute contains
+      ``>``;
+    - an attribute name is recognized only at an attribute boundary, so a
+      ``src=`` written inside another quoted value (e.g.
+      ``alt="foo src='...'"``) or a ``data-src`` attribute never yields a
+      value;
+    - only the exact value span is reported, so callers can replace it
+      minimally (quotes and every other character are preserved).
+    """
+
+    length = len(html_text)
+    position = 0
+    while True:
+        tag_m = _IMG_TAG_START_RE.search(html_text, position)
+        if tag_m is None:
+            return
+        cursor = tag_m.end()
+        quote: str | None = None
+        while cursor < length:
+            char = html_text[cursor]
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in "\"'":
+                quote = char
+            elif char == ">":
+                break
+            cursor += 1
+        tag_end = cursor  # index of the closing '>' (or end of text)
+        if tag_end >= length:
+            return  # unterminated tag: nothing more can be scanned
+        pos = tag_m.end()
+        while pos < tag_end:
+            if html_text[pos] in _ATTR_WS:
+                pos += 1
+                continue
+            if html_text[pos] == "/":  # self-closing marker
+                pos += 1
+                continue
+            name_start = pos
+            while pos < tag_end and html_text[pos] not in _ATTR_WS + "/=":
+                pos += 1
+            name = html_text[name_start:pos].lower()
+            while pos < tag_end and html_text[pos] in _ATTR_WS:
+                pos += 1
+            if pos >= tag_end or html_text[pos] != "=":
+                continue  # valueless attribute
+            pos += 1
+            while pos < tag_end and html_text[pos] in _ATTR_WS:
+                pos += 1
+            if pos < tag_end and html_text[pos] in "\"'":
+                closing = html_text[pos]
+                value_start = pos + 1
+                value_end = html_text.find(closing, value_start)
+                if value_end == -1 or value_end > tag_end:
+                    value_end = tag_end
+                pos = value_end + 1
+            else:
+                value_start = pos
+                while pos < tag_end and html_text[pos] not in _ATTR_WS:
+                    pos += 1
+                value_end = pos
+            if name == "src":
+                yield value_start, value_end, html_text[value_start:value_end]
+        position = tag_end + 1
+
+
+def _extract_html_embedded_images(
+    html_text: str, part_id: str, state: _WalkState
+) -> tuple[str, list[VisualEvidence], set[str]]:
+    """Extract ``<img src="data:image/png|jpeg;base64,...">`` blobs (TICKET-20).
+
+    Returns ``(projected_html, visuals, handled_values)``. Only real
+    ``<img src>`` data URIs with a declared PNG/JPEG type (``image/jpg``
+    accepted as an alias of ``image/jpeg``) and a ``;base64`` payload are
+    recognized, in document order, through a quote-aware attribute scan
+    (:func:`_iter_img_src_values`). Each blob is decoded locally (never
+    written to disk, never fetched); its exact ``src`` value is replaced by
+    the compact deterministic placeholder ``[embedded-image:<visual id>]``
+    while the rest of the tag, the ``alt`` attribute, the surrounding text
+    and the document order are preserved. Beyond
+    ``_MAX_HTML_EMBEDDED_IMAGES`` recognized images, supported blobs are NOT
+    decoded nor represented as visuals, but they are still replaced by the
+    compact deterministic ``[embedded-image:over-limit]`` placeholder: a
+    supported Base64 blob never reaches the model as text. Duplicated blobs
+    produce separate deterministic references with the same SHA-256 (no
+    global dedup cache). Every other MIME type (SVG, GIF, …) is ignored as a
+    Vision image and keeps the existing behavior. ``handled_values`` contains
+    the exact replaced values so the links registry can suppress them without
+    touching any other ``data:`` URI. Deterministic on the input text; no
+    OCR, no browser, no network, no second pipeline.
+    """
+
+    visuals: list[VisualEvidence] = []
+    handled_values: set[str] = set()
+    replacements: list[tuple[int, int, str]] = []
+
+    for value_start, value_end, value in _iter_img_src_values(html_text):
+        prefix = _DATA_IMAGE_RE.match(value)
+        if not prefix:
+            continue
+        handled_values.add(value)
+        if state.html_images >= _MAX_HTML_EMBEDDED_IMAGES:
+            if _LIMIT_HTML_IMAGES not in state.limits_hit:
+                state.limits_hit.append(_LIMIT_HTML_IMAGES)
+                state.defects.append(
+                    f"{part_id}: embedded HTML image count over limit; "
+                    "further blobs replaced, never decoded"
+                )
+            # Blocker PR #22-1: the supported blob never stays as text.
+            replacements.append((value_start, value_end, _OVER_LIMIT_PLACEHOLDER))
+            continue
+        subtype = prefix.group(1).lower()
+        mime_type = "image/jpeg" if subtype in ("jpeg", "jpg") else "image/png"
+        try:
+            payload = base64.b64decode(
+                _BASE64_WHITESPACE_RE.sub("", value[prefix.end() :]), validate=True
+            )
+        except (ValueError, TypeError):
+            payload = None
+        visual = _embedded_image_visual(
+            mime_type, payload, part_id, state.html_images, state
+        )
+        state.html_images += 1
+        visuals.append(visual)
+        replacements.append(
+            (value_start, value_end, f"[embedded-image:{visual.id}]")
+        )
+
+    if not replacements:
+        return html_text, visuals, handled_values
+    # Minimal replacement of the exact src value spans only (document order,
+    # non-overlapping): everything else in the document is byte-preserved.
+    chunks: list[str] = []
+    cursor = 0
+    for start, end, replacement in replacements:
+        chunks.append(html_text[cursor:start])
+        chunks.append(replacement)
+        cursor = end
+    chunks.append(html_text[cursor:])
+    return "".join(chunks), visuals, handled_values
+
+
+# ---------------------------------------------------------------------------
 # MIME walk
 # ---------------------------------------------------------------------------
 
@@ -316,6 +573,8 @@ class _WalkState:
         # metadata-only contract: no bytes are ever retained by parse_bytes.
         self.keep_image_bytes = keep_image_bytes
         self.image_bytes: dict[str, bytes] = {}
+        # TICKET-20: recognized embedded HTML images so far (bounded walk).
+        self.html_images = 0
         self.aborted = False
 
 
@@ -411,11 +670,24 @@ def _walk(
 
     if content_type in ("text/plain", "text/html"):
         text, charset, defects, over = _decode_text_part(message, state, my_id)
+        projected = text
+        embedded: list[VisualEvidence] = []
+        embedded_values: set[str] = set()
+        if content_type == "text/html" and not over:
+            # TICKET-20: data:image blobs become VisualEvidence; the projected
+            # HTML keeps a compact deterministic placeholder instead of the
+            # Base64 blob. Over-limit content is never exploited (unchanged).
+            # Links are extracted from the ORIGINAL text: the placeholder
+            # never becomes a fake remote resource, and only the exact values
+            # handled here are suppressed from the links registry.
+            projected, embedded, embedded_values = _extract_html_embedded_images(
+                text, my_id, state
+            )
         part = TextPart(
             part_id=my_id,
             mime_type=content_type,
             charset=charset,
-            text=text,
+            text=projected,
             decode_defects=defects,
         )
         # Content over a limit is never kept nor exploited: the part is not
@@ -428,8 +700,9 @@ def _walk(
             text_parts.append(part)
             links.extend(_extract_plain_urls(text, my_id))
         else:
+            state.images.extend(embedded)
             html_parts.append(part)
-            links.extend(_extract_html_links(text, my_id))
+            links.extend(_extract_html_links(text, my_id, embedded_values))
         return
 
     if content_type == "message/rfc822":
@@ -1041,10 +1314,13 @@ def extract_image_parts(
     Bounded loading of the bytes of images ``parse_bytes`` accepted as
     metadata_only visuals: the same deterministic walk, the same part
     numbering, the same decode limits — so ``part_id`` keys always match
-    ``ParsedEmail.images``. The parser itself keeps its metadata-only
-    contract (this helper is only called by the Vision capability, at the
-    authorized call, and its result never enters the state). No network,
-    no interpretation; Vision limits are re-enforced by ``src/vision.py``
+    ``ParsedEmail.images``. TICKET-20: images embedded in HTML as
+    ``data:image/png|jpeg;base64`` blobs are included under their synthetic
+    deterministic part ids (``<html part id>:img<index>``), decoded from the
+    same bounded walk. The parser itself keeps its metadata-only contract
+    (this helper is only called by the Vision capability, at the authorized
+    call, and its result never enters the state). No network, no
+    interpretation; Vision limits are re-enforced by ``src/vision.py``
     before any expensive processing.
     """
 
