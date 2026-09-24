@@ -30,7 +30,10 @@ Public contracts (docs/contracts.md §2.7.3):
   never persisted in state (docs/contracts.md §2.2: the state carries
   references and fingerprints only).
 - ``extract_image_parts`` (src/parsing.py) loads image bytes from the MIME
-  tree at the authorized call, keyed by the parser's own part ids.
+  tree at the authorized call, keyed by the parser's own part ids; TICKET-20
+  HTML-embedded ``data:image/png|jpeg;base64`` blobs are included under their
+  synthetic parser part ids (``<html part id>:img<index>``), so this module
+  enforces the same limits on them with no second pipeline.
 
 Security invariants:
 
