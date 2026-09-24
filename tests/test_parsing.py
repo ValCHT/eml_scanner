@@ -870,7 +870,10 @@ def test_t20_04_invalid_base64_is_typed_unavailable_never_a_crash():
 
 
 def test_t20_05_forbidden_data_types_never_become_images():
-    """T20-05: SVG/GIF/other data types are ignored as Vision images."""
+    """T20-05: SVG/GIF/other data types are ignored as Vision images.
+
+    PR #22-3: non-target data: URIs keep their pre-T20 link behavior.
+    """
 
     svg_payload = _b64(b"<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>")
     gif_payload = _b64(b"GIF89a\x01\x00\x01\x00\x00\x00\x00;")
@@ -885,9 +888,73 @@ def test_t20_05_forbidden_data_types_never_become_images():
     assert result.images == []  # never a Vision image
     text = result.html_parts[0].text
     assert svg_payload in text and gif_payload in text  # untouched, inert text
-    # data: URIs are inline content, never a remote_resource link.
-    assert all("data:" not in link.raw_value for link in result.links)
+    # Pre-T20 behavior preserved: an unsupported data URI is still a remote
+    # resource link, exactly as before TICKET-20.
+    links = {(link.role, link.raw_value) for link in result.links}
+    assert ("remote_resource", f"data:image/svg+xml;base64,{svg_payload}") in links
+    assert ("remote_resource", f"data:image/gif;base64,{gif_payload}") in links
+    assert ("remote_resource", f"data:text/html;base64,{text_payload}") in links
     assert extract_image_parts(_html_email(html), ParseLimits()) == {}
+
+
+def test_t20_attribute_boundaries_are_respected():
+    """PR #22-2: only a REAL ``<img src>`` is recognized.
+
+    A ``src=`` written inside another quoted attribute (or a ``data-src``
+    attribute) never creates a VisualEvidence and is never replaced; a real
+    ``src`` is still found when another quoted attribute contains ``>``.
+    """
+
+    payload = _b64(b"x")
+    # A src written inside alt: not a real attribute.
+    sneaky = f'<img alt="foo src=\'data:image/png;base64,{payload}\'">'
+    result = parse_bytes(_html_email(sneaky), "rfc822", ParseLimits())
+    assert isinstance(result, ParsedEmail)
+    assert result.images == []
+    assert result.html_parts[0].text == sneaky  # byte-preserved
+
+    # data-src is not the real src.
+    data_src = f'<img data-src="data:image/png;base64,{payload}" alt="x">'
+    result = parse_bytes(_html_email(data_src), "rfc822", ParseLimits())
+    assert isinstance(result, ParsedEmail)
+    assert result.images == []
+    assert result.html_parts[0].text == data_src
+
+    # A real src is still found when another quoted attribute contains ">".
+    png = (_VISION_FIXTURES / "benign_banner.png").read_bytes()
+    real = f'<img alt="a > b" src="data:image/png;base64,{_b64(png)}">'
+    result = parse_bytes(_html_email(real), "rfc822", ParseLimits())
+    assert isinstance(result, ParsedEmail)
+    assert len(result.images) == 1
+    projected = result.html_parts[0].text
+    assert 'alt="a > b"' in projected
+    assert f'src="[embedded-image:{result.images[0].id}]"' in projected
+
+
+def test_t20_link_suppression_scope_is_restricted_to_handled_srcs():
+    """PR #22-3: only supported ``<img src>`` values handled by T20 are
+    suppressed from the links registry; every other data: URI keeps its
+    pre-T20 behavior."""
+
+    png_payload = _b64((_VISION_FIXTURES / "benign_banner.png").read_bytes())
+    tiny_payload = _b64(b"x")
+    supported = f'<img src="data:image/png;base64,{png_payload}">'
+    unsupported = f'<img src="data:image/gif;base64,{tiny_payload}">'
+    form = f'<form action="data:image/png;base64,{tiny_payload}"></form>'
+    result = parse_bytes(
+        _html_email(supported + unsupported + form), "rfc822", ParseLimits()
+    )
+    assert isinstance(result, ParsedEmail)
+    assert len(result.images) == 1  # only the supported img src
+    links = [(link.role, link.raw_value) for link in result.links]
+    # Supported img src: suppressed, never a remote_resource with the blob.
+    assert all(
+        not (role == "remote_resource" and value.startswith("data:image/png;base64,"))
+        for role, value in links
+    )
+    # Unsupported img src and form action: pre-T20 behavior preserved.
+    assert ("remote_resource", f"data:image/gif;base64,{tiny_payload}") in links
+    assert ("form_action", f"data:image/png;base64,{tiny_payload}") in links
 
 
 def test_t20_06_embedded_image_over_total_budget_is_over_limit():
@@ -986,18 +1053,27 @@ def test_t20_12_hostile_html_text_is_preserved_not_sanitized():
 
 
 def test_t20_embedded_image_count_is_bounded_and_recorded():
-    """A crafted part cannot produce an unbounded number of visuals."""
+    """A crafted part cannot produce unbounded visuals, and PR #22-1: beyond
+    the cap, supported Base64 blobs are still removed from the projected HTML."""
 
-    occurrence = f'<img src="data:image/png;base64,{_b64(b"x")}">'
-    result = parse_bytes(
-        _html_email(occurrence * (_MAX_HTML_EMBEDDED_IMAGES + 1)),
-        "rfc822",
-        ParseLimits(),
-    )
+    payload = _b64(b"x")
+    occurrence = f'<img src="data:image/png;base64,{payload}">'
+    eml = _html_email(occurrence * (_MAX_HTML_EMBEDDED_IMAGES + 1))
+    result = parse_bytes(eml, "rfc822", ParseLimits())
     assert isinstance(result, ParsedEmail)
-    assert len(result.images) == _MAX_HTML_EMBEDDED_IMAGES
+    assert len(result.images) == _MAX_HTML_EMBEDDED_IMAGES  # extraction bounded
     assert "max_html_embedded_images" in result.content_limits
     assert any("count over limit" in defect for defect in result.defects)
+    projected = result.html_parts[0].text
+    # No supported data:image Base64 blob remains in the projected HTML.
+    assert "base64," not in projected
+    assert payload not in projected
+    assert "data:image" not in projected
+    # 64 images represented, the rest replaced by the over-limit placeholder.
+    assert projected.count("[embedded-image:vis_") == _MAX_HTML_EMBEDDED_IMAGES
+    assert projected.count("[embedded-image:over-limit]") == 1
+    # Bytes exist for the 64 represented images only (never for the capped ones).
+    assert len(extract_image_parts(eml, ParseLimits())) == _MAX_HTML_EMBEDDED_IMAGES
 
 
 def test_t20_minimal_replacement_preserves_quoting_and_attributes():

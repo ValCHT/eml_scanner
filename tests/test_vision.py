@@ -1093,6 +1093,26 @@ def test_t20_07_embedded_images_keep_document_order_and_vision_cap() -> None:
     ]
 
 
+def test_t20_cap_never_leaks_supported_base64_into_the_envelope() -> None:
+    """PR #22-1: beyond the parser cap, no supported blob stays as text."""
+
+    tiny_png = _solid_png(1, 1)  # valid, small, decodable
+    html = "".join(f'<img {_embedded_src("image/png", tiny_png)}>' for _ in range(65))
+    parsed, eml = _parsed_html(html)
+    assert len(parsed.images) == 64  # extraction bounded
+    assert "max_html_embedded_images" in parsed.content_limits
+    bundle = prepare_visual_bundle(
+        parsed, VISION_LIMITS, image_bytes=load_image_bytes(eml, parsed)
+    )
+    assert len(bundle.staged) == VISION_LIMITS.max_images  # staged pixels bounded
+    _, envelope = build_internal_messages(parsed, ContextLimits())
+    serialized = json.dumps(envelope, ensure_ascii=False)
+    assert "base64," not in serialized  # no supported blob in the LLM context
+    assert "data:image" not in serialized
+    assert serialized.count("[embedded-image:over-limit]") == 1
+    assert serialized.count("[embedded-image:vis_") == 64
+
+
 def test_t20_11_embedded_injection_image_is_pixels_only_never_ocr() -> None:
     """T20-11: hostile pixels are staged as pixels; no OCR, no instruction."""
 

@@ -32,6 +32,7 @@ import html
 import ipaddress
 import json
 import re
+from collections.abc import Collection, Iterator
 from email import message_from_bytes
 from email.message import Message
 from email.utils import getaddresses
@@ -198,22 +199,26 @@ _PLAIN_URL_RE = re.compile(r"(?<![\w.])https?://[^\s<>\"']+")
 # TICKET-20: embedded HTML images. Only an ``<img src>`` data URI with a
 # declared PNG/JPEG type and a ``;base64`` payload is recognized; SVG, GIF,
 # remote (http/https), cid: and every other source keeps the existing
-# behavior. The lookbehind keeps ``data-src``/``xlink:src`` from being
-# mistaken for the real ``src`` attribute.
-_IMG_SRC_RE = re.compile(
-    r"(?<![\w:-])src\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.IGNORECASE
-)
+# behavior. Attribute scanning is quote-aware (see ``_iter_img_src_values``):
+# a ``src=`` written inside another quoted attribute value or a ``data-src``
+# attribute is never a real ``src``.
+_IMG_TAG_START_RE = re.compile(r"<img\b", re.IGNORECASE)
 _DATA_IMAGE_RE = re.compile(r"data:image/(png|jpeg|jpg);base64,", re.IGNORECASE)
 _BASE64_WHITESPACE_RE = re.compile(r"[ \t\r\n\f\v]+")
+
+#: ASCII whitespace separating HTML attributes (never Unicode whitespace).
+_ATTR_WS = " \t\r\n\f"
 
 #: TICKET-20: deterministic parser-side bound on recognized embedded HTML
 #: images per email. The frozen Vision limits (max_images, bytes, pixels)
 #: decide which images are actually staged; this bound only prevents a
 #: crafted HTML part from producing an unbounded number of VisualEvidence
-#: records. Beyond it, further blobs are not recognized (pre-T20 behavior:
-#: inert text, never pixels) and the limit is recorded in content_limits.
+#: records. Beyond it, supported blobs are still replaced by this compact
+#: deterministic placeholder — never decoded, never staged, never sent as
+#: Base64 text — and the limit is recorded in content_limits.
 _MAX_HTML_EMBEDDED_IMAGES = 64
 _LIMIT_HTML_IMAGES = "max_html_embedded_images"
+_OVER_LIMIT_PLACEHOLDER = "[embedded-image:over-limit]"
 
 
 def _unescape_attr(raw: str) -> tuple[str, bool]:
@@ -246,13 +251,22 @@ def _extract_plain_urls(text: str, part_id: str) -> list[Link]:
     return links
 
 
-def _extract_html_links(html_text: str, part_id: str) -> list[Link]:
+def _extract_html_links(
+    html_text: str,
+    part_id: str,
+    embedded_image_values: Collection[str] = frozenset(),
+) -> list[Link]:
     """Extract href / form action / remote resource / visible URL roles.
 
     ``href`` and ``display`` are kept separately; the mismatch flag compares
     only explicitly visible hosts, never a generic "click here" text.
     HTML entities are decoded exactly once (recorded as a transformation).
     No network happens.
+
+    ``embedded_image_values`` carries the exact ``<img src>`` values already
+    handled by TICKET-20 (replaced by a placeholder): those are never remote
+    resources. Every other ``data:`` URI — unsupported type, form action,
+    value written inside another attribute — keeps the pre-T20 behavior.
     """
 
     links: list[Link] = []
@@ -291,11 +305,16 @@ def _extract_html_links(html_text: str, part_id: str) -> list[Link]:
         raw_value = next(g for g in attr_m.groups()[1:] if g is not None)
         if not raw_value:
             continue
-        if raw_value.lower().startswith("data:"):
-            # TICKET-20: a data: URI is inline content, not a remote resource.
-            # Recognized data:image PNG/JPEG blobs were already replaced by
-            # their compact placeholder and are represented as
-            # VisualEvidence; no Base64 blob ever enters the links registry.
+        if (
+            tag_m.group(1).lower() == "img"
+            and attr_m.group(1).lower() == "src"
+            and raw_value in embedded_image_values
+        ):
+            # TICKET-20: this exact supported PNG/JPEG/JPG ``<img src>`` value
+            # was extracted as VisualEvidence (or replaced by the compact
+            # over-limit placeholder) and must never re-enter the model
+            # context as a remote resource. Every other data: URI keeps the
+            # pre-T20 behavior.
             continue
         role = "form_action" if attr_m.group(1).lower() == "action" else "remote_resource"
         _add(raw_value, role)
@@ -382,53 +401,125 @@ def _embedded_image_visual(
     )
 
 
+def _iter_img_src_values(html_text: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(start, end, value)`` of every REAL ``src`` attribute value of
+    an ``<img>`` tag, in document order (TICKET-20).
+
+    Minimal quote-aware attribute scan, no HTML tree and no document rewrite:
+
+    - a tag ends at the first ``>`` outside a quoted attribute value, so a
+      real ``src`` is still found when another quoted attribute contains
+      ``>``;
+    - an attribute name is recognized only at an attribute boundary, so a
+      ``src=`` written inside another quoted value (e.g.
+      ``alt="foo src='...'"``) or a ``data-src`` attribute never yields a
+      value;
+    - only the exact value span is reported, so callers can replace it
+      minimally (quotes and every other character are preserved).
+    """
+
+    length = len(html_text)
+    position = 0
+    while True:
+        tag_m = _IMG_TAG_START_RE.search(html_text, position)
+        if tag_m is None:
+            return
+        cursor = tag_m.end()
+        quote: str | None = None
+        while cursor < length:
+            char = html_text[cursor]
+            if quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in "\"'":
+                quote = char
+            elif char == ">":
+                break
+            cursor += 1
+        tag_end = cursor  # index of the closing '>' (or end of text)
+        if tag_end >= length:
+            return  # unterminated tag: nothing more can be scanned
+        pos = tag_m.end()
+        while pos < tag_end:
+            if html_text[pos] in _ATTR_WS:
+                pos += 1
+                continue
+            if html_text[pos] == "/":  # self-closing marker
+                pos += 1
+                continue
+            name_start = pos
+            while pos < tag_end and html_text[pos] not in _ATTR_WS + "/=":
+                pos += 1
+            name = html_text[name_start:pos].lower()
+            while pos < tag_end and html_text[pos] in _ATTR_WS:
+                pos += 1
+            if pos >= tag_end or html_text[pos] != "=":
+                continue  # valueless attribute
+            pos += 1
+            while pos < tag_end and html_text[pos] in _ATTR_WS:
+                pos += 1
+            if pos < tag_end and html_text[pos] in "\"'":
+                closing = html_text[pos]
+                value_start = pos + 1
+                value_end = html_text.find(closing, value_start)
+                if value_end == -1 or value_end > tag_end:
+                    value_end = tag_end
+                pos = value_end + 1
+            else:
+                value_start = pos
+                while pos < tag_end and html_text[pos] not in _ATTR_WS:
+                    pos += 1
+                value_end = pos
+            if name == "src":
+                yield value_start, value_end, html_text[value_start:value_end]
+        position = tag_end + 1
+
+
 def _extract_html_embedded_images(
     html_text: str, part_id: str, state: _WalkState
-) -> tuple[str, list[VisualEvidence]]:
+) -> tuple[str, list[VisualEvidence], set[str]]:
     """Extract ``<img src="data:image/png|jpeg;base64,...">`` blobs (TICKET-20).
 
-    Returns ``(projected_html, visuals)``. Only ``<img src>`` data URIs with a
-    declared PNG/JPEG type (``image/jpg`` accepted as an alias of
-    ``image/jpeg``) and a ``;base64`` payload are recognized, in document
-    order. Each blob is decoded locally (never written to disk, never
-    fetched); its exact ``src`` value is replaced by the compact deterministic
-    placeholder ``[embedded-image:<visual id>]`` while the rest of the tag,
-    the ``alt`` attribute, the surrounding text and the document order are
-    preserved. Duplicated blobs produce separate deterministic references
-    with the same SHA-256 (no global dedup cache). Every other MIME type
-    (SVG, GIF, …) is ignored as a Vision image and keeps the existing
-    behavior. Deterministic on the input text; no OCR, no browser, no
-    network, no second pipeline.
+    Returns ``(projected_html, visuals, handled_values)``. Only real
+    ``<img src>`` data URIs with a declared PNG/JPEG type (``image/jpg``
+    accepted as an alias of ``image/jpeg``) and a ``;base64`` payload are
+    recognized, in document order, through a quote-aware attribute scan
+    (:func:`_iter_img_src_values`). Each blob is decoded locally (never
+    written to disk, never fetched); its exact ``src`` value is replaced by
+    the compact deterministic placeholder ``[embedded-image:<visual id>]``
+    while the rest of the tag, the ``alt`` attribute, the surrounding text
+    and the document order are preserved. Beyond
+    ``_MAX_HTML_EMBEDDED_IMAGES`` recognized images, supported blobs are NOT
+    decoded nor represented as visuals, but they are still replaced by the
+    compact deterministic ``[embedded-image:over-limit]`` placeholder: a
+    supported Base64 blob never reaches the model as text. Duplicated blobs
+    produce separate deterministic references with the same SHA-256 (no
+    global dedup cache). Every other MIME type (SVG, GIF, …) is ignored as a
+    Vision image and keeps the existing behavior. ``handled_values`` contains
+    the exact replaced values so the links registry can suppress them without
+    touching any other ``data:`` URI. Deterministic on the input text; no
+    OCR, no browser, no network, no second pipeline.
     """
 
     visuals: list[VisualEvidence] = []
+    handled_values: set[str] = set()
+    replacements: list[tuple[int, int, str]] = []
 
-    def _replace_tag(match: re.Match[str]) -> str:
-        tag = match.group(0)
-        if match.group(1).lower() != "img":
-            return tag
-        attrs = match.group(2)
-        src_m = _IMG_SRC_RE.search(attrs)
-        if not src_m:
-            return tag
-        for group_index in (1, 2, 3):
-            if src_m.group(group_index) is not None:
-                value = src_m.group(group_index)
-                start, end = src_m.start(group_index), src_m.end(group_index)
-                break
-        else:  # pragma: no cover - one alternative always matches
-            return tag
+    for value_start, value_end, value in _iter_img_src_values(html_text):
         prefix = _DATA_IMAGE_RE.match(value)
         if not prefix:
-            return tag
+            continue
+        handled_values.add(value)
         if state.html_images >= _MAX_HTML_EMBEDDED_IMAGES:
             if _LIMIT_HTML_IMAGES not in state.limits_hit:
                 state.limits_hit.append(_LIMIT_HTML_IMAGES)
                 state.defects.append(
                     f"{part_id}: embedded HTML image count over limit; "
-                    "further blobs not extracted"
+                    "further blobs replaced, never decoded"
                 )
-            return tag
+            # Blocker PR #22-1: the supported blob never stays as text.
+            replacements.append((value_start, value_end, _OVER_LIMIT_PLACEHOLDER))
+            continue
         subtype = prefix.group(1).lower()
         mime_type = "image/jpeg" if subtype in ("jpeg", "jpg") else "image/png"
         try:
@@ -442,14 +533,22 @@ def _extract_html_embedded_images(
         )
         state.html_images += 1
         visuals.append(visual)
-        placeholder = f"[embedded-image:{visual.id}]"
-        # Rebuild only this tag: everything outside the exact src value
-        # (quotes, alt, other attributes, document order) is preserved.
-        new_attrs = attrs[:start] + placeholder + attrs[end:]
-        return tag[: len(tag) - len(attrs) - 1] + new_attrs + ">"
+        replacements.append(
+            (value_start, value_end, f"[embedded-image:{visual.id}]")
+        )
 
-    projected = _TAG_RE.sub(_replace_tag, html_text)
-    return projected, visuals
+    if not replacements:
+        return html_text, visuals, handled_values
+    # Minimal replacement of the exact src value spans only (document order,
+    # non-overlapping): everything else in the document is byte-preserved.
+    chunks: list[str] = []
+    cursor = 0
+    for start, end, replacement in replacements:
+        chunks.append(html_text[cursor:start])
+        chunks.append(replacement)
+        cursor = end
+    chunks.append(html_text[cursor:])
+    return "".join(chunks), visuals, handled_values
 
 
 # ---------------------------------------------------------------------------
@@ -573,13 +672,17 @@ def _walk(
         text, charset, defects, over = _decode_text_part(message, state, my_id)
         projected = text
         embedded: list[VisualEvidence] = []
+        embedded_values: set[str] = set()
         if content_type == "text/html" and not over:
             # TICKET-20: data:image blobs become VisualEvidence; the projected
             # HTML keeps a compact deterministic placeholder instead of the
             # Base64 blob. Over-limit content is never exploited (unchanged).
-            # Links are extracted from the ORIGINAL text (data: URIs skipped):
-            # the placeholder never becomes a fake remote resource.
-            projected, embedded = _extract_html_embedded_images(text, my_id, state)
+            # Links are extracted from the ORIGINAL text: the placeholder
+            # never becomes a fake remote resource, and only the exact values
+            # handled here are suppressed from the links registry.
+            projected, embedded, embedded_values = _extract_html_embedded_images(
+                text, my_id, state
+            )
         part = TextPart(
             part_id=my_id,
             mime_type=content_type,
@@ -599,7 +702,7 @@ def _walk(
         else:
             state.images.extend(embedded)
             html_parts.append(part)
-            links.extend(_extract_html_links(text, my_id))
+            links.extend(_extract_html_links(text, my_id, embedded_values))
         return
 
     if content_type == "message/rfc822":
